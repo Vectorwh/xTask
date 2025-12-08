@@ -1,0 +1,28 @@
+{
+    "ENV_config":{
+        "XTaskWeaver_LOG_LEVEL": "INFO",
+        "GLOBAL_LOG_LEVEL": "ERROR",
+        "XLLM_LOG_LEVEL": "INFO",
+        "MINDIE_LOG_LEVEL": "INFO",
+        "VLLM_LOG_LEVEL": "INFO",
+        "CLEAN_RESULTS": "1",
+        "MODEL_HOME_PATH": "",
+        "DATASET_HOME_PATH": "output",
+        "enable_docker": "True",
+        "Profiling": "False",
+        "start_device_id": 0,
+        "LOG_PATH": "logs"
+    },
+    "DOCKER_CONFIG": {
+        "docker_cmd": "docker",
+        "docker_home_path": "/data/",
+        "local_home_path": "/export/home/weinan5/",
+        "enable_proxy": "True",
+        "https_proxy_url": "",
+        "http_proxy_url": "",
+        "sering_container_name": "",
+        "serving_script_path": "",
+        "benchmark_container_name": "",
+        "benchmark_script_path": ""
+    }
+}

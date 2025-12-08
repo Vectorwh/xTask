@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+from xtask.utils.arg_parser import arg_parser
+from xtask.utils.logger import getLogger 
+
 docker pull swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:2.1.RC2-800I-A2-py311-openeuler24.03-lts
 
 sudo docker run -dit --ipc=host -u 0 --name=mindie_2.1_j \
