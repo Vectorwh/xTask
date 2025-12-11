@@ -1,6 +1,6 @@
 {
     "ENV_config":{
-        "XTaskWeaver_LOG_LEVEL": "INFO",
+        "XTask_LOG_LEVEL": "INFO",
         "GLOBAL_LOG_LEVEL": "ERROR",
         "XLLM_LOG_LEVEL": "INFO",
         "MINDIE_LOG_LEVEL": "INFO",
@@ -11,7 +11,8 @@
         "enable_docker": "True",
         "Profiling": "False",
         "start_device_id": 0,
-        "LOG_PATH": "logs"
+        "LOG_PATH": "logs",
+        "Device_type": "A3"
     },
     "DOCKER_CONFIG": {
         "docker_cmd": "docker",
@@ -23,6 +24,15 @@
         "sering_container_name": "",
         "serving_script_path": "",
         "benchmark_container_name": "",
-        "benchmark_script_path": ""
+        "benchmark_script_path": "",
+        "volumes": {
+            "/export/home/models/": "/models",
+            "/export/home/weinan5/jiji6/xTask": "/workspace",
+            "/usr/local/dcmi": "/usr/local/dcmi",
+            "/usr/local/bin/npu-smi": "/usr/local/bin/npu-smi",
+            "/usr/local/Ascend/driver": "/usr/local/Ascend/driver",
+            "/etc/ascend_install.info": "/etc/ascend_install.info",
+            "/root/.cache": "/root/.cache"
+        }
     }
 }

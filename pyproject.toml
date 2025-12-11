@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xtask"
+version = "0.1.0"
+description = "xTask - 任务调度和执行框架"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.21.0",
+    "torch>=1.9.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "flake8"]
+
+[project.scripts]
+xtask-cli = "xtask.main:main"  # 安装后的命令行命令

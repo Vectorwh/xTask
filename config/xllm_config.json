@@ -1,0 +1,12 @@
+{
+    "XLLM_CONFIG": {
+        "xllm_version": "docker",
+        "image_home": "quay.io/jd_xllm/xllm-ai",
+        "default_image_name": "xllm-0.7.1-dev-hc-rc2-arm",
+        "enable_proxy": "False",
+        "https_proxy_url": "",
+        "http_proxy_url": "",
+        "sering_container_name": "",
+        "serving_script_path": ""
+    }
+}
