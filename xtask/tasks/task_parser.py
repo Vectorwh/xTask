@@ -90,7 +90,7 @@ def gen_task_file(args, task_file_path: str):
 
 
 def get_tasks(args):
-    logging.info("entry function: %s"% inspect.currentframe().f_code.co_name)
+    logging.debug("entry function: %s"% inspect.currentframe().f_code.co_name)
     tasks = list()
 
     # init task file path
