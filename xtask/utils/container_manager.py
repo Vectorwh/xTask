@@ -4,6 +4,7 @@ import sys
 import time
 import shlex
 import signal
+import inspect
 import logging
 import subprocess
 import threading
@@ -29,7 +30,7 @@ class ContainerConfig:
     entrypoint: str = None
     command: str = None
     network_mode: str = "host"  # host, bridge, none
-    privileged: bool = False
+    privileged: bool = True
     auto_remove: bool = True
     detach: bool = True
     stdin_open: bool = True  # Keep STDIN open
@@ -185,13 +186,13 @@ class ContainerManager:
         exists = bool(result.stdout.strip())
         
         if exists:
-            logging.info(f"Image '{image_url}' exists locally")
+            logging.debug(f"Image '{image_url}' exists locally")
         else:
-            logging.debug(f"Image '{image_url}' not found locally")
+            logging.warning(f"Image '{image_url}' not found locally")
         
         return exists
     
-    def pull_image(self, image_url: str = None, timeout: int = 600) -> bool:
+    def pull_image(self, image_url: str = None, timeout: int = 1800) -> bool:
         """
         Pull image from registry
         
@@ -221,7 +222,7 @@ class ContainerManager:
             return False
     
     def build_image(self, dockerfile_path: str, image_name: str = None, 
-                   build_args: Dict[str, str] = None, timeout: int = 1800) -> bool:
+                   build_args: Dict[str, str] = None, timeout: int = 3600) -> bool:
         """
         Build image from Dockerfile
         
@@ -312,6 +313,7 @@ class ContainerManager:
         # Add network mode
         if config.network_mode:
             cmd_parts.extend([f"--network={config.network_mode}"])
+            cmd_parts.extend([f"--ipc={config.network_mode}"])
         
         # Add environment variables
         # for key, value in config.environment.items():
@@ -564,6 +566,9 @@ class ContainerManager:
                 stderr=f"Container '{container_name}' does not exist",
                 execution_time=0.0
             )
+        else:
+            logging.debug("[%s] Check %s container is exist" % 
+                          (inspect.currentframe().f_code.co_name, container_name))
 
         if not self.container_is_running(container_name):
             # Try to start the container
@@ -576,6 +581,9 @@ class ContainerManager:
                     stderr=f"Container '{container_name}' is not running and could not be started",
                     execution_time=0.0
                 )
+        else:
+            logging.debug("[%s] Check %s container is running" % 
+                          (inspect.currentframe().f_code.co_name, container_name))
         
         # Build exec command
         exec_parts = [runtime, "exec"]
@@ -601,7 +609,7 @@ class ContainerManager:
         exec_parts.append(container_name)
         
         # Add command
-        exec_parts.extend(["sh", "-c", cmd])
+        exec_parts.extend(["sh", "-c", f"\"{cmd}\""])
         
         # Build command string
         exec_cmd = " ".join(exec_parts)
@@ -872,6 +880,7 @@ class ContainerManager:
     
     def cleanup(self):
         """Cleanup container resources"""
+        logging.debug("entry function: %s" % inspect.currentframe().f_code.co_name)
         if self.config and self.config.container_name:
             logging.info(f"Cleaning up container: {self.config.container_name}")
             
@@ -934,7 +943,7 @@ def create_inference_container(model_config: Dict[str, Any],
         },
         working_dir="/workspace",
         network_mode="host",
-        privileged=False,
+        privileged=True,
         auto_remove=True,
         detach=True
     )

@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, Tuple
 
 from xtask.utils.container_manager import ContainerManager, ContainerConfig
 from xtask.utils.config_parser import get_config_data
+from xtask.serv_fmk.serv_common import wait_serv_start
 
 
 class Json_Reader:
@@ -73,7 +74,7 @@ class Json_Reader:
             "log_dir": "./logs",
             "environment": {
                 "XLLM_VERSION": cfg_data.get("xllm_version", "docker"),
-                "IMAGES_HOME": cfg_data.get("images_home", "xllm/xllm-ai"),
+                "IMAGE_HOME": cfg_data.get("image_home", "xllm/xllm-ai"),
                 "ENABLE_PROXY": cfg_data.get("enable_proxy", "False"),
                 "HTTPS_PROXY": cfg_data.get("https_proxy_url", ""),
                 "HTTP_PROXY": cfg_data.get("http_proxy_url", ""),
@@ -86,11 +87,11 @@ class Json_Reader:
             "benchmark_command": "",  # 基准测试命令（根据任务动态生成）
             "benchmark_timeout": 3600,
             "network_mode": "host",
-            "privileged": False,
+            "privileged": True,
             "auto_remove": False,  # 默认不自动删除，便于调试
             "detach": True,
-            "stdin_open": False,
-            "tty": False
+            "stdin_open": True,
+            "tty": True
         }
         
         # 如果有代理配置，添加到环境变量
@@ -231,11 +232,11 @@ class ContainerConfigBuilder:
             entrypoint=framework_config.get("entrypoint"),
             command=framework_config.get("command"),
             network_mode=framework_config.get("network_mode", "host"),
-            privileged=framework_config.get("privileged", False),
+            privileged=framework_config.get("privileged", True),
             auto_remove=framework_config.get("auto_remove", False),
             detach=True,
-            stdin_open=framework_config.get("stdin_open", False),
-            tty=framework_config.get("tty", False)
+            stdin_open=framework_config.get("stdin_open", True),
+            tty=framework_config.get("tty", True)
         )
         
         logging.info(f"Created container config: {container_name}")
@@ -262,21 +263,25 @@ def generate_commands(
     config_file = f"{work_dir}/config/{os.path.basename(task_yaml_path)}"
     
     # 生成启动命令
-    if framework_config.get("serving_script_path"):
-        # 如果有指定的服务脚本路径
-        startup_cmd = f"cd {work_dir} && python {framework_config['serving_script_path']}"
+    if framework_config.get("framework") == "xllm":
+        from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_serv_commands
+
+        startup_cmd = generate_xllm_serv_commands(task_config, framework_config)
+
+    elif framework_config.get("framework") == "vllm-ascend":
+        from xtask.serv_fmk.vllm_ascend_serv.generate_vllm_ascend_serv \
+            import generate_vllm_ascend_serv_commands
+
+        startup_cmd = generate_vllm_ascend_serv_commands(task_config, framework_config)
+
+    elif framework_config.get("framework") == "mindie":
+        from xtask.serv_fmk.mindie_serv.generate_mindie_serv \
+            import generate_mindie_serv_commands
+
+        startup_cmd = generate_mindie_serv_commands(task_config, framework_config)
+
     else:
-        # 默认的XLLM启动命令
-        startup_cmd = (
-            f"cd {work_dir} && python -m xllm.serve "
-            f"--model {task_config.get('model_path', '')} "
-            f"--served-model-name {task_config.get('model_name', '')} "
-            f"--port {task_config.get('node_port', 14830)} "
-            f"--host {task_config.get('node_addr', '0.0.0.0')} "
-            f"--max-memory-utilization {task_config.get('max_memory_utiliization', 0.9)} "
-            f"--block-size {task_config.get('block_size', 128)} "
-            f"--max-tokens-per-batch {task_config.get('max_tokens_per_batch', 20000)}"
-        )
+        logging.error("framework: %s is invalid."% framework_config.get("framework"))
     
     # 生成基准测试命令
     benchmark_cmd = (
@@ -299,7 +304,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
     Returns:
         执行结果字典
     """
-    logging.info("entry function: %s" % inspect.currentframe().f_code.co_name)
+    logging.debug("entry function: %s" % inspect.currentframe().f_code.co_name)
     
     result = {
         "success": False,
@@ -364,8 +369,18 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             return result
         
         image_url = f"{container_config.image_home}:{container_config.image_name}"
-        # 8. 检查镜像是否存在，不存在则拉取
-        if not container_manager.image_exists(image_url):
+        # 8. 检查指定容器是否已存在
+        if framework_config.get("serving_container_name") and \
+            not container_manager.container_exists(framework_config.get("serving_container_name")):
+
+            logging.info(f"Container {framework_config.get("serving_container_name")} already exists")
+            if container_manager.container_is_running(framework_config.get("serving_container_name")):
+                logging.info(f"Container {framework_config.get("serving_container_name")} is already running")
+                result["container_id"] = framework_config.get("serving_container_name")
+                container_config.container_name = framework_config.get("serving_container_name")
+
+        elif not container_manager.image_exists(image_url):
+            # 8. 检查镜像是否存在，不存在则拉取
             logging.info(f"Image {image_url} not found locally, pulling...")
             
             if not container_manager.pull_image(image_url):
@@ -373,33 +388,33 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
                 logging.error(result["message"])
                 return result
         
-        # 9. 检查容器是否已存在
-        if container_manager.container_exists(container_config.container_name):
-            logging.info(f"Container {container_config.container_name} already exists")
-            
-            if container_manager.container_is_running(container_config.container_name):
-                logging.info(f"Container {container_config.container_name} is already running")
-                result["container_id"] = container_config.container_name
-            else:
-                # 启动已存在的容器
-                logging.info(f"Starting existing container {container_config.container_name}")
-                if container_manager.start_container(container_config.container_name):
+            # 9. 检查容器是否已存在
+            if container_manager.container_exists(container_config.container_name):
+                logging.info(f"Container {container_config.container_name} already exists")
+                
+                if container_manager.container_is_running(container_config.container_name):
+                    logging.info(f"Container {container_config.container_name} is already running")
                     result["container_id"] = container_config.container_name
                 else:
-                    result["message"] = f"Failed to start existing container {container_config.container_name}"
+                    # 启动已存在的容器
+                    logging.info(f"Starting existing container {container_config.container_name}")
+                    if container_manager.start_container(container_config.container_name):
+                        result["container_id"] = container_config.container_name
+                    else:
+                        result["message"] = f"Failed to start existing container {container_config.container_name}"
+                        logging.error(result["message"])
+                        return result
+            else:
+                # 10. 创建并启动新容器
+                logging.info(f"Creating new container: {container_config.container_name}")
+                success, container_id = container_manager.create_container()
+                
+                if not success:
+                    result["message"] = f"Failed to create container: {container_id}"
                     logging.error(result["message"])
                     return result
-        else:
-            # 10. 创建并启动新容器
-            logging.info(f"Creating new container: {container_config.container_name}")
-            success, container_id = container_manager.create_container()
-            
-            if not success:
-                result["message"] = f"Failed to create container: {container_id}"
-                logging.error(result["message"])
-                return result
-            
-            result["container_id"] = container_id
+                
+                result["container_id"] = container_id
         
         # 11. 等待容器就绪
         logging.info(f"Waiting for container {container_config.container_name} to be ready...")
@@ -409,11 +424,11 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             return result
         
         # 12. 复制任务YAML文件到容器
-        container_yaml_path = f"{container_config.working_dir}/config/{os.path.basename(task_yaml_path)}"
+        container_yaml_path = f"{container_config.working_dir}/outputs/{os.path.basename(task_yaml_path)}"
         logging.info(f"Copying task YAML to container: {container_yaml_path}")
         
         if not container_manager.copy_to_container(
-            result["container_id"],
+            container_config.container_name,
             task_yaml_path,
             container_yaml_path
         ):
@@ -437,7 +452,9 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         
         # 14. 等待服务启动
         logging.info("Waiting for service to start...")
-        time.sleep(10)  # 等待10秒让服务启动
+        ret = wait_serv_start(framework)
+        if ret:
+            logging.error(f"{framework} serv startup failed.")
         
         # 15. 检查服务是否运行
         check_cmd = f"curl -s http://{task_config.get('node_addr', '0.0.0.0')}:{task_config.get('node_port', 14830)}/health"
@@ -451,16 +468,27 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             logging.info("Service is healthy and running")
         else:
             result["message"] = f"Service health check failed: {health_result.stderr}"
-            logging.warning(result["message"])
+            logging.error(result["message"])
+
+        # 16. 执行精度测试命令
+        accuracy_cmd = ""
+        logging.info(f"Executing accuracy command: {accuracy_cmd}")
+        if accuracy_cmd:
+            pass
+        else:
+            logging.warning("accuracy_cmd is null, skip accuracy task.")
         
-        # 16. 执行基准测试命令
+        # 17. 执行基准测试命令
         logging.info(f"Executing benchmark command: {benchmark_cmd}")
         
-        benchmark_result = container_manager.exec_in_container(
-            result["container_id"],
-            benchmark_cmd,
-            timeout=framework_config.get("benchmark_timeout", 3600)
-        )
+        if benchmark_cmd:
+            benchmark_result = container_manager.exec_in_container(
+                container_config.container_name,
+                benchmark_cmd,
+                timeout=framework_config.get("benchmark_timeout", 3600)
+            )
+        else:
+            logging.warning("benchmark_cmd is null, skip benchmark task.")
         
         result["benchmark_success"] = benchmark_result.success
         result["benchmark_exit_code"] = benchmark_result.exit_code
@@ -472,11 +500,11 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             result["message"] = f"Benchmark command failed with exit code {benchmark_result.exit_code}"
             logging.error(result["message"])
         
-        # 17. 获取容器日志
+        # 18. 获取容器日志
         logs = container_manager.get_container_logs(result["container_id"], tail=100)
         result["logs"] = logs
         
-        # 18. 标记执行成功
+        # 19. 标记执行成功
         result["success"] = True
         result["message"] = f"Task scheduled successfully in container {result['container_id']}"
         logging.info(result["message"])
@@ -489,7 +517,8 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         # 计算执行时间
         result["execution_time"] = time.time() - start_time
 
-        container_manager.cleanup()
+        if not framework_config.get("serving_container_name"):
+            container_manager.cleanup()
         
         # 记录执行时间
         logging.info(f"Scheduler execution completed in {result['execution_time']:.2f} seconds")
