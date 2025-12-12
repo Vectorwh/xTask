@@ -1,5 +1,5 @@
 # xTask 测试框架
-[![XTask](https://img.shields.io/static/v1?label=dev&message=dev&color=red&style=flat&logo=Python) ![XTask](https://img.shields.io/static/v1?label=author&message=J&color=blue&style=flat&logo=gitee) ![XTask](https://img.shields.io/static/v1?label=email&message=jiji1206@163.com&color=orange&style=flat&logo=microsoft-outlook)
+![XTask](https://img.shields.io/static/v1?label=dev&message=dev&color=red&style=flat&logo=Python) ![XTask](https://img.shields.io/static/v1?label=author&message=J&color=blue&style=flat&logo=gitee) ![XTask](https://img.shields.io/static/v1?label=email&message=jiji1206@163.com&color=orange&style=flat&logo=microsoft-outlook)
 
 
 基于国产芯片推理框架任务流自动化测试框架
