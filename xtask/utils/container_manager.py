@@ -156,7 +156,7 @@ class ContainerManager:
         result = self.run_command(cmd, capture_output=True)
         
         if result.success:
-            logging.info(f"{runtime} is available at: {result.stdout.strip()}")
+            logging.debug(f"{runtime} is available at: {result.stdout.strip()}")
             return True
         else:
             logging.error(f"{runtime} is not available")

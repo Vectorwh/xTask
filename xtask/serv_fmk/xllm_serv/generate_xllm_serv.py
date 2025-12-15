@@ -56,112 +56,41 @@ def generate_single_card_script(config, output_file="xllm_serv_single_card.sh"):
     }
     
     # 读取模板
-    template_path = "xllm_serv_template.sh"
-    if os.path.exists(template_path):
+    if params.get("WORLD_SIZE") == 1:
+        template_path = "xllm_single_card_template.sh"
+    elif 1 < params.get("WORLD_SIZE") < 17:
+        template_path = "xllm_mutil_cards_template.sh"
+    else:
+        template_path = ""
+        logging.error("WORLD_SIZE is: %s is not supported yet."% params.get("WORLD_SIZE"))
+    if template_path:
+        template_path = os.path.join("xtask/serv_fmk/xllm_serv/", template_path)
+        logging.info("template_path is: %s"% template_path)
         with open(template_path, 'r', encoding='utf-8') as f:
             template = f.read()
-    else:
-        # 如果模板不存在，使用硬编码的模板
-        template = """#!/bin/bash
-# 环境变量设置
-export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
-export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
-export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/
-export PYTORCH_INSTALL_PATH="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
-export LIBTORCH_ROOT="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
-export LD_LIBRARY_PATH=/usr/local/libtorch_npu/lib:$LD_LIBRARY_PATH
-
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-export ASDOPS_LOG_TO_STDOUT=1
-export ASDOPS_LOG_LEVEL=ERROR
-export ATB_LOG_TO_STDOUT=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export NPU_MEMORY_FRACTION=0.98
-export ATB_WORKSPACE_MEM_ALLOC_ALG_TYPE=3
-export ATB_WORKSPACE_MEM_ALLOC_GLOBAL=1
-
-export OMP_NUM_THREADS=12
-
-export HCCL_CONNECT_TIMEOUT=7200
-export HCCL_OP_EXPANSION_MODE="AIV"
-
-rm -rf /root/atb/log/
-rm -rf /root/ascend/log/
-rm -rf core.*
-mkdir -p log
-
-# ============ 配置参数 ============
-LOCAL_IP={LOCAL_IP}
-MODEL_PATH="{MODEL_PATH}"
-START_PORT={START_PORT}
-START_DEVICE={START_DEVICE}
-NNODES={NNODES}
-WORLD_SIZE={WORLD_SIZE}
-LOG_DIR="{LOG_DIR}"
-BLOCK_SIZE={BLOCK_SIZE}
-ENABLE_PREFIX_CACHE={ENABLE_PREFIX_CACHE}
-ENABLE_CHUNKED_PREFILL={ENABLE_CHUNKED_PREFILL}
-COMMUNICATION_BACKEND="{COMMUNICATION_BACKEND}"
-ENABLE_SCHEDULE_OVERLAP={ENABLE_SCHEDULE_OVERLAP}
-ENABLE_MLA={ENABLE_MLA}
-MAX_MEMORY_UTILIZATION={MAX_MEMORY_UTILIZATION}
-MAX_TOKENS_PER_BATCH={MAX_TOKENS_PER_BATCH}
-MAX_SEQS_PER_BATCH={MAX_SEQS_PER_BATCH}
-DP_SIZE={DP_SIZE}
-EP_SIZE={EP_SIZE}
-# =================================
-
-export HCCL_IF_BASE_PORT=43439
-
-MASTER_NODE_ADDR="$LOCAL_IP:$START_PORT"
-
-for (( i=0; i<$NNODES; i++ ))
-do
-  PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
-  LOG_FILE="$LOG_DIR/node_$i.log"
-  
-  /xllm_test_060/xllm \
-    --model "$MODEL_PATH" \
-    --port $PORT \
-    --devices="npu:$DEVICE" \
-    --master_node_addr=$MASTER_NODE_ADDR \
-    --nnodes=$WORLD_SIZE \
-    --node_rank=$i \
-    --max_memory_utilization=$MAX_MEMORY_UTILIZATION \
-    --max_tokens_per_batch=$MAX_TOKENS_PER_BATCH \
-    --max_seqs_per_batch=$MAX_SEQS_PER_BATCH \
-    --block_size=$BLOCK_SIZE \
-    --enable_prefix_cache=$ENABLE_PREFIX_CACHE \
-    --enable_chunked_prefill=$ENABLE_CHUNKED_PREFILL \
-    --communication_backend="$COMMUNICATION_BACKEND" \
-    --enable_schedule_overlap=$ENABLE_SCHEDULE_OVERLAP \
-    --enable_mla=$ENABLE_MLA \
-    --dp_size=$DP_SIZE \
-    --ep_size=$EP_SIZE \
-    > "$LOG_FILE" 2>&1 &
     
-  echo "启动节点 $i，设备 npu:$DEVICE，端口 $PORT，日志: $LOG_FILE"
-done
-
-echo "所有节点已启动，主节点地址: $MASTER_NODE_ADDR"
-"""
     
     # 替换模板中的参数
     script_content = template
-    for key, value in params.items():
-        script_content = script_content.replace(f'{{{key}}}', str(value))
-    
-    output_file_path = os.path.join("./outputs", f"{config.get('case_name').lower()}")
-    # 写入输出文件
-    with open(os.path.join(output_file_path, output_file), 'w', encoding='utf-8') as f:
-        f.write(script_content)
-    
-    # 添加执行权限
-    os.chmod(os.path.join(output_file_path, output_file), 0o755)
-    
-    logging.debug("generate single card script successfully.")
+    if script_content:
+        for key, value in params.items():
+            # TODO: 待优化，需要从配置中读取
+            if key == "MODEL_PATH":
+                value = value.replace("/export/home/models/", "/models/")
+            script_content = script_content.replace(f'{{{key}}}', str(value))
+        
+        output_file_path = os.path.join("./outputs", f"{config.get('case_name').lower()}")
+        # 写入输出文件
+        with open(os.path.join(output_file_path, output_file), 'w', encoding='utf-8') as f:
+            f.write(script_content)
+        
+        # 添加执行权限
+        os.chmod(os.path.join(output_file_path, output_file), 0o755)
+        
+        logging.debug("generate single card script successfully.")
+    else:
+        output_file = ""
+        output_file_path = ""
     
     return output_file, output_file_path
 
@@ -171,7 +100,8 @@ def generate_xllm_serv_commands(task_config, framework_config):
     if int(task_config.get("world_size")) == 1:
         start_serv_script, script_path = generate_single_card_script(task_config, cmd_file)
         if start_serv_script:
-            startup_cmd = f"cd {script_path};bash {start_serv_script}"
+            startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/; \
+                cd {script_path}; bash {start_serv_script};"
         else:
             logging.error("generate xllm serv script failed.")
     # 多卡
@@ -190,28 +120,32 @@ def generate_xllm_serv_commands(task_config, framework_config):
     return startup_cmd
 
 
-def main():
-    parser = argparse.ArgumentParser(description='从 YAML 配置生成 XLLM 启动脚本')
-    parser.add_argument('--config', type=str, default='case_qwen3.yaml', help='YAML 配置文件路径')
-    parser.add_argument('--output', type=str, default='run_xllm_serv.sh', help='输出脚本路径')
-    parser.add_argument('--template', type=str, default='xllm_serv.sh', help='模板脚本路径')
-    
-    args = parser.parse_args()
-    
-    # 加载配置
-    config = load_yaml_config(args.config)
-    
-    # 生成脚本
-    generate_single_card_script(config, args.output)
-
-
-def wait_xllm_serv_start(framework):
+def wait_xllm_serv_start(task_config):
+    from xtask.utils.watchdog import WatchdogConfig, WatchdogManager
     state = False
     
-    time.sleep(20)
+    output_path = os.path.join(os.getcwd(), "outputs", task_config.get("case_name").lower())
+    current_pid = os.getpid()
+    test_config = WatchdogConfig(
+        log_file=os.path.join(output_path, f"log/node_{task_config.get('start_device_id')}.log"),  # 推理服务日志路径
+        success_keywords=["is serving on port", "服务启动完成"],  # 启动成功关键词
+        npu_card_id=task_config.get("start_device_id"),  # 监控0号NPU卡
+        target_pid=current_pid,  # 推理服务PID（可从容器启动时获取）
+        timeout=300,  # 5分钟超时
+        log_check_interval=1.0,
+        npu_check_interval=2.0
+    )
+
+    # 2. 启动Watchdog
+    watchdog_manager = WatchdogManager(test_config)
+    try:
+        watchdog_manager.start()
+    except KeyboardInterrupt:
+        logging.info("接收到键盘中断，停止Watchdog")
+        watchdog_manager.stop()
+    except Exception as e:
+        logging.error(f"Watchdog运行异常：{str(e)}", exc_info=True)
+        watchdog_manager.stop()
 
     return state
 
-
-if __name__ == "__main__":
-    main()

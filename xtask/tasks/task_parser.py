@@ -20,7 +20,7 @@ def init_task_path(args):
     return task_file_path
 
 
-def gen_task_file_by_template(template_name: str, task_file_path: str):
+def gen_task_file_by_template(template_name: str, task_file_path: str, xtask_config: dict):
     """根据模板生成任务文件"""
     try:
         config = Task.create_from_template(template_name)
@@ -38,7 +38,7 @@ def gen_task_file_by_template(template_name: str, task_file_path: str):
         return False, []
 
 
-def gen_task_file_by_casename(case_name: str, task_file_path: str):
+def gen_task_file_by_casename(case_name: str, task_file_path: str, xtask_config: dict):
     """根据案例名称生成任务文件"""
     try:
         config = Task.create_from_case(case_name)
@@ -56,10 +56,10 @@ def gen_task_file_by_casename(case_name: str, task_file_path: str):
         return False, []
 
 
-def gen_task_file_by_args(args, task_file_path: str):
+def gen_task_file_by_args(args, task_file_path: str, xtask_config: dict):
     """根据命令行参数生成任务文件"""
     try:
-        config = Task.create_from_args(args)
+        config = Task.create_from_args(args, xtask_config)
         
         # 保存到任务目录
         output_file = os.path.join(task_file_path, f"{args.model_name}_{args.framework}.yaml")
@@ -72,16 +72,16 @@ def gen_task_file_by_args(args, task_file_path: str):
         return False, []
 
 
-def gen_task_file(args, task_file_path: str):
+def gen_task_file(args, task_file_path: str, xtask_config: dict):
     ret = False
     tasks = list()
 
     if args.template:
-        ret, tasks = gen_task_file_by_template(args.template, task_file_path)
+        ret, tasks = gen_task_file_by_template(args.template, task_file_path, xtask_config)
     elif args.case_name:
-        ret, tasks = gen_task_file_by_casename(args.case_name, task_file_path)
+        ret, tasks = gen_task_file_by_casename(args.case_name, task_file_path, xtask_config)
     elif args.model_name:
-        ret, tasks = gen_task_file_by_args(args, task_file_path)
+        ret, tasks = gen_task_file_by_args(args, task_file_path, xtask_config)
     else:
         logging.error("Must provide one of: --template, --case_name, or --model_name")
         return None
@@ -89,7 +89,7 @@ def gen_task_file(args, task_file_path: str):
     return ret, tasks
 
 
-def get_tasks(args):
+def get_tasks(args, xtask_config):
     logging.debug("entry function: %s"% inspect.currentframe().f_code.co_name)
     tasks = list()
 
@@ -98,7 +98,7 @@ def get_tasks(args):
     logging.debug("task_file_path is: %s"% task_file_path)
 
     # gen task file
-    ret, tasks = gen_task_file(args, task_file_path)
+    ret, tasks = gen_task_file(args, task_file_path, xtask_config)
     if not ret:
         logging.error("gen task file failed.")
 

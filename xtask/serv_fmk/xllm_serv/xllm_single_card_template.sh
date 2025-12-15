@@ -1,5 +1,6 @@
 #!/bin/bash
 # xllm_serv.sh - XLLM 服务启动脚本模板
+set -euo pipefail  # 增强脚本健壮性
 
 # 环境变量设置
 export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
@@ -37,60 +38,57 @@ mkdir -p log
 
 # ============ 从配置读取的参数 ============
 # 以下变量将从 YAML 配置文件读取
-# LOCAL_IP=
-# MODEL_PATH=
-# START_PORT=
-# START_DEVICE=
-# NNODES=
-# WORLD_SIZE=
-# LOG_DIR=
-# BLOCK_SIZE=
-# ENABLE_PREFIX_CACHE=
-# ENABLE_CHUNKED_PREFILL=
-# COMMUNICATION_BACKEND=
-# ENABLE_SCHEDULE_OVERLAP=
-# ENABLE_MLA=
-# MAX_MEMORY_UTILIZATION=
-# MAX_TOKENS_PER_BATCH=
-# MAX_SEQS_PER_BATCH=
-# DP_SIZE=
-# EP_SIZE=
+LOCAL_IP={LOCAL_IP}
+MODEL_PATH={MODEL_PATH}
+START_PORT={START_PORT}
+START_DEVICE={START_DEVICE}
+NNODES={NNODES}
+WORLD_SIZE={WORLD_SIZE}
+LOG_DIR={LOG_DIR}
+BLOCK_SIZE={BLOCK_SIZE}
+ENABLE_PREFIX_CACHE={ENABLE_PREFIX_CACHE}
+ENABLE_CHUNKED_PREFILL={ENABLE_CHUNKED_PREFILL}
+COMMUNICATION_BACKEND={COMMUNICATION_BACKEND}
+ENABLE_SCHEDULE_OVERLAP={ENABLE_SCHEDULE_OVERLAP}
+ENABLE_MLA={ENABLE_MLA}
+MAX_MEMORY_UTILIZATION={MAX_MEMORY_UTILIZATION}
+MAX_TOKENS_PER_BATCH={MAX_TOKENS_PER_BATCH}
+MAX_SEQS_PER_BATCH={MAX_SEQS_PER_BATCH}
+DP_SIZE={DP_SIZE}
+EP_SIZE={EP_SIZE}
 # ========================================
 
 # HCCL 端口配置
 export HCCL_IF_BASE_PORT=43439
 
 # 主节点地址
-MASTER_NODE_ADDR="$LOCAL_IP:$START_PORT"
+MASTER_NODE_ADDR="$LOCAL_IP:9590"
 
 # 启动服务节点
-for (( i=0; i<$NNODES; i++ ))
-do
-  PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
-  LOG_FILE="$LOG_DIR/node_$i.log"
-  
-  /xllm_test_060/xllm \
-    --model "$MODEL_PATH" \
-    --port $PORT \
-    --devices="npu:$DEVICE" \
-    --master_node_addr=$MASTER_NODE_ADDR \
-    --nnodes=$WORLD_SIZE \
-    --node_rank=$i \
-    --max_memory_utilization=$MAX_MEMORY_UTILIZATION \
-    --max_tokens_per_batch=$MAX_TOKENS_PER_BATCH \
-    --max_seqs_per_batch=$MAX_SEQS_PER_BATCH \
-    --block_size=$BLOCK_SIZE \
-    --enable_prefix_cache=$ENABLE_PREFIX_CACHE \
-    --enable_chunked_prefill=$ENABLE_CHUNKED_PREFILL \
-    --communication_backend="$COMMUNICATION_BACKEND" \
-    --enable_schedule_overlap=$ENABLE_SCHEDULE_OVERLAP \
-    --enable_mla=$ENABLE_MLA \
-    --dp_size=$DP_SIZE \
-    --ep_size=$EP_SIZE \
-    > "$LOG_FILE" 2>&1 &
-    
-  echo "启动节点 $i，设备 npu:$DEVICE，端口 $PORT，日志: $LOG_FILE"
-done
+export ASCEBD_RT_VISIBLE_DEVICES=$START_DEVICE
+LOG_DIR="log"
+LOG_FILE="$LOG_DIR/node_$START_DEVICE.log"
 
-echo "所有节点已启动，主节点地址: $MASTER_NODE_ADDR"
+xllm_command=(
+  xllm
+  --model "$MODEL_PATH"
+  --port "$START_PORT"
+  --devices "npu:$START_DEVICE"
+  --master_node_addr "$MASTER_NODE_ADDR"
+  --nnodes "$WORLD_SIZE"
+  --node_rank 0
+  --max_memory_utilization "$MAX_MEMORY_UTILIZATION"
+  --max_tokens_per_batch "$MAX_TOKENS_PER_BATCH"
+  --max_seqs_per_batch "$MAX_SEQS_PER_BATCH"
+  --block_size "$BLOCK_SIZE"
+  --enable_prefix_cache "$ENABLE_PREFIX_CACHE"
+  --enable_chunked_prefill "$ENABLE_CHUNKED_PREFILL"
+  --communication_backend "$COMMUNICATION_BACKEND"
+  --enable_schedule_overlap "$ENABLE_SCHEDULE_OVERLAP"
+)
+
+echo "服务启动命令: ${xllm_command[*]}"
+
+"${xllm_command[@]}" > "$LOG_FILE" 2>&1 &
+
+echo "启动设备 npu:$DEVICE，端口 $PORT，日志: $LOG_FILE"

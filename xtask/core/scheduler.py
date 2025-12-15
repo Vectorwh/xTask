@@ -261,6 +261,8 @@ def generate_commands(
     """
     work_dir = framework_config.get("working_dir", "/workspace")
     config_file = f"{work_dir}/config/{os.path.basename(task_yaml_path)}"
+    startup_cmd = ""
+    benchmark_cmd = ""
     
     # 生成启动命令
     if framework_config.get("framework") == "xllm":
@@ -284,12 +286,18 @@ def generate_commands(
         logging.error("framework: %s is invalid."% framework_config.get("framework"))
     
     # 生成基准测试命令
-    benchmark_cmd = (
-        f"cd {work_dir} && python -m xllm.benchmark "
-        f"--config {config_file} "
-        f"--output-dir {work_dir}/outputs "
-        f"--log-dir {work_dir}/logs"
-    )
+    if task_config.get("benchmark").get("benchmark_type") == "aisbench":
+        from xtask.benckmarks.aisbench.generate_aisbench_script import generate_aisbench_script
+        benchmark_cmd = generate_aisbench_script(
+            task_config=task_config,
+            output_shell_file="run_aisbench_test.sh",
+            python_exec="python"
+        )
+    elif task_config.get("benchmark").get("benchmark_type") == "vllm_benchmark":
+        pass
+    else:
+        logging.error("benchmark_type: %s is not supported yet."% 
+                      task_config.get("benchmark").get("benchmark_type"))
     
     return startup_cmd, benchmark_cmd
 
@@ -350,6 +358,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         # 4. 生成命令
         startup_cmd, benchmark_cmd = generate_commands(framework_config, task_config, task_yaml_path)
         result["startup_command"] = startup_cmd
+        result["accuray_command"] = startup_cmd
         result["benchmark_command"] = benchmark_cmd
         
         # 5. 创建容器配置
@@ -371,11 +380,11 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         image_url = f"{container_config.image_home}:{container_config.image_name}"
         # 8. 检查指定容器是否已存在
         if framework_config.get("serving_container_name") and \
-            not container_manager.container_exists(framework_config.get("serving_container_name")):
+            container_manager.container_exists(framework_config.get("serving_container_name")):
 
-            logging.info(f"Container {framework_config.get("serving_container_name")} already exists")
+            logging.info(f"Container {framework_config.get('serving_container_name')} already exists")
             if container_manager.container_is_running(framework_config.get("serving_container_name")):
-                logging.info(f"Container {framework_config.get("serving_container_name")} is already running")
+                logging.info(f"Container logging.inf{framework_config.get('serving_container_name')}o( is already running")
                 result["container_id"] = framework_config.get("serving_container_name")
                 container_config.container_name = framework_config.get("serving_container_name")
 
@@ -405,7 +414,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
                         logging.error(result["message"])
                         return result
             else:
-                # 10. 创建并启动新容器
+            # 10. 创建并启动新容器
                 logging.info(f"Creating new container: {container_config.container_name}")
                 success, container_id = container_manager.create_container()
                 
@@ -415,6 +424,17 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
                     return result
                 
                 result["container_id"] = container_id
+        else:
+            # 10. 创建并启动新容器
+            logging.info(f"Creating new container: {container_config.container_name}")
+            success, container_id = container_manager.create_container()
+            
+            if not success:
+                result["message"] = f"Failed to create container: {container_id}"
+                logging.error(result["message"])
+                return result
+            
+            result["container_id"] = container_id
         
         # 11. 等待容器就绪
         logging.info(f"Waiting for container {container_config.container_name} to be ready...")
@@ -436,7 +456,19 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             logging.warning(result["message"])
             # 继续执行，可能文件已经通过挂载卷可用
         
-        # 13. 执行启动命令
+        # 13. TODO: 待增加配置：编译/取版本包
+        compilation_cmd = "bash /workspace/tools/download_xllm.sh;"
+        logging.info(f"Starting the compilation task: {compilation_cmd}")
+        
+        startup_result = container_manager.exec_in_container(
+            container_config.container_name,
+            compilation_cmd,
+            timeout=framework_config.get("startup_timeout", 300)
+        )
+
+        # TODO：cleanup 指定npu上的任务
+
+        # 14. 执行启动命令
         logging.info(f"Executing startup command: {startup_cmd}")
         
         startup_result = container_manager.exec_in_container(
@@ -449,14 +481,17 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             result["message"] = f"Startup command failed: {startup_result.stderr}"
             logging.error(result["message"])
             # 继续执行，可能服务启动需要时间
+        else:
+            logging.debug("service startup message is: %s"% {startup_result.stderr})
         
-        # 14. 等待服务启动
+        # 15. 等待服务启动
         logging.info("Waiting for service to start...")
-        ret = wait_serv_start(framework)
+        ret = wait_serv_start(framework, task_config)
         if ret:
             logging.error(f"{framework} serv startup failed.")
         
-        # 15. 检查服务是否运行
+        # 16. 检查服务是否运行
+        time.sleep(15) # 等待服务真正启动
         check_cmd = f"curl -s http://{task_config.get('node_addr', '0.0.0.0')}:{task_config.get('node_port', 14830)}/health"
         health_result = container_manager.exec_in_container(
             container_config.container_name,
@@ -464,13 +499,13 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             timeout=30
         )
         
-        if health_result.success and "healthy" in health_result.stdout.lower():
+        if health_result.success and "ok" in health_result.stdout.lower():
             logging.info("Service is healthy and running")
         else:
             result["message"] = f"Service health check failed: {health_result.stderr}"
             logging.error(result["message"])
 
-        # 16. 执行精度测试命令
+        # 17. 执行精度测试命令
         accuracy_cmd = ""
         logging.info(f"Executing accuracy command: {accuracy_cmd}")
         if accuracy_cmd:
@@ -478,7 +513,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         else:
             logging.warning("accuracy_cmd is null, skip accuracy task.")
         
-        # 17. 执行基准测试命令
+        # 18. 执行基准测试命令
         logging.info(f"Executing benchmark command: {benchmark_cmd}")
         
         if benchmark_cmd:
@@ -488,6 +523,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
                 timeout=framework_config.get("benchmark_timeout", 3600)
             )
         else:
+            benchmark_result = ""
             logging.warning("benchmark_cmd is null, skip benchmark task.")
         
         result["benchmark_success"] = benchmark_result.success
@@ -500,11 +536,11 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             result["message"] = f"Benchmark command failed with exit code {benchmark_result.exit_code}"
             logging.error(result["message"])
         
-        # 18. 获取容器日志
+        # 19. 获取容器日志
         logs = container_manager.get_container_logs(result["container_id"], tail=100)
         result["logs"] = logs
         
-        # 19. 标记执行成功
+        # 20. 标记执行成功
         result["success"] = True
         result["message"] = f"Task scheduled successfully in container {result['container_id']}"
         logging.info(result["message"])
