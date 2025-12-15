@@ -2,12 +2,12 @@
 import os
 import sys
 import time
-import signal
 import threading
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, asdict
+from multiprocessing import Process, Event, Queue
 import json
 import psutil
 import logging
@@ -84,7 +84,7 @@ class ProcessWatchdog:
     
     def _setup_logging(self):
         """Setup logging for watchdog"""
-        if not self.logger.handlers:
+        if not self.logging.handlers:
             formatter = logging.Formatter(
                 '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
             )
@@ -92,19 +92,19 @@ class ProcessWatchdog:
             # Console handler
             console_handler = logging.StreamHandler()
             console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
+            self.logging.addHandler(console_handler)
             
             # File handler
             if self.config.log_file:
                 file_handler = logging.FileHandler(self.config.log_file)
                 file_handler.setFormatter(formatter)
-                self.logger.addHandler(file_handler)
+                self.logging.addHandler(file_handler)
             
-            self.logger.setLevel(logging.INFO)
+            self.logging.setLevel(logging.INFO)
     
     def log(self, message: str, level: str = "info", exception=None):
         """Log message with specified level"""
-        log_func = getattr(self.logger, level, self.logger.info)
+        log_func = getattr(self.logger, level, self.logging.info)
         if exception:
             log_func(f"{message}: {exception}", exc_info=exception)
         else:
@@ -792,95 +792,257 @@ class ContainerManagerWithWatchdog:
         self.cleanup()
 
 
-# Example usage
-if __name__ == "__main__":
-    import logging
-    
-    # Setup logging
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger("ContainerManagerWithWatchdog")
-    
-    print("=" * 60)
-    print("Example: Inference Service with Watchdog")
-    print("=" * 60)
-    
-    # Create container configuration
-    from .container_manager import ContainerConfig
-    
-    config = ContainerConfig(
-        image_name="tensorrt-inference:latest",
-        container_name="inference-service-test",
-        runtime="docker",
-        ports={"8000": "8000"},
-        volumes={"./models": "/models", "./logs": "/logs"},
-        environment={
-            "MODEL_PATH": "/models/gpt2",
-            "PORT": "8000"
-        }
-    )
-    
-    # Create container manager with watchdog
-    with ContainerManagerWithWatchdog(config, logger) as manager:
-        # Check if runtime is available
-        if not manager.check_runtime_available():
-            print("Container runtime not available")
-            sys.exit(1)
-        
-        # Setup container
-        print("Setting up container...")
-        success, container_id = manager.setup_container()
-        
-        if not success:
-            print(f"Failed to setup container: {container_id}")
-            sys.exit(1)
-        
-        # Wait for container to be ready
-        print("Waiting for container to be ready...")
-        if not manager.wait_for_container(container_id, timeout=60):
-            print("Container not ready within timeout")
-            sys.exit(1)
-        
-        # Start inference service with watchdog
-        print("Starting inference service with watchdog...")
-        result = manager.start_inference_service(
-            container_name=container_id,
-            model_path="/models/gpt2",
-            port=8000,
-            framework="tensorrt"
-        )
-        
-        if result.success:
-            print(f"Inference service started successfully: {result.stdout}")
-            
-            # Get monitoring status
-            status = manager.get_monitoring_status()
-            print(f"Watchdog status: {status['watchdog_running']}")
-            print(f"Monitored processes: {status['monitored_processes']}")
-            
-            # Simulate running for a while
-            print("Service running with watchdog monitoring...")
-            print("Press Ctrl+C to stop")
-            
+@dataclass
+class WatchdogConfig:
+    """Watchdog 配置类，统一管理监控参数"""
+    log_file: str  # 推理服务日志文件路径
+    success_keywords: List[str]  # 服务启动成功的关键词（任意匹配一个即可）
+    npu_card_id: int  # 要监控的NPU卡ID（如0、1）
+    target_pid: Optional[int] = None  # 要监控的推理服务进程PID（若未指定，从npu-smi解析）
+    target_process_name: Optional[str] = None  # 备选：通过进程名匹配（优先级低于PID）
+    timeout: int = 300  # 监控超时时间（秒），默认5分钟
+    log_check_interval: float = 1.0  # 日志文件检查间隔（秒）
+    npu_check_interval: float = 2.0  # NPU进程检查间隔（秒）
+
+class LogMonitorProcess(Process):
+    """进程A：监控日志文件中是否出现启动成功关键词"""
+    def __init__(
+        self,
+        config: WatchdogConfig,
+        exit_event,
+        success_event
+    ):
+        super().__init__(name="LogMonitor")
+        self.config = config
+        self.exit_event = exit_event if exit_event else Event()  # 全局退出信号
+        self.success_event = success_event if success_event else Event()  # 服务启动成功信号
+
+    def _check_log_(self, new_lines):
+        if new_lines:
+            for line in new_lines:
+                line = line.strip()
+                if line.startswith("E") or "[ERROR]" in line:
+                    logging.error(f"监控到异常日志：\n{line}")
+                    self.exit_event.set()
+                    return
+                if any(keyword in line for keyword in self.config.success_keywords):
+                    logging.info(f"检测到服务启动成功关键词：{line}")
+                    self.success_event.set()
+                    self.exit_event.set()  # 触发全局退出（仅日志进程完成使命，主进程仍会等NPU监控）
+                    return
+
+    def run(self):
+        """进程主逻辑"""
+        logging.info(f"启动日志监控进程，日志文件：{self.config.log_file}，关键词：{self.config.success_keywords}")
+        file_offset = 0  # 记录日志文件读取偏移量，避免重复读取
+        # 检查日志文件是否存在
+        if not os.path.exists(self.config.log_file):
+            logging.error(f"日志文件不存在：{self.config.log_file}")
+            self.exit_event.set()
+            return
+
+        try:
+            with open(self.config.log_file, "r", encoding="utf-8") as f:
+                # 先读取已有日志
+                new_lines = f.readlines()
+                self._check_log_(new_lines)
+                # 再将文件指针移到末尾，只监控新增日志
+                f.seek(0, os.SEEK_END)
+                file_offset = f.tell()
+
+                while not self.exit_event.is_set():
+                    # 检查文件是否被截断（如日志轮转）
+                    current_file_size = os.path.getsize(self.config.log_file)
+                    if current_file_size < file_offset:
+                        print("日志文件被截断，重新定位到文件开头")
+                        f.seek(0)
+                        file_offset = 0
+
+                    # 读取新增内容
+                    f.seek(file_offset)
+                    new_lines = f.readlines()
+                    self._check_log_(new_lines)
+
+                    # 等待检查间隔或退出信号
+                    self.exit_event.wait(self.config.log_check_interval)
+
+        except Exception as e:
+            logging.error(f"日志监控异常：{str(e)}", exc_info=True)
+            self.exit_event.set()
+
+class NpuProcessMonitorProcess(Process):
+    """进程B：监控NPU卡上的推理服务进程状态"""
+    def __init__(
+        self,
+        config: WatchdogConfig,
+        exit_event
+    ):
+        super().__init__(name="NpuProcessMonitor")
+        self.config = config
+        self.exit_event = exit_event if exit_event else Event()  # 全局退出信号
+
+    def _get_npu_processes(self) -> List[dict]:
+        """调用npu-smi获取指定NPU卡的进程信息"""
+        try:
+            # npu-smi 命令格式：npu-smi info -t process -i <card_id>
+            # cmd = ["npu-smi", "info", "-t", "process", "-i", str(self.config.npu_card_id)]
+            cmd = ["npu-smi", "info", "|", "grep", f"NPU {str(self.config.npu_card_id)}", 
+                   "|", "grep", "No running processes found in"]
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+                timeout=10
+            )
+            if result.returncode != 0:
+                logging.error(f"执行npu-smi失败：{result.stderr}")
+                return []
+
+            # 解析npu-smi输出（不同昇腾版本输出格式略有差异，需根据实际适配）
+            processes = []
+            # 示例输出格式（需根据实际环境调整解析逻辑）：
+            # NPU ID : 0
+            # Process ID : 12345
+            # Process Name : python
+            # User Name : root
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            process_info = {}
+            for line in lines:
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    key = key.strip().lower().replace(" ", "_")
+                    value = value.strip()
+                    process_info[key] = value
+                    if key == "process_id":
+                        # 补全进程名（若后续行有）
+                        if "process_name" in process_info:
+                            processes.append(process_info)
+                            process_info = {}
+            return processes
+
+        except subprocess.TimeoutExpired:
+            logging.error("npu-smi命令执行超时")
+            return []
+        except Exception as e:
+            logging.error(f"解析npu-smi输出异常：{str(e)}", exc_info=True)
+            return []
+
+    def _is_target_process_alive(self) -> bool:
+        """检查目标进程是否存活"""
+        # 1. 优先通过PID检查
+        if self.config.target_pid:
             try:
-                # Keep the main thread alive
-                while True:
-                    time.sleep(1)
-                    
-                    # Periodically check status
-                    status = manager.get_monitoring_status()
-                    for process in status['processes']:
-                        print(f"Process {process['cmd']}: "
-                              f"PID={process['pid']}, "
-                              f"Status={process['status']}, "
-                              f"CPU={process['cpu_percent']:.1f}%, "
-                              f"Memory={process['memory_mb']:.1f}MB")
-                    
-                    time.sleep(10)
-                    
-            except KeyboardInterrupt:
-                print("\nInterrupted by user")
-                
-        else:
-            print(f"Failed to start inference service: {result.stderr}")
-        
-        print("Cleaning up...")
+                # 向进程发送0信号，检查是否存在（Unix/Linux）
+                os.kill(self.config.target_pid, 0)
+                return True
+            except OSError:
+                logging.info(f"目标进程PID {self.config.target_pid} 已退出")
+                return False
+
+        # 2. 备选：通过进程名+NPU卡匹配
+        if self.config.target_process_name:
+            npu_processes = self._get_npu_processes()
+            for proc in npu_processes:
+                if proc.get("process_name", "").lower() == self.config.target_process_name.lower():
+                    return True
+            logging.info(f"NPU卡{self.config.npu_card_id}上未找到进程名 {self.config.target_process_name}")
+            return False
+
+        # 3. 未指定PID/进程名，默认检查NPU卡是否有进程（适配任意进程场景）
+        npu_processes = self._get_npu_processes()
+        if not npu_processes:
+            logging.info(f"NPU卡{self.config.npu_card_id}上无运行进程")
+            return False
+        return True
+
+    def run(self):
+        """进程主逻辑"""
+        logging.info(f"启动NPU进程监控，NPU卡ID：{self.config.npu_card_id}，目标PID：{self.config.target_pid}")
+        while not self.exit_event.is_set():
+            # 检查进程是否存活
+            if not self._is_target_process_alive():
+                logging.error("推理服务进程已退出，触发全局退出")
+                self.exit_event.set()
+                return
+
+            # 等待检查间隔或退出信号
+            self.exit_event.wait(self.config.npu_check_interval)
+
+class WatchdogManager:
+    """Watchdog 主管理器，协调两个监控进程和超时控制"""
+    def __init__(self, config: WatchdogConfig):
+        self.config = config
+        self.exit_event = Event()  # 全局退出信号（所有进程监听）
+        self.success_event = Event()  # 服务启动成功信号
+        self.log_monitor: Optional[Process] = None
+        self.npu_monitor: Optional[Process] = None
+
+    def start(self):
+        """启动所有监控进程"""
+        # 1. 创建并启动日志监控进程（A）
+        self.log_monitor = LogMonitorProcess(
+            config=self.config,
+            exit_event=self.exit_event,
+            success_event=self.success_event
+        )
+        self.log_monitor.start()
+
+        # 2. 创建并启动NPU进程监控进程（B）
+        self.npu_monitor = NpuProcessMonitorProcess(
+            config=self.config,
+            exit_event=self.exit_event
+        )
+        self.npu_monitor.start()
+
+        # 3. 主进程监控超时和退出信号
+        logging.info(f"Watchdog启动完成，超时时间：{self.config.timeout}秒")
+        elapsed_time = 0
+        start_time = time.time()
+        while not self.exit_event.is_set():
+            # 检查超时
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= self.config.timeout:
+                logging.error(f"监控超时（{self.config.timeout}秒），触发全局退出")
+                self.exit_event.set()
+                break
+
+            # 每1秒检查一次状态
+            time.sleep(1)
+
+        # 4. 等待子进程退出
+        self._join_processes()
+
+        # 5. 输出最终状态
+        self._print_final_status(elapsed_time)
+
+    def _join_processes(self):
+        """等待所有子进程退出"""
+        if self.log_monitor and self.log_monitor.is_alive():
+            logging.info("等待日志监控进程退出...")
+            self.log_monitor.join(timeout=5)
+            if self.log_monitor.is_alive():
+                self.log_monitor.terminate()
+                logging.warning("强制终止日志监控进程")
+
+        if self.npu_monitor and self.npu_monitor.is_alive():
+            logging.info("等待NPU进程监控进程退出...")
+            self.npu_monitor.join(timeout=5)
+            if self.npu_monitor.is_alive():
+                self.npu_monitor.terminate()
+                logging.warning("强制终止NPU进程监控进程")
+
+    def _print_final_status(self, elapsed_time: float):
+        """输出监控最终状态"""
+        logging.info("="*50)
+        logging.info(f"监控总时长：{elapsed_time:.2f}秒")
+        logging.info(f"服务启动成功：{self.success_event.is_set()}")
+        logging.info(f"是否超时：{elapsed_time >= self.config.timeout}")
+        logging.info(f"进程异常退出：{not self.success_event.is_set() and not (elapsed_time >= self.config.timeout)}")
+        logging.info("="*50)
+
+    def stop(self):
+        """手动停止所有监控进程"""
+        logging.info("手动触发Watchdog退出")
+        self.exit_event.set()
+        self._join_processes()

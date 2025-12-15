@@ -123,7 +123,8 @@ Usage Examples:
         parser.add_argument(
             "--benchmark_type", "-bt",
             type=str,
-            choices=['lm-eval', 'opencompass', 'custom'],
+            choices=['aisbench', 'vllm_bench', 'xllm_bench'],
+            default='aisbench',
             help="Benchmark tool type"
         )
         parser.add_argument(
@@ -305,11 +306,9 @@ Usage Examples:
         
         # If benchmark_type specified, check benchmark_config
         if args.benchmark_type and args.benchmark_type != 'custom':
-            if not args.benchmark_config:
-                # Try to use default configuration
-                default_config = self._get_default_benchmark_config(args.benchmark_type)
-                if not default_config:
-                    return False
+            default_config = self._get_default_benchmark_config(args.benchmark_type)
+            if not default_config:
+                return False
         
         return True
     
@@ -405,15 +404,26 @@ Usage Examples:
     def _get_default_benchmark_config(self, benchmark_type: str) -> Optional[str]:
         """Get default benchmark configuration file path"""
         config_map = {
-            'lm-eval': 'config/benchmark/lm-eval-default.yaml',
-            'opencompass': 'config/benchmark/opencompass-default.yaml'
+            "benchmark_type": benchmark_type,
+            "perf": {
+                "baseline": '',
+                "batch_size": '',
+                "case_type": "performance",
+                "dataset_conf": '',
+                "dataset_path": '',
+                "max_out_len": '',
+                "num_prompts": '',
+                "request_conf": '',
+                "request_rate": '',
+                "threshold": 0.97
+            }
         }
         
         config_path = config_map.get(benchmark_type)
         if config_path and Path(config_path).exists():
             return config_path
         
-        return None
+        return config_map
     
     def _generate_config_data(self, args: argparse.Namespace, 
                              config_source: ConfigSource) -> Dict:
@@ -436,7 +446,8 @@ Usage Examples:
                 'model': {
                     'name': args.model_name,
                     'path': args.model_path,
-                    'framework': args.framework
+                    'framework': args.framework,
+                    'benchmark_type': args.benchmark_type
                 },
                 'inference': {
                     'port': args.port,

@@ -42,9 +42,12 @@ class TaskConfig:
     enable_chunked_prefill: bool = False
     enable_schedule_overlap: bool = False
     enable_mtp: bool = False
+    dataset_name: str = "GSM8K"
+    dataset_path: str = ""
+    metrics: str = ["perf"] # 支持的列表 e2el,ttft,tpot,itl,acc
     
     # 基准测试配置
-    benchmark_type: str = "vllm_ascend_bencmark"
+    benchmark_type: str = "aisbench"
     perf: BenchmarkConfig = field(default_factory=lambda: BenchmarkConfig(
         case_type="performance",
         threshold=0.97
@@ -97,23 +100,41 @@ class TaskConfig:
         return config
     
     @classmethod
-    def from_args(cls, args) -> 'TaskConfig':
-        """从命令行参数创建配置"""
+    def from_args(cls, args, xtask_config) -> 'TaskConfig':
+        """TODO 待优化: 从命令行参数创建配置"""
         config = cls()
         if hasattr(args, 'model_name'):
             setattr(config, "model_name", getattr(args, 'model_name', ""))
         
         # 设置基础配置
+        setattr(config, "case_name", f"{args.model_name}_{args.framework}") 
         for field_name in cls.__dataclass_fields__:
+            if field_name == "start_device_id":
+                env_start_device_id = xtask_config.get("ENV_config").get("start_device_id")
+                value = env_start_device_id if env_start_device_id else getattr(args, field_name)
+                setattr(config, field_name, value)
+                continue
+    
+            if field_name == "node_port":
+                env_port = getattr(args, "port")
+                value = env_port if env_port else getattr(args, field_name)
+                setattr(config, field_name, value)
+                continue
+
+            if field_name == "served_model_name":
+                served_model_name = getattr(args, "model_path").split("/")[-1]
+                value = served_model_name if served_model_name else getattr(args, field_name)
+                setattr(config, field_name, value)
+                continue
+
             if field_name not in ['perf', 'acc'] and hasattr(args, field_name):
                 value = getattr(args, field_name)
                 if value is not None:
-                    setattr(config, field_name, value)                
-                setattr(config, "case_name", f"{args.model_name}_{args.framework}") 
+                    setattr(config, field_name, value)
         
         # 设置benchmark_type
         if hasattr(args, 'benchmark_type'):
-            config.benchmark_type = getattr(args, 'benchmark_type', "vllm_ascend_bencmark")
+            config.benchmark_type = getattr(args, 'benchmark_type', "aisbench")
         
         # 设置perf配置
         if hasattr(args, 'perf_case_type'):
@@ -231,6 +252,6 @@ class Task:
             return None
     
     @staticmethod
-    def create_from_args(args) -> TaskConfig:
+    def create_from_args(args, xtask_config) -> TaskConfig:
         """从命令行参数创建配置"""
-        return TaskConfig.from_args(args)
+        return TaskConfig.from_args(args, xtask_config)
