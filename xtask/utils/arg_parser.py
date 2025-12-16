@@ -516,25 +516,25 @@ Usage Examples:
             logging.info(f"✅ Validation PASSED (Source: {result.config_source.value})")
             
             if result.warnings:
-                logging.info("\n⚠️  Warnings:")
+                logging.info("⚠️ Warnings:")
                 for warning in result.warnings:
                     logging.warning(f"  - {warning}")
             
-            logging.info(f"\n📋 Configuration Summary:")
+            logging.info(f"📋 Configuration Summary:")
             self._print_config_summary(result.config_data)
             
         else:
             logging.error("❌ Validation FAILED")
-            logging.error("\nError Details:")
+            logging.error("Error Details:")
             for error in result.errors:
                 logging.error(f"  - {error}")
             
             if result.warnings:
-                logging.info("\n⚠️  Warnings:")
+                logging.info("⚠️  Warnings:")
                 for warning in result.warnings:
                     logging.warning(f"  - {warning}")
             
-            logging.info("\n💡 Suggestions:")
+            logging.info("💡 Suggestions:")
             logging.info("  1. Check if all required arguments are provided")
             logging.info("  2. Verify file paths are correct")
             logging.info("  3. Use --help to view complete argument documentation")

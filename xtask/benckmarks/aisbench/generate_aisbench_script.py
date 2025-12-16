@@ -3,6 +3,9 @@ import json
 import logging
 from typing import Dict, Optional, List
 
+from xtask.utils.container_manager import path_mapping_in_container
+
+
 def generate_aisbench_script(
     task_config: Dict,
     output_shell_file: str = "run_aisbench_test.sh",
@@ -16,8 +19,10 @@ def generate_aisbench_script(
         output_shell_file: 生成的shell脚本输出脚本名称
         python_exec: Python解释器路径（如python/python3/anaconda3/bin/python）
     """
-    output_file_path = os.path.join("./outputs", f"{task_config.get('case_name').lower()}")
+    output_file_path = os.path.join(os.getcwd(), "outputs", f"{task_config.get('case_name').lower()}")
+    output_file_path_incontainer = path_mapping_in_container(output_file_path)
     output_shell_path = os.path.join(output_file_path, output_shell_file)
+    output_shell_path_incontainer = path_mapping_in_container(output_shell_path)
     # ========== 1. 解析task_config，设置默认值 ==========
     benchmark_dict = task_config.get("benchmark", None)
     if benchmark_dict:
@@ -30,14 +35,20 @@ def generate_aisbench_script(
     model_name = task_config.get("served_model_name", "model")
     model_path = task_config.get("model_path", "/path/to/model")
     dataset_path = perf_cfg.get("dataset_path", "/path/to/dataset")
-    max_new_tokens = perf_cfg.get("max_out_len", 512)
+    max_out_len = perf_cfg.get("max_out_len", 512)
     batch_size = perf_cfg.get("batch_size", 1)
+    request_rate = perf_cfg.get("request_rate", 0)
+    batch_size = perf_cfg.get("batch_size", 1)
+    temperature = perf_cfg.get("temperature", 0.5)
+    top_k = perf_cfg.get("top_k", 10)
+    top_p = perf_cfg.get("top_p", 0.95)
+    seed = perf_cfg.get("seed", 1024)
+    model_path_inside = path_mapping_in_container(model_path)
 
     # ========== 2. 构造shell脚本内容 ==========
     shell_content = []
     # 基础配置：shebang、出错退出、日志输出
     shell_content.append("#!/bin/bash")
-    shell_content.append("set -euo pipefail")  # 增强健壮性：出错立即退出、未定义变量报错、管道失败报错
     shell_content.append('echo "===== 开始执行ais-bench测试脚本 ====="')
 
     # Step 1: 获取ais_bench的site-packages路径
@@ -49,9 +60,9 @@ def generate_aisbench_script(
     shell_content.append('fi')
     shell_content.append('echo "ais_bench安装路径：$AIS_BENCH_PATH"')
 
-    # Step 2: 定位vllm_api_general_chat.py配置文件
+    # Step 2: 定位vllm_api_general_stream.py配置文件
     shell_content.append("\n# 2. 定位vllm_api配置文件")
-    shell_content.append('CONFIG_FILE="$AIS_BENCH_PATH/benchmark/configs/models/vllm_api/vllm_api_general_chat.py"')
+    shell_content.append('CONFIG_FILE="$AIS_BENCH_PATH/benchmark/configs/models/vllm_api/vllm_api_general_stream.py"')
     shell_content.append('if [ ! -f "$CONFIG_FILE" ]; then')
     shell_content.append('    echo "错误：配置文件不存在 $CONFIG_FILE"')
     shell_content.append('    exit 1')
@@ -61,66 +72,78 @@ def generate_aisbench_script(
     # Step 3: 修改配置文件中的核心参数（使用sed命令）
     shell_content.append("\n# 3. 修改vllm_api配置文件参数")
     # 替换API地址
-    shell_content.append(f'sed -i.bak "s/^api_address = .*/api_address = \'{api_address}\'/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i.bak "s/host_ip\s*=\s*.*,/host_ip=\'{api_address}\',/g" "$CONFIG_FILE"')
     # 替换API端口
-    shell_content.append(f'sed -i "s/^api_port = .*/api_port = {api_port}/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/host_port\s*=\s*.*,/host_port={api_port},/g" "$CONFIG_FILE"')
     # 替换模型名称
-    shell_content.append(f'sed -i "s/^model_name = .*/model_name = \'{model_name}\'/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/model\s*=\s*.*,/model=\'{model_name}\',/g" "$CONFIG_FILE"')
     # 替换模型路径
-    shell_content.append(f'sed -i "s/^model_path = .*/model_path = \'{model_path}\'/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i "s#path\s*=\s*\\"\\",#path=\'{model_path_inside}\',#g" "$CONFIG_FILE"')
     # 替换数据集路径
-    shell_content.append(f'sed -i "s/^dataset_path = .*/dataset_path = \'{dataset_path}\'/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={request_rate},/g" "$CONFIG_FILE"')
     # 替换最大生成token数
-    shell_content.append(f'sed -i "s/^max_new_tokens = .*/max_new_tokens = {max_new_tokens}/g" "$CONFIG_FILE"')
-    # 替换批大小
-    shell_content.append(f'sed -i "s/^batch_size = .*/batch_size = {batch_size}/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={max_out_len},/g" "$CONFIG_FILE"')
+    # 替换batchsize
+    shell_content.append(f'sed -i "s/batch_size\s*=\s*.*,/batch_size={batch_size},/g" "$CONFIG_FILE"')
+
+    shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={temperature},/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={top_k},/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={top_p},/g" "$CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={seed},/g" "$CONFIG_FILE"')
+    shell_content.append(f'cp $CONFIG_FILE {output_file_path_incontainer}/ ')
     shell_content.append('echo "配置文件修改完成（已生成备份文件 ${CONFIG_FILE}.bak）"')
 
     # Step 4: 生成精度测试命令（若开启）
     if accuracy_cfg.get("enable", False):
         shell_content.append("\n# 4. 执行精度测试")
-        accuracy_metrics = accuracy_cfg.get("metrics", ["bleu", "rouge"])
+        api_type = perf_cfg.get("api_type", "vllm_api_general_stream")
         metrics_str = ",".join(accuracy_metrics)
+        accuracy_metrics = accuracy_cfg.get("metrics", ["bleu", "rouge"])
         accuracy_batch_size = accuracy_cfg.get("batch_size", batch_size)
-        accuracy_max_new_tokens = accuracy_cfg.get("max_new_tokens", max_new_tokens)
+        accuracy_max_out_len = accuracy_cfg.get("max_out_len", max_out_len)
         
         # 构造ais-bench精度测试命令（参考ais-bench官方文档）
         accuracy_cmd = (
-            f'ais_bench run --config "$CONFIG_FILE" '
-            f'--task accuracy '
-            f'--batch_size {accuracy_batch_size} '
-            f'--max_new_tokens {accuracy_max_new_tokens} '
-            f'--metrics {metrics_str} '
-            f'--output ./accuracy_test_result.json'
+            f'ais_bench --models {api_type} '
+            f'--datasets {dataset_name} '
+            f'--mode {mode} '
+            f'--dump-eval-details '
+            f'--work-dir {output_file_path_incontainer}'
         )
         shell_content.append(f'echo "执行精度测试命令：{accuracy_cmd}"')
         shell_content.append(accuracy_cmd)
-        shell_content.append('echo "精度测试完成，结果保存至 ./accuracy_test_result.json"')
+        shell_content.append(f'echo "精度测试完成，结果保存至 {output_file_path_incontainer}"')
+    else:
+        shell_content.append("\n# 4. 执行精度测试，skip task...")
 
     # Step 5: 生成性能测试命令（若开启）
-    if perf_cfg.get("enable", False):
+    if perf_cfg.get("enable", True):
         shell_content.append("\n# 5. 执行性能测试")
         perf_concurrency = perf_cfg.get("concurrency", 10)
         perf_total_requests = perf_cfg.get("total_requests", 1000)
-        perf_timeout = perf_cfg.get("timeout", 300)
+        perf_timeout = perf_cfg.get("timeout", 600)
         perf_warmup = perf_cfg.get("warmup_requests", 100)
+        dataset_name = perf_cfg.get("dataset_name", "synthetic_gen")
+        api_type = perf_cfg.get("api_type", "vllm_api_general_stream")
+        mode = perf_cfg.get("mode", "perf") # 精度: all/infer/eval/viz  性能: perf/perf_viz
+        summarizer = perf_cfg.get("summarizer", "default_perf")
         
         # 构造ais-bench性能测试命令（参考ais-bench官方文档）
         perf_cmd = (
-            f'ais_bench run --config "$CONFIG_FILE" '
-            f'--task performance '
-            f'--concurrency {perf_concurrency} '
-            f'--total_requests {perf_total_requests} '
-            f'--warmup_requests {perf_warmup} '
-            f'--timeout {perf_timeout} '
-            f'--output ./perf_test_result.json'
+            f'ais_bench --models {api_type} '
+            f'--datasets {dataset_name} '
+            f'--mode {mode} '
+            f'--summarizer {summarizer} '
+            f'--work-dir {output_file_path_incontainer}'
         )
         shell_content.append(f'echo "执行性能测试命令：{perf_cmd}"')
         shell_content.append(perf_cmd)
-        shell_content.append('echo "性能测试完成，结果保存至 ./perf_test_result.json"')
+        shell_content.append(f'echo "性能测试完成，结果保存至 {output_file_path_incontainer}"')
+    else:
+        shell_content.append("\n# 5. 执行性能测试，skip task...")
 
     # 收尾：提示脚本完成
-    shell_content.append("\necho \"===== ais-bench测试脚本执行完成 =====")
+    shell_content.append("\necho \"===== ais-bench测试脚本执行完成 =====\"")
 
     # ========== 3. 写入shell文件并添加执行权限 ==========
     with open(output_shell_path, "w", encoding="utf-8") as f:
@@ -128,9 +151,9 @@ def generate_aisbench_script(
     
     # 添加可执行权限
     os.chmod(output_shell_path, 0o755)
-    logging.info(f"Shell脚本已生成：{os.path.abspath(output_shell_path)}")
-    logging.info(f"脚本执行方式：bash {output_shell_path}")
-    benchmark_cmd = f"bash {output_shell_path}"
+    logging.info(f"Shell脚本已生成：{output_shell_path_incontainer}")
+    logging.info(f"脚本执行方式：bash {output_shell_path_incontainer}")
+    benchmark_cmd = f"bash {output_shell_path_incontainer}"
     return benchmark_cmd
 
 # ========== 示例调用 ==========
