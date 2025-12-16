@@ -466,6 +466,24 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             timeout=framework_config.get("startup_timeout", 300)
         )
 
+        # 读取model/config.json中 transformers的版本号，容器中transformers升级到指定版本
+        model_config_path = os.path.join(task_config.get("model_path"), "config.json")
+        if os.path.exists(model_config_path):
+            with open(model_config_path, 'r') as f:
+                transformers_version = json.load(f).get("transformers_version")
+            install_transformers_cmd = f"pip install transformers=={transformers_version} --upgrade"
+            install_result = container_manager.exec_in_container(
+                container_config.container_name,
+                install_transformers_cmd,
+                timeout=framework_config.get("startup_timeout", 300)
+            )
+            if not install_result.success:
+                logging.error("transformer upgrade to %s failed."% transformers_version)
+                return result
+        else:
+            logging.error("model config file: %s is not exist"% model_config_path)
+            return result
+
         # TODO：cleanup 指定npu上的任务
 
         # 14. 执行启动命令
@@ -509,7 +527,16 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         accuracy_cmd = ""
         logging.info(f"Executing accuracy command: {accuracy_cmd}")
         if accuracy_cmd:
-            pass
+            accuracy_result = container_manager.exec_in_container(
+                container_config.container_name,
+                accuracy_cmd,
+                timeout=framework_config.get("benchmark_timeout", 3600)
+            )
+            result["accuracy_success"] = accuracy_result.success
+            result["accuracy_exit_code"] = accuracy_result.exit_code
+            result["accuracy_stdout"] = accuracy_result.stdout
+            result["accuracy_stderr"] = accuracy_result.stderr
+            result["accuracy_execution_time"] = accuracy_result.execution_time
         else:
             logging.warning("accuracy_cmd is null, skip accuracy task.")
         
@@ -522,16 +549,22 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
                 benchmark_cmd,
                 timeout=framework_config.get("benchmark_timeout", 3600)
             )
+            result["benchmark_success"] = benchmark_result.success
+            result["benchmark_exit_code"] = benchmark_result.exit_code
+            result["benchmark_stdout"] = benchmark_result.stdout
+            result["benchmark_stderr"] = benchmark_result.stderr
+            result["benchmark_execution_time"] = benchmark_result.execution_time
+
+            if benchmark_result.success:
+                logging.info("Benchmark completed successfully.")
+                from xtask.benckmarks.benchmark_common import result_postprocess
+                result = result_postprocess(benchmark_result.stdout, task_config.get("benchmark_type"))
+            else:
+                logging.error(f"Benchmark command failed with exit code {benchmark_result.exit_code}")
         else:
             benchmark_result = ""
             logging.warning("benchmark_cmd is null, skip benchmark task.")
-        
-        result["benchmark_success"] = benchmark_result.success
-        result["benchmark_exit_code"] = benchmark_result.exit_code
-        result["benchmark_stdout"] = benchmark_result.stdout
-        result["benchmark_stderr"] = benchmark_result.stderr
-        result["benchmark_execution_time"] = benchmark_result.execution_time
-        
+
         if not benchmark_result.success:
             result["message"] = f"Benchmark command failed with exit code {benchmark_result.exit_code}"
             logging.error(result["message"])
@@ -552,8 +585,10 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
     finally:
         # 计算执行时间
         result["execution_time"] = time.time() - start_time
-
-        if not framework_config.get("serving_container_name"):
+        bool_map = {"true": True, "false": False}
+        # 如果启动是通过已存在的容器或者 全局配置 CLEAN_RESULTS是Fasle，则任务退出时不会清除容器实例
+        if not framework_config.get("serving_container_name") or \
+            bool_map.get(get_config_data().get("ENV_config").get("CLEAN_RESULTS").lower()):
             container_manager.cleanup()
         
         # 记录执行时间

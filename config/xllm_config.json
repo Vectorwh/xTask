@@ -7,6 +7,7 @@
         "https_proxy_url": "",
         "http_proxy_url": "",
         "sering_container_name": "",
-        "serving_script_path": ""
+        "serving_script_path": "",
+        "serving_wait_time": 30
     }
 }

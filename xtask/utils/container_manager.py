@@ -14,6 +14,8 @@ from dataclasses import dataclass, asdict
 import json
 import yaml
 
+from xtask.utils.config_parser import get_config_data
+
 
 @dataclass
 class ContainerConfig:
@@ -949,3 +951,10 @@ def create_inference_container(model_config: Dict[str, Any],
     )
     
     return ContainerManager(container_config)
+
+
+def path_mapping_in_container(path: str):
+    volumes = get_config_data().get("DOCKER_CONFIG").get("volumes")
+    for outside_path, inside_path in volumes.items():
+        if outside_path in path:
+            return path.replace(outside_path, inside_path + "/")

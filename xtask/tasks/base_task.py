@@ -3,6 +3,7 @@ import logging
 import yaml
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Any
+from enum import Enum
 
 
 @dataclass
@@ -18,6 +19,7 @@ class BenchmarkConfig:
     request_rate: str = ""
     baseline: str = ""
     threshold: float = 0.0
+    api_type: str = ""
 
 
 @dataclass
@@ -44,19 +46,25 @@ class TaskConfig:
     enable_mtp: bool = False
     dataset_name: str = "GSM8K"
     dataset_path: str = ""
-    metrics: str = ["perf"] # 支持的列表 e2el,ttft,tpot,itl,acc
+    metrics: list = field(default_factory=lambda: ["perf"]) # 支持的列表 e2el,ttft,tpot,itl,acc
     
     # 基准测试配置
     benchmark_type: str = "aisbench"
     perf: BenchmarkConfig = field(default_factory=lambda: BenchmarkConfig(
         case_type="performance",
+        api_type="vllm_api_general_stream",
+        batch_size=1,
+        dataset_path="",
+        request_rate=0,
+        max_out_len=1024,
+        baseline="",
         threshold=0.97
     ))
     acc: BenchmarkConfig = field(default_factory=lambda: BenchmarkConfig(
         case_type="accuracy",
         dataset_path="vllm",
         baseline="95",
-        threshold=5
+        threshold=5.0
     ))
     
     @classmethod
@@ -148,9 +156,9 @@ class TaskConfig:
         if hasattr(args, 'perf_num_prompts'):
             config.perf.num_prompts = getattr(args, 'perf_num_prompts', "")
         if hasattr(args, 'perf_max_out_len'):
-            config.perf.max_out_len = getattr(args, 'perf_max_out_len', "")
-        if hasattr(args, 'perf_batch_size'):
-            config.perf.batch_size = getattr(args, 'perf_batch_size', "")
+            config.perf.max_out_len = getattr(args, 'max_out_len', "")
+        if hasattr(args, 'batch_size'):
+            config.perf.batch_size = getattr(args, 'batch_size', "")
         if hasattr(args, 'perf_request_rate'):
             config.perf.request_rate = getattr(args, 'perf_request_rate', "")
         if hasattr(args, 'perf_baseline'):

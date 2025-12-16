@@ -5,14 +5,17 @@
         "XLLM_LOG_LEVEL": "INFO",
         "MINDIE_LOG_LEVEL": "INFO",
         "VLLM_LOG_LEVEL": "INFO",
-        "CLEAN_RESULTS": "1",
-        "MODEL_HOME_PATH": "",
+        "CLEAN_RESULTS": "True",
+        "MODEL_HOME_PATH": "/export/home/models/",
         "DATASET_HOME_PATH": "output",
         "enable_docker": "True",
         "Profiling": "False",
         "start_device_id": 0,
         "LOG_PATH": "logs",
-        "Device_type": "A3"
+        "Device_type": "A3",
+        "docker_cmd": "docker",
+        "python_exec": "python",
+        "pip_exec": "pip"
     },
     "DOCKER_CONFIG": {
         "docker_cmd": "docker",

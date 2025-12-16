@@ -1,6 +1,5 @@
 #!/bin/bash
 # xllm_serv.sh - XLLM 服务启动脚本模板
-set -euo pipefail  # 增强脚本健壮性
 
 # 环境变量设置
 export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"

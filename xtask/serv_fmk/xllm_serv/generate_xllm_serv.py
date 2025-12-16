@@ -101,7 +101,7 @@ def generate_xllm_serv_commands(task_config, framework_config):
         start_serv_script, script_path = generate_single_card_script(task_config, cmd_file)
         if start_serv_script:
             startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/; \
-                cd {script_path}; bash {start_serv_script};"
+                rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"
         else:
             logging.error("generate xllm serv script failed.")
     # 多卡
