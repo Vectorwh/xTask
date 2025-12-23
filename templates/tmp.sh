@@ -67,3 +67,16 @@ chmod -R 640 "ranktable_file_path/hccl_2s_16p.json"
 export OMP_NUM_THREADS=10
 #HCCL显存分配策略，配置后不会跑着跑着继续申请显存。
 export HCCL_ALGO="level0:NA;level1:pipeline"
+
+
+curl https://pm8jb5oh5ebeckgaj9qjdqme59d85jga.openapi-sj.sii.edu.cn/v1/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $INF_API_KEY" \
+  -d '{
+    "model": "deepseek_v32",
+    "prompt": "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜></think>Hello! I am DeepSeek.<｜end▁of▁sentence｜><｜User｜>自我介绍<｜Assistant｜><think>",
+    "max_tokens": 8192,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "stop": ["<｜end▁of▁sentence｜>"]
+  }'
