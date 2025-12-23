@@ -33,7 +33,6 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 rm -rf /root/atb/log/
 rm -rf /root/ascend/log/
 rm -rf core.*
-mkdir -p log
 
 # ============ 从配置读取的参数 ============
 # 以下变量将从 YAML 配置文件读取
@@ -55,6 +54,9 @@ MAX_TOKENS_PER_BATCH={MAX_TOKENS_PER_BATCH}
 MAX_SEQS_PER_BATCH={MAX_SEQS_PER_BATCH}
 DP_SIZE={DP_SIZE}
 EP_SIZE={EP_SIZE}
+SERVING_EXTENSIABLE_PARAM={SERVING_EXTENSIABLE_PARAM}
+USERID={USERID}
+mkdir -p $LOG_DIR
 # ========================================
 
 # HCCL 端口配置
@@ -87,6 +89,7 @@ do
     --communication_backend "$COMMUNICATION_BACKEND"
     --enable_schedule_overlap "$ENABLE_SCHEDULE_OVERLAP"
     --enable_mla "$ENABLE_MLA"
+    $SERVING_EXTENSIABLE_PARAM
   )
   echo "服务启动命令: ${xllm_command[*]}"
   "${xllm_command[@]}" > "$LOG_FILE" 2>&1 &
@@ -94,3 +97,5 @@ do
 done
 
 echo "所有节点已启动，主节点地址: $MASTER_NODE_ADDR"
+
+chown -R $USERID:$USERID $LOG_DIR

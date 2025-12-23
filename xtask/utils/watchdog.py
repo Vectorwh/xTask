@@ -971,8 +971,9 @@ class NpuProcessMonitorProcess(Process):
 
 class WatchdogManager:
     """Watchdog 主管理器，协调两个监控进程和超时控制"""
-    def __init__(self, config: WatchdogConfig):
+    def __init__(self, config: WatchdogConfig, serving_wait_time: int):
         self.config = config
+        self.serving_wait_time = serving_wait_time
         self.exit_event = Event()  # 全局退出信号（所有进程监听）
         self.success_event = Event()  # 服务启动成功信号
         self.log_monitor: Optional[Process] = None
@@ -1014,7 +1015,7 @@ class WatchdogManager:
         self._join_processes()
 
         # 5. 输出最终状态
-        self._print_final_status(elapsed_time)
+        self._print_final_status(elapsed_time + self.serving_wait_time)
 
     def _join_processes(self):
         """等待所有子进程退出"""

@@ -30,14 +30,14 @@ def generate_single_card_script(config, output_file="xllm_serv_single_card.sh"):
     
     # 获取本地 IP
     local_ip = get_local_ip()
-    if config.get('node_addr') and config['node_addr'] != '0.0.0.0':
-        local_ip = config['node_addr']
+    if config.get('host_addr') and config['host_addr'] != '0.0.0.0':
+        local_ip = config['host_addr']
     
     # 参数映射
     params = {
         'LOCAL_IP': local_ip,
         'MODEL_PATH': config.get('model_path', '/models/Qwen3-4B'),
-        'START_PORT': config.get('node_port', 14830),
+        'START_PORT': config.get('port', 14830),
         'START_DEVICE': config.get('start_device_id', 0),
         'NNODES': config.get('nodes', 1),
         'WORLD_SIZE': config.get('world_size', 1),
@@ -51,8 +51,10 @@ def generate_single_card_script(config, output_file="xllm_serv_single_card.sh"):
         'MAX_MEMORY_UTILIZATION': config.get('max_memory_utiliization', 0.9),
         'MAX_TOKENS_PER_BATCH': config.get('max_tokens_per_batch', 20000),
         'MAX_SEQS_PER_BATCH': config.get('max_seqs_per_batch', 256),
-        'DP_SIZE': 1,  # 默认值
-        'EP_SIZE': 1,  # 默认值
+        'DP_SIZE': config.get("serving_extensiable_param", ""),  # 默认值
+        'EP_SIZE': config.get("serving_extensiable_param", ""),  # 默认值
+        "SERVING_EXTENSIABLE_PARAM": config.get("serving_extensiable_param", ""),
+        "USERID": config.get("userid", 0)
     }
     
     # 读取模板
@@ -74,9 +76,9 @@ def generate_single_card_script(config, output_file="xllm_serv_single_card.sh"):
     script_content = template
     if script_content:
         for key, value in params.items():
-            # TODO: 待优化，需要从配置中读取
             if key == "MODEL_PATH":
-                value = value.replace("/export/home/models/", "/models/")
+                from xtask.utils.container_manager import path_mapping_in_container
+                value = path_mapping_in_container(value)
             script_content = script_content.replace(f'{{{key}}}', str(value))
         
         output_file_path = os.path.join("./outputs", f"{config.get('case_name').lower()}")
@@ -100,8 +102,8 @@ def generate_xllm_serv_commands(task_config, framework_config):
     if int(task_config.get("world_size")) == 1:
         start_serv_script, script_path = generate_single_card_script(task_config, cmd_file)
         if start_serv_script:
-            startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/; \
-                rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"
+            startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/;" \
+                f"rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"
         else:
             logging.error("generate xllm serv script failed.")
     # 多卡
@@ -120,7 +122,7 @@ def generate_xllm_serv_commands(task_config, framework_config):
     return startup_cmd
 
 
-def wait_xllm_serv_start(task_config):
+def wait_xllm_serv_start(task_config, serving_wait_time):
     from xtask.utils.watchdog import WatchdogConfig, WatchdogManager
     state = False
     
@@ -137,7 +139,7 @@ def wait_xllm_serv_start(task_config):
     )
 
     # 2. 启动Watchdog
-    watchdog_manager = WatchdogManager(test_config)
+    watchdog_manager = WatchdogManager(test_config, serving_wait_time)
     try:
         watchdog_manager.start()
     except KeyboardInterrupt:

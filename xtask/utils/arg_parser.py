@@ -93,11 +93,17 @@ Usage Examples:
             help="Model path (local or remote URL)"
         )
         parser.add_argument(
-            "--framework", "-mf",
+            "--framework", "-fmk",
             type=str,
             choices=['xllm', 'mindie', 'vllm-ascend'],
             default='xllm',
             help="Inference framework type"
+        )
+        parser.add_argument(
+            "--trust_remote_code", "-trc",
+            type=bool,
+            default=False,
+            help="是否信任远程代码"
         )
         
         # Dataset parameters
@@ -112,18 +118,58 @@ Usage Examples:
             help="Dataset path"
         )
         parser.add_argument(
+            "--dataset_conf",
+            type=str,
+            help="Dataset config"
+        )
+        parser.add_argument(
             "--dataset_format", "-df",
             type=str,
             choices=['json', 'jsonl', 'csv', 'huggingface'],
             default='json',
             help="Dataset format"
         )
+        parser.add_argument(
+            "--block_size",
+            type=int,
+            default=128,
+            help="block_size"
+        )
+        parser.add_argument(
+            "--communication_backend",
+            type=str,
+            default="hccl",
+            help="communication_backend"
+        )
+        parser.add_argument(
+            "--enhanced_result",
+            type=bool,
+            default=False,
+            help="additional onfig"
+        )
+        parser.add_argument(
+            "--device_type",
+            choices=['A2', 'A2C', 'A3'],
+            type=str,
+            default='A3',
+            help="device type"
+        )
+        parser.add_argument(
+            "--serving_extensiable_param",
+            type=str,
+            help="additional onfig"
+        )
+        parser.add_argument(
+            "--additional_config",
+            type=str,
+            help="additional config"
+        )
         
         # Benchmark parameters
         parser.add_argument(
             "--benchmark_type", "-bt",
             type=str,
-            choices=['aisbench', 'vllm_bench', 'xllm_bench'],
+            choices=['aisbench', 'vllm_bench', 'xllm_bench', 'jd_vllm_bench'],
             default='aisbench',
             help="Benchmark tool type"
         )
@@ -131,6 +177,45 @@ Usage Examples:
             "--benchmark_config", "-bc",
             type=str,
             help="Benchmark configuration file path"
+        )
+        parser.add_argument(
+            "--request_conf",
+            type=str,
+            help="request conf"
+        )
+        parser.add_argument(
+            "--request_rate",
+            type=int,
+            default=0,
+            help="request rate"
+        )
+        parser.add_argument(
+            "--perf_baseline",
+            type=str,
+            help="perf_baseline"
+        )
+        parser.add_argument(
+            "--acc_baseline",
+            type=str,
+            help="request conf"
+        )
+        parser.add_argument(
+            "--perf_threshold",
+            type=float,
+            default=0.05,
+            help="perf_threshold"
+        )
+        parser.add_argument(
+            "--acc_threshold",
+            type=float,
+            default=0.05,
+            help="acc_threshold"
+        )
+        parser.add_argument(
+            "--metrics",
+            type=str,
+            default='perf',
+            help="benchmark metrics"
         )
         
         # Inference service parameters
@@ -147,23 +232,47 @@ Usage Examples:
             help="Inference service host address"
         )
         parser.add_argument(
+            "--world_size",
+            type=int,
+            default=1,
+            help="world_size"
+        )
+        parser.add_argument(
+            "--nodes",
+            type=int,
+            default=1,
+            help="nodes"
+        )
+        parser.add_argument(
+            "--start_device_id",
+            type=int,
+            default=0,
+            help="start_device_id"
+        )
+        parser.add_argument(
             "--gpu_ids", "-g",
             type=str,
             help="GPU ID list, comma-separated"
         )
+        parser.add_argument(
+            "--max_memory_utiliization",
+            type=float,
+            default=0.9,
+            help="max_memory_utiliization"
+        )
         
         # Test task parameters
         parser.add_argument(
-            "--input_length", "-il",
+            "--input_length",
             type=int,
             default=512,
-            help="Input sequence length"
+            help="Input sequence length/num prompts"
         )
         parser.add_argument(
-            "--output_length", "-ol",
+            "--output_length",
             type=int,
             default=128,
-            help="Output sequence length"
+            help="Output sequence length/max_out_len"
         )
         parser.add_argument(
             "--batch_size", "-bs",
@@ -171,7 +280,50 @@ Usage Examples:
             default=1,
             help="Batch size"
         )
-        
+        parser.add_argument(
+            "--max_seqs_per_batch",
+            type=int,
+            default=256,
+            help="max_seqs_per_batch"
+        )
+        parser.add_argument(
+            "--max_tokens_per_batch",
+            type=int,
+            default=1024,
+            help="max_tokens_per_batch"
+        )
+
+        parser.add_argument(
+            "--enable_prefix_cache",
+            type=bool,
+            default=False,
+            help="enable_prefix_cache"
+        )
+        parser.add_argument(
+            "--enable_chunked_prefill",
+            type=bool,
+            default=False,
+            help="enable_chunked_prefill"
+        )
+        parser.add_argument(
+            "--enable_schedule_overlap",
+            type=bool,
+            default=False,
+            help="enable_schedule_overlap"
+        )
+        parser.add_argument(
+            "--enable_mtp",
+            type=bool,
+            default=False,
+            help="enable_mtp"
+        )
+        parser.add_argument(
+            "--enable_mla",
+            type=bool,
+            default=False,
+            help="enable_mla"
+        )
+
         # Container parameters
         parser.add_argument(
             "--container_image", "-ci",
@@ -513,28 +665,28 @@ Usage Examples:
         
         
         if result.is_valid:
-            logging.info(f"✅ Validation PASSED (Source: {result.config_source.value})")
+            logging.info(f"  ✅  Validation PASSED (Source: {result.config_source.value})")
             
             if result.warnings:
-                logging.info("⚠️ Warnings:")
+                logging.info("  ⚠️  Warnings:")
                 for warning in result.warnings:
                     logging.warning(f"  - {warning}")
             
-            logging.info(f"📋 Configuration Summary:")
+            logging.info(f"  📋  Configuration Summary:")
             self._print_config_summary(result.config_data)
             
         else:
-            logging.error("❌ Validation FAILED")
+            logging.error("  ❌  Validation FAILED")
             logging.error("Error Details:")
             for error in result.errors:
                 logging.error(f"  - {error}")
             
             if result.warnings:
-                logging.info("⚠️  Warnings:")
+                logging.info("  ⚠️  Warnings:")
                 for warning in result.warnings:
                     logging.warning(f"  - {warning}")
             
-            logging.info("💡 Suggestions:")
+            logging.info("  💡  Suggestions:")
             logging.info("  1. Check if all required arguments are provided")
             logging.info("  2. Verify file paths are correct")
             logging.info("  3. Use --help to view complete argument documentation")
@@ -580,7 +732,7 @@ def main():
         checker.print_validation_result(result)
         sys.exit(0 if result.is_valid else 1)
     except Exception as e:
-        logging.error(f"❌ Argument validation failed: {str(e)}")
+        logging.error(f"  ❌  Argument validation failed: {str(e)}")
         sys.exit(1)
 
 

@@ -1,12 +1,12 @@
 import logging
 
 
-def wait_serv_start(framework, task_config):
+def wait_serv_start(framework, task_config, serving_wait_time):
     ret = False
     if framework == "xllm":
         from xtask.serv_fmk.xllm_serv.generate_xllm_serv import wait_xllm_serv_start
 
-        ret = wait_xllm_serv_start(task_config)
+        ret = wait_xllm_serv_start(task_config, serving_wait_time)
 
     elif framework == "vllm-ascend":
         from xtask.serv_fmk.vllm_ascend_serv.generate_vllm_ascend_serv \

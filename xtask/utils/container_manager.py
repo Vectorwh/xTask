@@ -299,7 +299,9 @@ class ContainerManager:
         # Add container name
         if config.container_name:
             cmd_parts.extend(["--name", config.container_name])
-        
+
+        # if config.root_run:
+        #     cmd_parts.extend(["-u", os.getuid()])
         # Add detach flag
         if config.detach:
             cmd_parts.append("-d")
@@ -958,3 +960,4 @@ def path_mapping_in_container(path: str):
     for outside_path, inside_path in volumes.items():
         if outside_path in path:
             return path.replace(outside_path, inside_path + "/")
+    return path

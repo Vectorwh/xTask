@@ -30,11 +30,11 @@ def generate_aisbench_script(
         perf_cfg = benchmark_dict.get("perf", None)
 
     # aisbench配置默认值
-    api_address = task_config.get("node_addr", "127.0.0.1")
-    api_port = task_config.get("node_port", 14830)
+    api_address = task_config.get("host_addr", "127.0.0.1")
+    api_port = task_config.get("port", 14830)
     model_name = task_config.get("served_model_name", "model")
-    model_path = task_config.get("model_path", "/path/to/model")
-    dataset_path = perf_cfg.get("dataset_path", "/path/to/dataset")
+    model_path = task_config.get("model_path", "")
+    dataset_path = perf_cfg.get("dataset_path", "")
     max_out_len = perf_cfg.get("max_out_len", 512)
     batch_size = perf_cfg.get("batch_size", 1)
     request_rate = perf_cfg.get("request_rate", 0)
@@ -44,6 +44,7 @@ def generate_aisbench_script(
     top_p = perf_cfg.get("top_p", 0.95)
     seed = perf_cfg.get("seed", 1024)
     model_path_inside = path_mapping_in_container(model_path)
+    user_id = os.getuid()
 
     # ========== 2. 构造shell脚本内容 ==========
     shell_content = []
@@ -60,6 +61,17 @@ def generate_aisbench_script(
     shell_content.append('fi')
     shell_content.append('echo "ais_bench安装路径：$AIS_BENCH_PATH"')
 
+    if task_config.get("dataset_name").lower() == "gsm8k":
+        shell_content.append('\necho "下载gsm8k dataset：$AIS_BENCH_PATH/datasets/gsm8"')
+        shell_content.append('if [ ! -d "$AIS_BENCH_PATH/datasets/gsm8k" ]; then')
+        shell_content.append('    cd $AIS_BENCH_PATH/datasets')
+        shell_content.append('    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip')
+        shell_content.append('    unzip gsm8k.zip')
+        shell_content.append('    rm gsm8k.zip')
+        shell_content.append('else')
+        shell_content.append('    echo "$AIS_BENCH_PATH/datasets/gsm8k 已存在."')
+        shell_content.append('fi')
+
     # Step 2: 定位vllm_api_general_stream.py配置文件
     shell_content.append("\n# 2. 定位vllm_api配置文件")
     shell_content.append('CONFIG_FILE="$AIS_BENCH_PATH/benchmark/configs/models/vllm_api/vllm_api_general_stream.py"')
@@ -69,8 +81,16 @@ def generate_aisbench_script(
     shell_content.append('fi')
     shell_content.append('echo "目标配置文件：$CONFIG_FILE"')
 
+    shell_content.append("\n# 2. 定位vllm_api配置文件")
+    shell_content.append('CHAT_CONFIG_FILE="$AIS_BENCH_PATH/benchmark/configs/models/vllm_api/vllm_api_general_chat.py"')
+    shell_content.append('if [ ! -f "$CHAT_CONFIG_FILE" ]; then')
+    shell_content.append('    echo "错误：配置文件不存在 $CHAT_CONFIG_FILE"')
+    shell_content.append('    exit 1')
+    shell_content.append('fi')
+    shell_content.append('echo "目标配置文件：$CHAT_CONFIG_FILE"')
+
     # Step 3: 修改配置文件中的核心参数（使用sed命令）
-    shell_content.append("\n# 3. 修改vllm_api配置文件参数")
+    shell_content.append("\n# 3. 修改vllm_api配置文件$CONFIG_FILE参数")
     # 替换API地址
     shell_content.append(f'sed -i.bak "s/host_ip\s*=\s*.*,/host_ip=\'{api_address}\',/g" "$CONFIG_FILE"')
     # 替换API端口
@@ -93,21 +113,50 @@ def generate_aisbench_script(
     shell_content.append(f'cp $CONFIG_FILE {output_file_path_incontainer}/ ')
     shell_content.append('echo "配置文件修改完成（已生成备份文件 ${CONFIG_FILE}.bak）"')
 
-    # Step 4: 生成精度测试命令（若开启）
-    if accuracy_cfg.get("enable", False):
+    # 修改配置文件 $CHAT_CONFIG_FILE 中的核心参数（使用sed命令）
+    shell_content.append("\n# 3. 修改vllm_api配置文件$CHAT_CONFIG_FILE")
+    # 替换API地址
+    shell_content.append(f'sed -i.bak "s/host_ip\s*=\s*.*,/host_ip=\'{api_address}\',/g" "$CHAT_CONFIG_FILE"')
+    # 替换API端口
+    shell_content.append(f'sed -i "s/host_port\s*=\s*.*,/host_port={api_port},/g" "$CHAT_CONFIG_FILE"')
+    # 替换模型名称
+    shell_content.append(f'sed -i "s/model\s*=\s*.*,/model=\'{model_name}\',/g" "$CHAT_CONFIG_FILE"')
+    # 替换模型路径
+    shell_content.append(f'sed -i "s#path\s*=\s*\\"\\",#path=\'{model_path_inside}\',#g" "$CHAT_CONFIG_FILE"')
+    # 替换数据集路径
+    shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={request_rate},/g" "$CHAT_CONFIG_FILE"')
+    # 替换最大生成token数
+    shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={max_out_len},/g" "$CHAT_CONFIG_FILE"')
+    # 替换batchsize
+    shell_content.append(f'sed -i "s/batch_size\s*=\s*.*,/batch_size={batch_size},/g" "$CHAT_CONFIG_FILE"')
+
+    shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={temperature},/g" "$CHAT_CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={top_k},/g" "$CHAT_CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={top_p},/g" "$CHAT_CONFIG_FILE"')
+    shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={seed},/g" "$CHAT_CONFIG_FILE"')
+    shell_content.append(f'cp $CHAT_CONFIG_FILE {output_file_path_incontainer}/ ')
+    shell_content.append('echo "配置文件修改完成（已生成备份文件 ${CHAT_CONFIG_FILE}.bak）"')
+
+    # Step 4: 生成精度测试命令, 如果配置了 dataset_conf则说明要跑对应数据集的精度
+    if accuracy_cfg.get("dataset_conf"):
         shell_content.append("\n# 4. 执行精度测试")
         api_type = perf_cfg.get("api_type", "vllm_api_general_stream")
-        metrics_str = ",".join(accuracy_metrics)
+        # metrics_str = ",".join(accuracy_metrics)
+        dataset_conf = accuracy_cfg.get("dataset_conf")
         accuracy_metrics = accuracy_cfg.get("metrics", ["bleu", "rouge"])
         accuracy_batch_size = accuracy_cfg.get("batch_size", batch_size)
         accuracy_max_out_len = accuracy_cfg.get("max_out_len", max_out_len)
+        dump_eval_details = task_config.get("dump_eval_details", "")
+        if dump_eval_details:
+            dump_eval_details_str = "--dump-eval-details "
+        else:
+            dump_eval_details_str = ""
         
         # 构造ais-bench精度测试命令（参考ais-bench官方文档）
         accuracy_cmd = (
             f'ais_bench --models {api_type} '
-            f'--datasets {dataset_name} '
-            f'--mode {mode} '
-            f'--dump-eval-details '
+            f'--datasets {dataset_conf} '
+            f'{dump_eval_details_str} '
             f'--work-dir {output_file_path_incontainer}'
         )
         shell_content.append(f'echo "执行精度测试命令：{accuracy_cmd}"')
@@ -141,6 +190,8 @@ def generate_aisbench_script(
         shell_content.append(f'echo "性能测试完成，结果保存至 {output_file_path_incontainer}"')
     else:
         shell_content.append("\n# 5. 执行性能测试，skip task...")
+    
+    shell_content.append(f'chown -R {user_id}:{user_id} {output_file_path_incontainer} ')
 
     # 收尾：提示脚本完成
     shell_content.append("\necho \"===== ais-bench测试脚本执行完成 =====\"")
@@ -154,7 +205,8 @@ def generate_aisbench_script(
     logging.info(f"Shell脚本已生成：{output_shell_path_incontainer}")
     logging.info(f"脚本执行方式：bash {output_shell_path_incontainer}")
     benchmark_cmd = f"bash {output_shell_path_incontainer}"
-    return benchmark_cmd
+    accuracy_cmd = ""
+    return benchmark_cmd, accuracy_cmd
 
 # ========== 示例调用 ==========
 if __name__ == "__main__":
