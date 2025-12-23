@@ -9,17 +9,22 @@ from enum import Enum
 @dataclass
 class BenchmarkConfig:
     """基准测试配置"""
-    case_type: str = ""
-    dataset_path: str = ""
-    dataset_conf: str = ""
-    request_conf: str = ""
+    case_type: str = ""  # perf:性能, acc精度, all
+    dataset_path: str = ""  # 数据集文件路径
+    dataset_conf: str = ""  # 数据集目录下的配置文件，对应aisbench的datasets，其他bench工具可为空
+    api_type: str = ""  # 对应服务化后端的类型 vllm_api_general_chat/vllm_api_general_stream
     num_prompts: str = ""
     max_out_len: str = ""
     batch_size: str = ""
     request_rate: str = ""
     baseline: str = ""
-    threshold: float = 0.0
-    api_type: str = ""
+    threshold: float = 0.1
+    max_num_worker: int = 1
+    enable_debug: bool = False
+    merge_ds: bool = False
+    dump_eval_details: bool = False
+    dump_extract_rate: bool = False
+    pressure: bool = False
 
 
 @dataclass
@@ -33,8 +38,8 @@ class TaskConfig:
     max_memory_utiliization: float = 0.9
     nodes: int = 1
     world_size: int = 1
-    node_addr: str = "0.0.0.0"
-    node_port: int = 14830
+    host_addr: str = "0.0.0.0"
+    port: int = 14830
     max_tokens_per_batch: int = 20000
     max_seqs_per_batch: int = 256
     enable_mla: bool = False
@@ -44,27 +49,45 @@ class TaskConfig:
     enable_chunked_prefill: bool = False
     enable_schedule_overlap: bool = False
     enable_mtp: bool = False
-    dataset_name: str = "GSM8K"
+    dataset_name: str = "synthetic"   # synthetic: 随机数，GSM8K，sonnet
     dataset_path: str = ""
-    metrics: list = field(default_factory=lambda: ["perf"]) # 支持的列表 e2el,ttft,tpot,itl,acc
-    
+    dataset_format: str = "json"  # choices: ['json', 'jsonl', 'csv', 'huggingface']
+    metrics: str = "perf"  # 支持的列表 e2el,ttft,tpot,itl,acc
+    enhanced_result = False
+    device_type = "A3"  # A2（8卡）,A2C(16卡),A3（8卡16die）
+    serving_extensiable_param = ""
+    additional_config: str = ""
+    userid: int = os.getuid()
+
     # 基准测试配置
     benchmark_type: str = "aisbench"
     perf: BenchmarkConfig = field(default_factory=lambda: BenchmarkConfig(
         case_type="performance",
         api_type="vllm_api_general_stream",
-        batch_size=1,
         dataset_path="",
+        batch_size=1,
         request_rate=0,
         max_out_len=1024,
-        baseline="",
-        threshold=0.97
+        baseline="100",
+        threshold=0.97,
+        enable_debug=False,
+        merge_ds=False,
+        pressure=False
     ))
     acc: BenchmarkConfig = field(default_factory=lambda: BenchmarkConfig(
         case_type="accuracy",
-        dataset_path="vllm",
-        baseline="95",
-        threshold=5.0
+        api_type="vllm_api_general_stream",
+        dataset_path="",
+        dataset_conf="",
+        request_rate=0,
+        max_out_len=1024,
+        baseline="100",
+        threshold=0.95,
+        enable_debug=False,
+        merge_ds=False,
+        max_num_worker=1,
+        dump_eval_details=False,
+        dump_extract_rate=False
     ))
     
     @classmethod
@@ -109,7 +132,7 @@ class TaskConfig:
     
     @classmethod
     def from_args(cls, args, xtask_config) -> 'TaskConfig':
-        """TODO 待优化: 从命令行参数创建配置"""
+        """ 从命令行参数创建配置"""
         config = cls()
         if hasattr(args, 'model_name'):
             setattr(config, "model_name", getattr(args, 'model_name', ""))
@@ -118,22 +141,17 @@ class TaskConfig:
         setattr(config, "case_name", f"{args.model_name}_{args.framework}") 
         for field_name in cls.__dataclass_fields__:
             if field_name == "start_device_id":
-                env_start_device_id = xtask_config.get("ENV_config").get("start_device_id")
+                env_start_device_id = xtask_config.get("ENV_CONFIG").get("start_device_id")
                 value = env_start_device_id if env_start_device_id else getattr(args, field_name)
                 setattr(config, field_name, value)
                 continue
     
-            if field_name == "node_port":
-                env_port = getattr(args, "port")
-                value = env_port if env_port else getattr(args, field_name)
-                setattr(config, field_name, value)
-                continue
-
             if field_name == "served_model_name":
                 served_model_name = getattr(args, "model_path").split("/")[-1]
                 value = served_model_name if served_model_name else getattr(args, field_name)
                 setattr(config, field_name, value)
                 continue
+
 
             if field_name not in ['perf', 'acc'] and hasattr(args, field_name):
                 value = getattr(args, field_name)
@@ -145,49 +163,51 @@ class TaskConfig:
             config.benchmark_type = getattr(args, 'benchmark_type', "aisbench")
         
         # 设置perf配置
-        if hasattr(args, 'perf_case_type'):
+        if hasattr(args, 'perf_type'):
             config.perf.case_type = getattr(args, 'perf_case_type', "performance")
-        if hasattr(args, 'perf_dataset_path'):
-            config.perf.dataset_path = getattr(args, 'perf_dataset_path', "")
-        if hasattr(args, 'perf_dataset_conf'):
-            config.perf.dataset_conf = getattr(args, 'perf_dataset_conf', "")
-        if hasattr(args, 'perf_request_conf'):
-            config.perf.request_conf = getattr(args, 'perf_request_conf', "")
-        if hasattr(args, 'perf_num_prompts'):
-            config.perf.num_prompts = getattr(args, 'perf_num_prompts', "")
-        if hasattr(args, 'perf_max_out_len'):
+        if hasattr(args, 'dataset_path'):
+            config.perf.dataset_path = getattr(args, 'dataset_path', "")
+        if hasattr(args, 'dataset_conf'):
+            config.perf.dataset_conf = getattr(args, 'dataset_conf', "")
+        if hasattr(args, 'request_conf'):
+            config.perf.request_conf = getattr(args, 'request_conf', "")
+        if hasattr(args, 'num_prompts'):
+            config.perf.num_prompts = getattr(args, 'num_prompts', "")
+        if hasattr(args, 'max_out_len'):
             config.perf.max_out_len = getattr(args, 'max_out_len', "")
         if hasattr(args, 'batch_size'):
             config.perf.batch_size = getattr(args, 'batch_size', "")
-        if hasattr(args, 'perf_request_rate'):
-            config.perf.request_rate = getattr(args, 'perf_request_rate', "")
+        if hasattr(args, 'request_rate'):
+            config.perf.request_rate = getattr(args, 'request_rate', "")
         if hasattr(args, 'perf_baseline'):
-            config.perf.baseline = getattr(args, 'perf_baseline', "")
+            config.perf.baseline = getattr(args, 'baseline', "")
         if hasattr(args, 'perf_threshold'):
-            config.perf.threshold = getattr(args, 'perf_threshold', 0.97)
+            config.perf.threshold = getattr(args, 'perf_threshold', 0.05)
         
         # 设置acc配置
-        if hasattr(args, 'acc_case_type'):
+        if hasattr(args, 'acc_type'):
             config.acc.case_type = getattr(args, 'acc_case_type', "accuracy")
-        if hasattr(args, 'acc_dataset_path'):
-            config.acc.dataset_path = getattr(args, 'acc_dataset_path', "vllm")
-        if hasattr(args, 'acc_dataset_conf'):
-            config.acc.dataset_conf = getattr(args, 'acc_dataset_conf', "")
-        if hasattr(args, 'acc_request_conf'):
-            config.acc.request_conf = getattr(args, 'acc_request_conf', "")
-        if hasattr(args, 'acc_num_prompts'):
-            config.acc.num_prompts = getattr(args, 'acc_num_prompts', "")
-        if hasattr(args, 'acc_max_out_len'):
-            config.acc.max_out_len = getattr(args, 'acc_max_out_len', "")
-        if hasattr(args, 'acc_batch_size'):
-            config.acc.batch_size = getattr(args, 'acc_batch_size', "")
-        if hasattr(args, 'acc_request_rate'):
-            config.acc.request_rate = getattr(args, 'acc_request_rate', "")
+        if hasattr(args, 'dataset_path'):
+            config.acc.dataset_path = getattr(args, 'dataset_path', "vllm")
+        if hasattr(args, 'dataset_conf'):
+            config.acc.dataset_conf = getattr(args, 'dataset_conf', "")
+        if hasattr(args, 'request_conf'):
+            config.acc.request_conf = getattr(args, 'request_conf', "")
+        if hasattr(args, 'num_prompts'):
+            config.acc.num_prompts = getattr(args, 'num_prompts', "")
+        if hasattr(args, 'max_out_len'):
+            config.acc.max_out_len = getattr(args, 'max_out_len', "")
+        if hasattr(args, 'batch_size'):
+            config.acc.batch_size = getattr(args, 'batch_size', "")
+        if hasattr(args, 'request_rate'):
+            config.acc.request_rate = getattr(args, 'request_rate', "")
         if hasattr(args, 'acc_baseline'):
             config.acc.baseline = getattr(args, 'acc_baseline', "95")
         if hasattr(args, 'acc_threshold'):
-            config.acc.threshold = getattr(args, 'acc_threshold', 5)
+            config.acc.threshold = getattr(args, 'acc_threshold', 0.05)
         
+        logging.info("Task info summary: %s"% config)
+
         return config
     
     def to_dict(self) -> Dict[str, Any]:

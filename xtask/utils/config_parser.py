@@ -6,7 +6,7 @@ import logging
 
 def get_config_data():
     try:
-        config_file = os.path.join(os.getcwd(), "config/xTask_config.json")
+        config_file = os.path.join(os.getcwd(), "config/xtask_config.json")
         with open(config_file, 'r') as cf:
             return json.load(cf)
     except Exception as e:

@@ -123,7 +123,7 @@ class TaskConfig:
             with open(task_yaml_path, 'r') as f:
                 config = yaml.safe_load(f)
             
-            logging.info(f"Loaded task config from: {task_yaml_path}")
+            logging.debug(f"Loaded task config from: {task_yaml_path}")
             return config if config else {}
         except Exception as e:
             logging.error(f"Failed to load task config: {e}")
@@ -211,8 +211,8 @@ class ContainerConfigBuilder:
             "MAX_MEMORY_UTILIZATION": str(task_config.get("max_memory_utiliization", 0.9)),
             "NODES": str(task_config.get("nodes", 1)),
             "WORLD_SIZE": str(task_config.get("world_size", 1)),
-            "NODE_ADDR": task_config.get("node_addr", "0.0.0.0"),
-            "NODE_PORT": str(task_config.get("node_port", 14830))
+            "NODE_ADDR": task_config.get("host_addr", "0.0.0.0"),
+            "NODE_PORT": str(task_config.get("port", 14830))
         }
         
         # 添加框架配置中的环境变量
@@ -263,6 +263,7 @@ def generate_commands(
     config_file = f"{work_dir}/config/{os.path.basename(task_yaml_path)}"
     startup_cmd = ""
     benchmark_cmd = ""
+    accuracy_cmd = ""
     
     # 生成启动命令
     if framework_config.get("framework") == "xllm":
@@ -288,7 +289,7 @@ def generate_commands(
     # 生成基准测试命令
     if task_config.get("benchmark").get("benchmark_type") == "aisbench":
         from xtask.benckmarks.aisbench.generate_aisbench_script import generate_aisbench_script
-        benchmark_cmd = generate_aisbench_script(
+        benchmark_cmd, accuracy_cmd = generate_aisbench_script(
             task_config=task_config,
             output_shell_file="run_aisbench_test.sh",
             python_exec="python"
@@ -299,7 +300,7 @@ def generate_commands(
         logging.error("benchmark_type: %s is not supported yet."% 
                       task_config.get("benchmark").get("benchmark_type"))
     
-    return startup_cmd, benchmark_cmd
+    return startup_cmd, benchmark_cmd, accuracy_cmd
 
 
 def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
@@ -332,6 +333,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         # 1. 读取任务YAML文件
         logging.info(f"Loading task config from: {task_yaml_path}")
         task_config = TaskConfig.load_task_config(task_yaml_path)
+        output_file_path = os.path.join(os.getcwd(), "outputs", f"{task_config.get('case_name').lower()}")
         
         if not task_config:
             result["message"] = f"Failed to load task config from {task_yaml_path}"
@@ -356,10 +358,10 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             return result
         
         # 4. 生成命令
-        startup_cmd, benchmark_cmd = generate_commands(framework_config, task_config, task_yaml_path)
+        startup_cmd, benchmark_cmd, accuracy_cmd = generate_commands(framework_config, task_config, task_yaml_path)
         result["startup_command"] = startup_cmd
-        result["accuray_command"] = startup_cmd
         result["benchmark_command"] = benchmark_cmd
+        result["accuray_command"] = accuracy_cmd
         
         # 5. 创建容器配置
         container_config = ContainerConfigBuilder.create_container_config(
@@ -504,13 +506,14 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         
         # 15. 等待服务启动
         logging.info("Waiting for service to start...")
-        ret = wait_serv_start(framework, task_config)
+        serving_wait_time = config_data.get("XLLM_CONFIG").get("serving_wait_time")
+        time.sleep(serving_wait_time) # 等待服务真正启动
+        ret = wait_serv_start(framework, task_config, serving_wait_time)
         if ret:
             logging.error(f"{framework} serv startup failed.")
         
         # 16. 检查服务是否运行
-        time.sleep(15) # 等待服务真正启动
-        check_cmd = f"curl -s http://{task_config.get('node_addr', '0.0.0.0')}:{task_config.get('node_port', 14830)}/health"
+        check_cmd = f"curl -s http://{task_config.get('host_addr', '0.0.0.0')}:{task_config.get('port', 14830)}/health"
         health_result = container_manager.exec_in_container(
             container_config.container_name,
             check_cmd,
@@ -524,9 +527,8 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             logging.error(result["message"])
 
         # 17. 执行精度测试命令
-        accuracy_cmd = ""
-        logging.info(f"Executing accuracy command: {accuracy_cmd}")
         if accuracy_cmd:
+            logging.info(f"Executing accuracy command: {accuracy_cmd}")
             accuracy_result = container_manager.exec_in_container(
                 container_config.container_name,
                 accuracy_cmd,
@@ -540,7 +542,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         else:
             logging.warning("accuracy_cmd is null, skip accuracy task.")
         
-        # 18. 执行基准测试命令
+        # 18. 执行性能基准测试命令
         logging.info(f"Executing benchmark command: {benchmark_cmd}")
         
         if benchmark_cmd:
@@ -558,7 +560,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             if benchmark_result.success:
                 logging.info("Benchmark completed successfully.")
                 from xtask.benckmarks.benchmark_common import result_postprocess
-                result = result_postprocess(benchmark_result.stdout, task_config.get("benchmark_type"))
+                result["benchmark_perf_result"] = result_postprocess(benchmark_result.stdout, task_config, output_file_path)
             else:
                 logging.error(f"Benchmark command failed with exit code {benchmark_result.exit_code}")
         else:
@@ -588,7 +590,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         bool_map = {"true": True, "false": False}
         # 如果启动是通过已存在的容器或者 全局配置 CLEAN_RESULTS是Fasle，则任务退出时不会清除容器实例
         if not framework_config.get("serving_container_name") or \
-            bool_map.get(get_config_data().get("ENV_config").get("CLEAN_RESULTS").lower()):
+            bool_map.get(get_config_data().get("ENV_CONFIG").get("CLEAN_RESULTS").lower()):
             container_manager.cleanup()
         
         # 记录执行时间

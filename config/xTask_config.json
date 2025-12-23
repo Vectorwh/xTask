@@ -1,5 +1,5 @@
 {
-    "ENV_config":{
+    "ENV_CONFIG":{
         "XTask_LOG_LEVEL": "INFO",
         "GLOBAL_LOG_LEVEL": "ERROR",
         "XLLM_LOG_LEVEL": "INFO",

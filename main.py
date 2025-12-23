@@ -17,11 +17,11 @@ def main():
     try:
         # Parse command line arguments
         args = checker.parse_arguments()
-        result = checker.validate_arguments(args)
-        checker.print_validation_result(result)
+        args_result = checker.validate_arguments(args)
+        checker.print_validation_result(args_result)
         xtask_config = get_config_data()
-        logging.info("result is: %s"% result)
-        if result.is_valid:
+        logging.debug("args_result is: %s"% args_result)
+        if args_result.is_valid:
             tasks = get_tasks(args, xtask_config)
             for task in tasks:
                 result = run_scheduler(task)
