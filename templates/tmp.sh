@@ -80,3 +80,39 @@ curl https://pm8jb5oh5ebeckgaj9qjdqme59d85jga.openapi-sj.sii.edu.cn/v1/completio
     "top_p": 0.95,
     "stop": ["<｜end▁of▁sentence｜>"]
   }'
+
+
+  export HCCL_IF_IP=141.61.81.134
+export GLOO_SOCKET_IFNAME="enp48s3u1u2"
+export TP_SOCKET_IFNAME="enp48s3u1u2"
+export HCCL_SOCKET_IFNAME="enp48s3u1u2"
+export HCCL_BUFFSIZE=1024
+export VLLM_USE_V1=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_VERSION=0.11.0
+vllm serve /mnt/share/w00933241/Qwen3-235B-A22B-w8a8-rot \
+        --served-model-name "qwen" \
+        --host 0.0.0.0 \
+        --port 20002 \
+        --async-scheduling \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 4 \
+        --data-parallel-size-local 4 \
+        --data-parallel-start-rank 0 \
+        --data-parallel-address 141.61.81.134 \
+        --data-parallel-rpc-port 2345 \
+        --max-num-seqs 100 \
+        --max-model-len 131072 \
+        --max-num-batched-tokens 16384 \
+        --gpu-memory-utilization 0.9 \
+        --enable-expert-parallel \
+        --no-enable-prefix-caching \
+        --quantization "ascend" \
+        --trust-remote-code \
+        --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \ 
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"ascend_scheduler_config":{"enabled":false}}'
