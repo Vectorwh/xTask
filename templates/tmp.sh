@@ -116,3 +116,50 @@ vllm serve /mnt/share/w00933241/Qwen3-235B-A22B-w8a8-rot \
         --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \ 
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{"ascend_scheduler_config":{"enabled":false}}'
+
+
+
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+#export CPU_AFFINITY_CONF=1
+export CPU_AFFINITY_CONF=1,npu_affine:1
+export TASK_QUEUE_ENABLE=1
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export HCCL_INTRA_PCIE_ENABLE=0
+export HCCL_INTRA_ROCE_ENABLE=1
+#export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+#export VLLM_ASCEND_ENABLE_NZ=1
+export VLLM_TORCH_PROFILER_DIR=/export/home/weinan/yjh/profiles/
+export ASCEND_BUFFER_POOL=4:8
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export MOONCAKE_CONFIG_PATH="/export/home/weinan/yjh/mooncake.json"
+rm -rf *.core
+
+#vllm serve /export/home/weinan/weights/DeepSeek-V3.2-Exp-W8A8/ \
+#vllm serve /export/home/weinan/yjh/DeepSeek-V3.2-Exp-w4a8/ \
+vllm serve /export/home/weinan/weights/DeepSeek-V3.2-Exp-W8A8/ \
+--host 0.0.0.0 \
+--port 8000 \
+--tensor-parallel-size 16 \
+--seed 1024 \
+--max-num-seqs 2 \
+--quantization ascend \
+--served-model-name deepseek_v32 \
+--max-model-len 24576 \
+--max-num-batched-tokens 24576 \
+--enable-expert-parallel \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.95  \
+--compilation-config '{"cudagraph_capture_sizes": [2,4,8,16]}' \
+--speculative-config '{"num_speculative_tokens": 2, "method": "mtp"}' 
