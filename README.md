@@ -70,10 +70,12 @@
 ## 执行样例
 
 ###  xLLM Qwen3-4b 性能+精度
-    python main.py --model_path=/export/home/weinan5/jiji6/xTask/Qwen3-4B --model_name=Qwen3-4B -bs=32 -fmk=xllm --dataset_conf=gsm8k_gen_4_shot_cot_chat_prompt --dataset_name=gsm8k
+    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=32 -fmk=xllm --dataset_conf=gsm8k_gen_4_shot_cot_chat_prompt --dataset_name=gsm8k
+
+    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=1 -fmk=xllm  --metrics=acc,perf --dataset_conf=gsm8k_gen_4_shot_cot_chat_prompt --dataset_name=gsm8k
 
 ###  xLLM Qwen3-4b 性能
-    python main.py --model_path=/export/home/weinan5/jiji6/xTask/Qwen3-4B --model_name=Qwen3-4B -bs=32 -fmk=xllm
+    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=32 -fmk=xllm
 
 ### xLLM Qwen3-4b case_name
     python main.py --case_name qwen3_4b_xllm_001

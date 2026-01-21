@@ -14,6 +14,8 @@ class BenchmarkConfig:
     dataset_conf: str = ""  # 数据集目录下的配置文件，对应aisbench的datasets，其他bench工具可为空
     api_type: str = ""  # 对应服务化后端的类型 vllm_api_general_chat/vllm_api_general_stream
     num_prompts: str = ""
+    input_len: int = 1024
+    output_len: int = 1024
     max_out_len: str = ""
     batch_size: str = ""
     request_rate: str = ""
@@ -67,7 +69,8 @@ class TaskConfig:
         dataset_path="",
         batch_size=1,
         request_rate=0,
-        max_out_len=1024,
+        input_len=1024,
+        output_len=1024,
         baseline="100",
         threshold=0.97,
         enable_debug=False,
@@ -80,7 +83,7 @@ class TaskConfig:
         dataset_path="",
         dataset_conf="",
         request_rate=0,
-        max_out_len=1024,
+        output_len=1024,
         baseline="100",
         threshold=0.95,
         enable_debug=False,
@@ -152,6 +155,11 @@ class TaskConfig:
                 setattr(config, field_name, value)
                 continue
 
+            if field_name == "metrics":
+                metrics_value = getattr(args, "metrics").split(",") if getattr(args, field_name)  else value
+                setattr(config, field_name, metrics_value)
+                continue
+
 
             if field_name not in ['perf', 'acc'] and hasattr(args, field_name):
                 value = getattr(args, field_name)
@@ -173,8 +181,10 @@ class TaskConfig:
             config.perf.request_conf = getattr(args, 'request_conf', "")
         if hasattr(args, 'num_prompts'):
             config.perf.num_prompts = getattr(args, 'num_prompts', "")
-        if hasattr(args, 'max_out_len'):
-            config.perf.max_out_len = getattr(args, 'max_out_len', "")
+        if hasattr(args, 'input_len'):
+            config.perf.input_len = getattr(args, 'input_len', "")
+        if hasattr(args, 'output_len'):
+            config.perf.output_len = getattr(args, 'output_len', "")
         if hasattr(args, 'batch_size'):
             config.perf.batch_size = getattr(args, 'batch_size', "")
         if hasattr(args, 'request_rate'):
@@ -195,8 +205,8 @@ class TaskConfig:
             config.acc.request_conf = getattr(args, 'request_conf', "")
         if hasattr(args, 'num_prompts'):
             config.acc.num_prompts = getattr(args, 'num_prompts', "")
-        if hasattr(args, 'max_out_len'):
-            config.acc.max_out_len = getattr(args, 'max_out_len', "")
+        if hasattr(args, 'output_len'):
+            config.acc.output_len = getattr(args, 'output_len', "")
         if hasattr(args, 'batch_size'):
             config.acc.batch_size = getattr(args, 'batch_size', "")
         if hasattr(args, 'request_rate'):
@@ -205,6 +215,8 @@ class TaskConfig:
             config.acc.baseline = getattr(args, 'acc_baseline', "95")
         if hasattr(args, 'acc_threshold'):
             config.acc.threshold = getattr(args, 'acc_threshold', 0.05)
+        if hasattr(args, 'acc_dataset_len'):
+            config.acc.acc_dataset_len = getattr(args, 'acc_dataset_len', 0)
         
         logging.info("Task info summary: %s"% config)
 

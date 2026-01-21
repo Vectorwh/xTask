@@ -2,22 +2,9 @@
 import os
 import yaml
 import socket
-import argparse
 import logging
 import time
-
-
-def get_local_ip():
-    """获取本地 IP 地址"""
-    try:
-        # 创建一个临时连接获取本地 IP
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
+from xtask.utils import get_host_ip as get_local_ip
 
 def load_yaml_config(yaml_file):
     """加载 YAML 配置文件"""

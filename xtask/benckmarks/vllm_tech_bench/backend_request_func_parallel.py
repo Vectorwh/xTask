@@ -1,0 +1,324 @@
+import json
+import os
+import sys
+import time
+import traceback
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+import aiohttp
+from tqdm.asyncio import tqdm
+
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
+import requests
+
+@dataclass
+class RequestFuncInput:
+    prompt: str
+    api_url: str
+    prompt_len: int
+    output_len: int
+    model: str
+    best_of: int = 1
+    use_beam_search: bool = False
+
+
+@dataclass
+class RequestFuncOutput:
+    generated_text: str = ""
+    success: bool = False
+    latency: float = 0
+    ttft: float = 0  # Time to first token
+    itl: List[float] = field(
+        default_factory=list)  # List of inter-token latencies
+    prompt_len: int = 0
+    error: str = ""
+
+
+def async_request_openai_completions(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    assert api_url.endswith(
+        "completions"
+    ), "OpenAI Completions API URL must end with 'completions'."
+
+    payload = {
+        "model": request_func_input.model,
+        "prompt": request_func_input.prompt,
+        "temperature": 0.0,
+        "best_of": request_func_input.best_of,
+        "max_tokens": request_func_input.output_len,
+        "stream": True,
+    }
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+    }
+
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
+
+    generated_text = ""
+    ttft = 0
+    st = time.perf_counter()
+    most_recent_timestamp = st
+    try:
+        response = requests.post(url=api_url, json=payload,headers=headers,stream=True)
+        # if response.status == 200:
+        if True:
+            for chunk in response.iter_content(chunk_size=8192):
+                try:
+                    chunk = chunk.strip()
+                    if not chunk:
+                        continue
+                    chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
+                    if chunk == "[DONE]":
+                    # if "[DONE]" in chunk:
+                        latency = time.perf_counter() - st
+                    else:
+                        data = json.loads(chunk)
+                        if data["choices"][0]["text"]:
+                            timestamp = time.perf_counter()
+                            # First token
+                            if ttft == 0:
+                                ttft = time.perf_counter() - st
+                                output.ttft = ttft
+                            # Decoding phase
+                            # NOTE: Some completion API might have a last
+                            # usage summary response without a token so we
+                            # do not want to include as inter-token-latency
+                            elif data.get("usage", None) is None:
+                                output.itl.append(timestamp -
+                                                    most_recent_timestamp)
+                            most_recent_timestamp = timestamp
+                            generated_text += data["choices"][0]["text"]
+                except Exception as e:
+                    continue
+            output.generated_text = generated_text
+            output.success = True
+            output.latency = latency
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
+def async_request_openai_chat_completions(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    assert api_url.endswith(
+        "chat/completions"
+    ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
+
+    content = request_func_input.prompt
+    #if request_func_input.multi_modal_content:
+    #    content.append(request_func_input.multi_modal_content)
+    payload = {
+        "model": "model",
+        "messages": [
+            {"role": "user", "content": content},
+        ],
+        #"temperature": 0.0,
+        "max_completion_tokens": request_func_input.output_len,
+        "max_tokens": request_func_input.output_len, #<<增加mindie可识别参数
+        "stream": True,
+        "stream_options": {
+            "include_usage": True,
+        },
+        "ignore_eos": True
+    }
+
+    # print("===== payload is:", payload)
+
+    #payload = {
+      #  "model": request_func_input.model,
+        # "model": "sec-llm-v02",
+       # "messages": [
+        #    {
+         #       "role": "user",
+          #      "content": request_func_input.prompt,
+           # },
+        #],
+        #"temperature": 0.9,
+        #"top_k":50,
+        #"top_p":0.9,
+        #"repetition_penalty": 1.05,
+        #"max_tokens": request_func_input.output_len,
+        #"stream": True,
+        #"enable_thinking":False
+        # "ignore_eos": True
+    #}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
+
+    generated_text = ""
+    ttft = 0
+    st = time.perf_counter()
+    most_recent_timestamp = st
+
+    try:
+        response = requests.post(url=api_url, json=payload,headers=headers,stream=True)
+        # if response.status == 200:
+        if True:
+            latency=0
+            for chunk in response.iter_content(chunk_size=8192):
+                try:
+                    chunk = chunk.strip()
+                    if not chunk:
+                        continue
+                    #print(chunk)
+                    chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
+                    #if chunk == "[DONE]":
+                    #print(chunk)
+                    if "[DONE]" in chunk:
+                        latency = time.perf_counter() - st
+                    else:
+                        timestamp = time.perf_counter()
+                        data = json.loads(chunk)
+
+                        delta = data["choices"][0]["delta"]
+                        if delta.get("content", None):
+                            # First token
+                            if ttft == 0:
+                                ttft = time.perf_counter() - st
+                                output.ttft = ttft
+
+                            # Decoding phase
+                            else:
+                                output.itl.append(timestamp -
+                                                    most_recent_timestamp)
+
+                            generated_text += delta["content"]
+
+                        most_recent_timestamp = timestamp
+                except Exception as e:
+                    continue
+
+            output.generated_text = generated_text
+            output.success = True
+            output.latency = latency
+        else:
+            output.error = response.reason
+            output.success = False
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
+def async_request_mindie_openai_chat_completions(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    assert api_url.endswith(
+        "/chat/completions"
+    ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
+
+    content = request_func_input.prompt
+    payload = {
+        "model": "model", #request_func_input.model,
+        "messages": [
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0.0,
+        "max_completion_tokens": request_func_input.output_len,
+        "max_tokens": request_func_input.output_len, #<<增加mindie可识别参数
+        "stream": True,
+        "stream_options": {
+            "include_usage": True,
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        #"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+
+    print(api_url)
+    print("payload: is:", payload)
+
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
+
+    generated_text = ""
+    ttft = 0
+    st = time.perf_counter()
+    most_recent_timestamp = st
+    try:
+        response = requests.post(url=api_url, json=payload,headers=headers,stream=True)
+        print(response)
+        if response.status == 200:
+            for chunk in response.content:
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
+                if chunk.endswith("[DONE]"):
+                    latency = time.perf_counter() - st
+                else:
+                    timestamp = time.perf_counter()
+                    data = json.loads(chunk)
+
+                    delta = data["choices"][0]["delta"]
+                    if delta.get("content", None):
+                        # First token
+                        if ttft == 0:
+                            ttft = time.perf_counter() - st
+                            output.ttft = ttft
+
+                        # Decoding phase
+                        else:
+                            output.itl.append(timestamp -
+                                                most_recent_timestamp)
+
+                        generated_text += delta["content"]
+
+                    most_recent_timestamp = timestamp
+
+            output.generated_text = generated_text
+            output.success = True
+            output.latency = latency
+        else:
+            output.error = response.reason
+            output.success = False
+    except Exception as e:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
+    if pbar:
+        pbar.update(1)
+    print(output)
+    return output
+
+
+# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix)
+# introduced in Python 3.9
+def remove_prefix(text: str, prefix: str) -> str:
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
+ASYNC_REQUEST_FUNCS = {
+    "vllm": async_request_openai_completions,
+    "lmdeploy": async_request_openai_completions,
+    "openai": async_request_openai_completions,
+    "openai-chat": async_request_openai_chat_completions,
+    "mindie-openai-chat": async_request_mindie_openai_chat_completions,
+}

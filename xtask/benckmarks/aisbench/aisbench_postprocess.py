@@ -331,17 +331,17 @@ class EnhancedResult(AisbenchResult):
         logging.info("\n" + "=" * 80)
 
 
-def aisbench_post_process(task_config, output_file_path):
-    aisbench_output_dir = find_aisbench_directory(output_file_path)
-    if aisbench_output_dir and os.path.exists(os.path.join(output_file_path, aisbench_output_dir)):
-        aisbench_csv = get_aisbench_csv(os.path.join(output_file_path, aisbench_output_dir), 
+def aisbench_post_process(task_config, output_path):
+    aisbench_output_dir = find_aisbench_directory(output_path)
+    if aisbench_output_dir and os.path.exists(os.path.join(output_path, aisbench_output_dir)):
+        aisbench_csv = get_aisbench_csv(os.path.join(output_path, aisbench_output_dir), 
                                         task_config.get("benchmark").get("perf").get("api_type").replace("_", "-"))
     else:
         logging.error("get aisbench output path failed.")
         return
     
     # 解析结果
-    if os.path.exists(aisbench_csv):
+    if aisbench_csv and os.path.exists(aisbench_csv):
         parser = AisbenchResultParser()
         result = parser.parse_csv(aisbench_csv)
         
@@ -350,12 +350,12 @@ def aisbench_post_process(task_config, output_file_path):
         
         # 保存JSON结果
         json_filename = task_config.get("case_name").lower() + ".json"
-        json_path = os.path.join(output_file_path, json_filename)
+        json_path = os.path.join(output_path, json_filename)
         result.to_json(json_path)
         
         # 保存摘要文本
         summary_filename = task_config.get("case_name").lower() + '_summary.txt'
-        summary_path = os.path.join(output_file_path, summary_filename)
+        summary_path = os.path.join(output_path, summary_filename)
         
         with open(summary_path, 'w', encoding='utf-8') as f:
             import sys
@@ -391,8 +391,29 @@ def aisbench_post_process(task_config, output_file_path):
     return result
     
 
+def aisbench_acc_post_process(task_config, output_path):
+    aisbench_output_dir = find_aisbench_directory(output_path, aisbench_type="acc")
+    api_type= task_config.get("benchmark").get("perf").get("api_type").replace("_", "-")
+    if aisbench_output_dir and os.path.exists(os.path.join(output_path, aisbench_output_dir)):
+        aisbench_csv = get_aisbench_csv(os.path.join(output_path, aisbench_output_dir), api_type, output_type="accaurcy")
+    else:
+        logging.error("get aisbench output path failed.")
+        return
+    
+    if os.path.exists(aisbench_csv):
+        result_value = read_csv_value(aisbench_csv, api_type)
+        if result_value and len(result_value) == 1:
+            return result_value[0]
+        else:
+            logging.error("")
+            return 
+    else:
+        logging.error(f"aisbench csv: {aisbench_csv} is not exist.")
+        result = None
+    return result
 
-def find_aisbench_directory(directory_path="."):
+
+def find_aisbench_directory(directory_path=".", aisbench_type="perf"):
     """
     查找指定目录下最新生成的日期格式目录
     
@@ -441,13 +462,25 @@ def find_aisbench_directory(directory_path="."):
     date_dirs.sort(key=extract_datetime, reverse=True)
     
     # 返回最新的目录
-    latest_dir = date_dirs[0]
+    if aisbench_type == "perf":
+        latest_dir = date_dirs[0]
+    elif aisbench_type == "acc":
+        latest_dir = date_dirs[1]
+    else:
+        latest_dir = None
     logging.info(f"aisbench的结果目录: {latest_dir}")
     return latest_dir
 
 
-def get_aisbench_csv(aisbench_output_path, api_type):
-    csv_path = os.path.join(aisbench_output_path, "performances", api_type.replace("_", "-"))
+def get_aisbench_csv(aisbench_output_path, api_type, output_type="performances"):
+    if output_type == "performances":
+        csv_path = os.path.join(aisbench_output_path, output_type, api_type.replace("_", "-"))
+    elif output_type == "accaurcy":
+        csv_path = os.path.join(aisbench_output_path, "summary")
+    else:
+        logging.error(f"output_type: {output_type} is not supported.")
+        return
+    
     if os.path.exists(aisbench_output_path) and os.path.exists(csv_path):
         entries = os.listdir(csv_path)
         for entry in entries:
@@ -455,5 +488,31 @@ def get_aisbench_csv(aisbench_output_path, api_type):
             if entry_path.endswith(".csv"):
                 return entry_path
         logging.error("Can't find aisbench csv output.")
+        return
     else:
         logging.error(f"aisbench output path: {csv_path} is not exist.")
+        return
+
+
+def read_csv_value(file_path, target_column):
+    """
+    读取 CSV 文件并返回特定列的值。
+    
+    Args:
+        file_path (str): CSV 文件路径。
+        target_column (str): 要读取的列名。
+    
+    Returns:
+        list: 包含目标列所有值的列表。
+    """
+    values = []
+    with open(file_path, mode='r', encoding='utf-8') as file:
+        reader = csv.DictReader(file) # 每一行是一个 OrderedDict
+        for row in reader:
+            # 通过列名（键）获取对应单元格的值
+            if target_column in row:
+                values.append(row[target_column])
+            else:
+                logging.error(f"警告：文件中未找到列名 '{target_column}'")
+                return []
+    return values
