@@ -44,7 +44,7 @@ class ArgumentChecker:
         'dataset_name', 'dataset_path', 'dataset_format',
         'benchmark_type', 'benchmark_config',
         'port', 'host', 'gpu_ids',
-        'input_length', 'output_length', 'batch_size',
+        'input_len', 'output_len', 'batch_size',
         'container_image', 'container_runtime',
         'output_dir', 'log_dir', 'verbose'
     ]
@@ -184,12 +184,6 @@ Usage Examples:
             help="request conf"
         )
         parser.add_argument(
-            "--request_rate",
-            type=int,
-            default=0,
-            help="request rate"
-        )
-        parser.add_argument(
             "--perf_baseline",
             type=str,
             help="perf_baseline"
@@ -263,22 +257,40 @@ Usage Examples:
         
         # Test task parameters
         parser.add_argument(
-            "--input_length",
+            "--input_len",
             type=int,
             default=512,
             help="Input sequence length/num prompts"
         )
         parser.add_argument(
-            "--output_length",
+            "--output_len",
             type=int,
             default=128,
             help="Output sequence length/max_out_len"
+        )
+        parser.add_argument(
+            "--request_rate",
+            type=int,
+            default=1,
+            help="input request_rate"
+        )
+        parser.add_argument(
+            "--concurrency",
+            type=int,
+            default=1,
+            help="input concurrency"
         )
         parser.add_argument(
             "--batch_size", "-bs",
             type=int,
             default=1,
             help="Batch size"
+        )
+        parser.add_argument(
+            "--acc_dataset_len",
+            type=int,
+            default=0,
+            help="acc_dataset_len"
         )
         parser.add_argument(
             "--max_seqs_per_batch",
@@ -563,7 +575,7 @@ Usage Examples:
                 "case_type": "performance",
                 "dataset_conf": '',
                 "dataset_path": '',
-                "max_out_len": '',
+                "output_len": '',
                 "num_prompts": '',
                 "request_conf": '',
                 "request_rate": '',
@@ -608,8 +620,8 @@ Usage Examples:
                     'gpu_ids': self._parse_gpu_ids(args.gpu_ids) if args.gpu_ids else []
                 },
                 'task': {
-                    'input_length': args.input_length,
-                    'output_length': args.output_length,
+                    'input_len': args.input_len,
+                    'output_len': args.output_len,
                     'batch_size': args.batch_size
                 },
                 'results': {

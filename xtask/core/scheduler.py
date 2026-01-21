@@ -263,7 +263,6 @@ def generate_commands(
     config_file = f"{work_dir}/config/{os.path.basename(task_yaml_path)}"
     startup_cmd = ""
     benchmark_cmd = ""
-    accuracy_cmd = ""
     
     # 生成启动命令
     if framework_config.get("framework") == "xllm":
@@ -289,7 +288,7 @@ def generate_commands(
     # 生成基准测试命令
     if task_config.get("benchmark").get("benchmark_type") == "aisbench":
         from xtask.benckmarks.aisbench.generate_aisbench_script import generate_aisbench_script
-        benchmark_cmd, accuracy_cmd = generate_aisbench_script(
+        benchmark_cmd = generate_aisbench_script(
             task_config=task_config,
             output_shell_file="run_aisbench_test.sh",
             python_exec="python"
@@ -300,7 +299,7 @@ def generate_commands(
         logging.error("benchmark_type: %s is not supported yet."% 
                       task_config.get("benchmark").get("benchmark_type"))
     
-    return startup_cmd, benchmark_cmd, accuracy_cmd
+    return startup_cmd, benchmark_cmd
 
 
 def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
@@ -358,10 +357,9 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             return result
         
         # 4. 生成命令
-        startup_cmd, benchmark_cmd, accuracy_cmd = generate_commands(framework_config, task_config, task_yaml_path)
+        startup_cmd, benchmark_cmd = generate_commands(framework_config, task_config, task_yaml_path)
         result["startup_command"] = startup_cmd
         result["benchmark_command"] = benchmark_cmd
-        result["accuray_command"] = accuracy_cmd
         
         # 5. 创建容器配置
         container_config = ContainerConfigBuilder.create_container_config(
@@ -526,23 +524,8 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             result["message"] = f"Service health check failed: {health_result.stderr}"
             logging.error(result["message"])
 
-        # 17. 执行精度测试命令
-        if accuracy_cmd:
-            logging.info(f"Executing accuracy command: {accuracy_cmd}")
-            accuracy_result = container_manager.exec_in_container(
-                container_config.container_name,
-                accuracy_cmd,
-                timeout=framework_config.get("benchmark_timeout", 3600)
-            )
-            result["accuracy_success"] = accuracy_result.success
-            result["accuracy_exit_code"] = accuracy_result.exit_code
-            result["accuracy_stdout"] = accuracy_result.stdout
-            result["accuracy_stderr"] = accuracy_result.stderr
-            result["accuracy_execution_time"] = accuracy_result.execution_time
-        else:
-            logging.warning("accuracy_cmd is null, skip accuracy task.")
         
-        # 18. 执行性能基准测试命令
+        # 17. 执行性能基准测试命令
         logging.info(f"Executing benchmark command: {benchmark_cmd}")
         
         if benchmark_cmd:
@@ -558,11 +541,20 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             result["benchmark_execution_time"] = benchmark_result.execution_time
 
             if benchmark_result.success:
-                logging.info("Benchmark completed successfully.")
-                from xtask.benckmarks.benchmark_common import result_postprocess
+                logging.info("perf benchmark completed successfully.")
+                # 18.1 解析精度执行结果
+                if "acc" in task_config.get("metrics"):
+                    logging.info("Start to check acc benchmark result.")
+                    from xtask.benckmarks.base_benchmark import acc_result_postprocess
+                    result["benchmark_acc_result"] = acc_result_postprocess(task_config, output_file_path)
+                else:
+                    logging.warning(f"metrics is {task_config.get('metrics')}，skip accaurcy task.")
+                
+                # 18.2 解析精度执行结果
+                from xtask.benckmarks.base_benchmark import result_postprocess
                 result["benchmark_perf_result"] = result_postprocess(benchmark_result.stdout, task_config, output_file_path)
             else:
-                logging.error(f"Benchmark command failed with exit code {benchmark_result.exit_code}")
+                logging.error(f"perf benchmark command failed with exit code {benchmark_result.exit_code}")
         else:
             benchmark_result = ""
             logging.warning("benchmark_cmd is null, skip benchmark task.")
@@ -589,7 +581,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         result["execution_time"] = time.time() - start_time
         bool_map = {"true": True, "false": False}
         # 如果启动是通过已存在的容器或者 全局配置 CLEAN_RESULTS是Fasle，则任务退出时不会清除容器实例
-        if not framework_config.get("serving_container_name") or \
+        if not framework_config.get("serving_container_name") and \
             bool_map.get(get_config_data().get("ENV_CONFIG").get("CLEAN_RESULTS").lower()):
             container_manager.cleanup()
         
@@ -674,7 +666,7 @@ if __name__ == "__main__":
         dataset_conf:
         request_conf:
         num_prompts: 100
-        max_out_len: 128
+        output_len: 128
         batch_size: 16
         request_rate: 10
         baseline:
@@ -685,7 +677,7 @@ if __name__ == "__main__":
         dataset_conf:
         request_conf:
         num_prompts: 100
-        max_out_len: 128
+        output_len: 128
         batch_size: 16
         request_rate: 10
         baseline: 95
