@@ -12,7 +12,7 @@ def load_yaml_config(yaml_file):
         config = yaml.safe_load(f)
     return config
 
-def generate_single_card_script(config, output_file="xllm_serv_single_card.sh"):
+def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
     """生成单卡启动脚本"""
     
     # 获取本地 IP
@@ -26,7 +26,7 @@ def generate_single_card_script(config, output_file="xllm_serv_single_card.sh"):
         'MODEL_PATH': config.get('model_path', '/models/Qwen3-4B'),
         'START_PORT': config.get('port', 14830),
         'START_DEVICE': config.get('start_device_id', 0),
-        'NNODES': config.get('nodes', 1),
+        'NNODES': config.get('num_devices', 1),
         'WORLD_SIZE': config.get('world_size', 1),
         'LOG_DIR': 'log',
         'BLOCK_SIZE': config.get('block_size', 128),
@@ -57,8 +57,7 @@ def generate_single_card_script(config, output_file="xllm_serv_single_card.sh"):
         logging.info("template_path is: %s"% template_path)
         with open(template_path, 'r', encoding='utf-8') as f:
             template = f.read()
-    
-    
+
     # 替换模板中的参数
     script_content = template
     if script_content:
@@ -87,7 +86,7 @@ def generate_xllm_serv_commands(task_config, framework_config):
     cmd_file = "start_xllm_serv.sh"
     # 单卡
     if int(task_config.get("world_size")) == 1:
-        start_serv_script, script_path = generate_single_card_script(task_config, cmd_file)
+        start_serv_script, script_path = generate_xllm_script(task_config, cmd_file)
         if start_serv_script:
             startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/;" \
                 f"rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"
@@ -95,7 +94,13 @@ def generate_xllm_serv_commands(task_config, framework_config):
             logging.error("generate xllm serv script failed.")
     # 多卡
     elif 1 < int(task_config.get("world_size")) < 17:
-        pass
+        start_serv_script, script_path = generate_xllm_script(task_config, cmd_file)
+        
+        if start_serv_script:
+            startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/;" \
+                f"rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"
+        else:
+            logging.error("generate xllm serv script failed.")
     # 多机
     elif int(task_config.get("world_size")) > 16 and \
         task_config.get("enable_disaggregated_pd") == "false":

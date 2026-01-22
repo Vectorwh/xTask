@@ -1,9 +1,13 @@
 import os
+import sys
 import logging
 import yaml
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Any
-from enum import Enum
+
+
+def get_case_name_by_args(args):
+    return f"{args.model_name.lower()}_{args.framework.lower()}_{args.input_len}_{args.output_len}_{args.batch_size}"
 
 
 @dataclass
@@ -27,6 +31,7 @@ class BenchmarkConfig:
     dump_eval_details: bool = False
     dump_extract_rate: bool = False
     pressure: bool = False
+    acc_dataset_len: int = 0
 
 
 @dataclass
@@ -38,7 +43,7 @@ class TaskConfig:
     served_model_name: str = ""
     start_device_id: int = 0
     max_memory_utiliization: float = 0.9
-    nodes: int = 1
+    num_devices: int = 1
     world_size: int = 1
     host_addr: str = "0.0.0.0"
     port: int = 14830
@@ -90,7 +95,8 @@ class TaskConfig:
         merge_ds=False,
         max_num_worker=1,
         dump_eval_details=False,
-        dump_extract_rate=False
+        dump_extract_rate=False,
+        acc_dataset_len=0
     ))
     
     @classmethod
@@ -141,7 +147,7 @@ class TaskConfig:
             setattr(config, "model_name", getattr(args, 'model_name', ""))
         
         # 设置基础配置
-        setattr(config, "case_name", f"{args.model_name}_{args.framework}") 
+        setattr(config, "case_name", get_case_name_by_args(args).lower()) 
         for field_name in cls.__dataclass_fields__:
             if field_name == "start_device_id":
                 env_start_device_id = xtask_config.get("ENV_CONFIG").get("start_device_id")
@@ -156,15 +162,30 @@ class TaskConfig:
                 continue
 
             if field_name == "metrics":
-                metrics_value = getattr(args, "metrics").split(",") if getattr(args, field_name)  else value
+                metrics_value = getattr(args, field_name)
                 setattr(config, field_name, metrics_value)
                 continue
-
 
             if field_name not in ['perf', 'acc'] and hasattr(args, field_name):
                 value = getattr(args, field_name)
                 if value is not None:
                     setattr(config, field_name, value)
+
+            if field_name == "num_devices":
+                num_devices = getattr(args, field_name)
+                setattr(config, field_name, num_devices)
+                continue
+            
+            # check world_size
+            if field_name == "world_size":
+                world_size = getattr(args, field_name)
+                if world_size == 1 and num_devices > 1:
+                    world_size = num_devices
+                elif world_size > 1 and world_size % num_devices > 0:
+                    logging.error("world_size and num_devices is invaild.check world_size: %s and num_devices: %s"% (world_size, num_devices))
+                    sys.exit(1)
+                setattr(config, field_name, world_size)
+                continue
         
         # 设置benchmark_type
         if hasattr(args, 'benchmark_type'):

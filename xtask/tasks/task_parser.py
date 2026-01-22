@@ -2,17 +2,20 @@ import os
 import inspect
 import logging
 
-from xtask.tasks.base_task import Task
+from xtask.tasks.base_task import Task, get_case_name_by_args
+
+
+
 
 
 def init_task_path(args):
     if args.template:
-        task_file_path = os.path.join(os.getcwd(), "outputs", f"{args.template.lower()}")
+        task_file_path = os.path.join(os.getcwd(), "outputs", args.template.lower())
     elif args.case_name:
-        task_file_path = os.path.join(os.getcwd(), "outputs", f"{args.case_name.lower()}")
+        task_file_path = os.path.join(os.getcwd(), "outputs", args.case_name.lower())
     elif args.model_name:
-        task_file_path = os.path.join(os.getcwd(), "outputs", 
-                                      f"{args.model_name.lower()}_{args.framework.lower()}")
+        temp_case_name = get_case_name_by_args(args)
+        task_file_path = os.path.join(os.getcwd(), "outputs", temp_case_name)
     else:
         logging.error("Must provide one of: --template, --case_name, or --model_name")
         return None
@@ -62,7 +65,7 @@ def gen_task_file_by_args(args, task_file_path: str, xtask_config: dict):
         config = Task.create_from_args(args, xtask_config)
         
         # 保存到任务目录
-        output_file = os.path.join(task_file_path, f"{args.model_name}_{args.framework}.yaml")
+        output_file = os.path.join(task_file_path, f"{config.case_name}.yaml")
         success = config.save_to_yaml(output_file)
         
         return success, [output_file] if success else []

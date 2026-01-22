@@ -1,5 +1,6 @@
 import sys
 import logging
+import traceback
 
 from xtask.utils.logger import init_logger
 from xtask.utils.arg_parser import ArgumentChecker
@@ -31,6 +32,7 @@ def main():
             sys.exit(1)
     except Exception as e:
         logging.error(f"Argument validation failed: {str(e)}")
+        traceback.print_exc()
         sys.exit(1)
 
 

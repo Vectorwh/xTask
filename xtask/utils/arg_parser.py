@@ -232,10 +232,10 @@ Usage Examples:
             help="world_size"
         )
         parser.add_argument(
-            "--nodes",
+            "--num_devices",
             type=int,
             default=1,
-            help="nodes"
+            help="the num of devices/gpus"
         )
         parser.add_argument(
             "--start_device_id",

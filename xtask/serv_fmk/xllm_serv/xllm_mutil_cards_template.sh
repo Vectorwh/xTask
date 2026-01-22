@@ -71,14 +71,14 @@ for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
-  LOG_FILE="$LOG_DIR/node_$i.log"
+  LOG_FILE="$LOG_DIR/node_$DEVICE.log"
   xllm_command=(
     xllm
     --model "$MODEL_PATH"
     --port "$PORT"
     --devices "npu:$DEVICE"
     --master_node_addr "$MASTER_NODE_ADDR"
-    --nnodes "$i"
+    --nnodes "$NNODES"
     --node_rank "$i"
     --max_memory_utilization "$MAX_MEMORY_UTILIZATION"
     --max_tokens_per_batch "$MAX_TOKENS_PER_BATCH"
@@ -91,9 +91,9 @@ do
     --enable_mla "$ENABLE_MLA"
     $SERVING_EXTENSIABLE_PARAM
   )
-  echo "服务启动命令: ${xllm_command[*]}"
-  "${xllm_command[@]}" > "$LOG_FILE" 2>&1 &
-  echo "启动节点 $i，设备 npu:$DEVICE，端口 $PORT，日志: $LOG_FILE"
+  echo '服务启动命令: ${xllm_command[*]}' >> "$LOG_FILE"
+  echo "启动节点 $i，设备 npu:$DEVICE，端口 $PORT，日志: $LOG_FILE" >> "$LOG_FILE"
+  "${xllm_command[@]}" >> "$LOG_FILE" 2>&1 &
 done
 
 echo "所有节点已启动，主节点地址: $MASTER_NODE_ADDR"

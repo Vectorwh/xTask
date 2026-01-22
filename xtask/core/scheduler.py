@@ -209,7 +209,7 @@ class ContainerConfigBuilder:
             "SERVED_MODEL_NAME": task_config.get("served_model_name", ""),
             "START_DEVICE_ID": str(task_config.get("start_device_id", 0)),
             "MAX_MEMORY_UTILIZATION": str(task_config.get("max_memory_utiliization", 0.9)),
-            "NODES": str(task_config.get("nodes", 1)),
+            "NODES": str(task_config.get("num_devices", 1)),
             "WORLD_SIZE": str(task_config.get("world_size", 1)),
             "NODE_ADDR": task_config.get("host_addr", "0.0.0.0"),
             "NODE_PORT": str(task_config.get("port", 14830))
@@ -332,7 +332,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         # 1. 读取任务YAML文件
         logging.info(f"Loading task config from: {task_yaml_path}")
         task_config = TaskConfig.load_task_config(task_yaml_path)
-        output_file_path = os.path.join(os.getcwd(), "outputs", f"{task_config.get('case_name').lower()}")
+        output_file_path = os.path.join(os.getcwd(), "outputs", task_config.get('case_name'))
         
         if not task_config:
             result["message"] = f"Failed to load task config from {task_yaml_path}"
@@ -443,18 +443,8 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             logging.error(result["message"])
             return result
         
-        # 12. 复制任务YAML文件到容器
-        container_yaml_path = f"{container_config.working_dir}/outputs/{os.path.basename(task_yaml_path)}"
-        logging.info(f"Copying task YAML to container: {container_yaml_path}")
-        
-        if not container_manager.copy_to_container(
-            container_config.container_name,
-            task_yaml_path,
-            container_yaml_path
-        ):
-            result["message"] = f"Failed to copy task YAML to container"
-            logging.warning(result["message"])
-            # 继续执行，可能文件已经通过挂载卷可用
+        # 12. 在执行前从先保存output目录下的目录列表, 用于过滤本次执行结果目录
+        init_entries = os.listdir(output_file_path)
         
         # 13. TODO: 待增加配置：编译/取版本包
         compilation_cmd = "bash /workspace/tools/download_xllm.sh;"
@@ -520,58 +510,57 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         
         if health_result.success and "ok" in health_result.stdout.lower():
             logging.info("Service is healthy and running")
+
+            # 17. 执行性能基准测试命令
+            logging.info(f"Executing benchmark command: {benchmark_cmd}")
+            
+            if benchmark_cmd:
+                benchmark_result = container_manager.exec_in_container(
+                    container_config.container_name,
+                    benchmark_cmd,
+                    timeout=framework_config.get("benchmark_timeout", 3600)
+                )
+                result["benchmark_success"] = benchmark_result.success
+                result["benchmark_exit_code"] = benchmark_result.exit_code
+                result["benchmark_stdout"] = benchmark_result.stdout
+                result["benchmark_stderr"] = benchmark_result.stderr
+                result["benchmark_execution_time"] = benchmark_result.execution_time
+
+                if benchmark_result.success:
+                    logging.info("perf benchmark completed successfully.")
+                    # 18.1 解析精度执行结果
+                    if "acc" in task_config.get("metrics"):
+                        logging.info("Start to check acc benchmark result.")
+                        from xtask.benckmarks.base_benchmark import acc_result_postprocess
+                        result["benchmark_acc_result"] = acc_result_postprocess(task_config, output_file_path, init_entries)
+                    else:
+                        logging.warning(f"metrics is {task_config.get('metrics')}，skip accaurcy task.")
+                    
+                    # 18.2 解析性能执行结果
+                    from xtask.benckmarks.base_benchmark import result_postprocess
+                    result["benchmark_perf_result"] = result_postprocess(benchmark_result.stdout, task_config, 
+                                                                        output_file_path, init_entries)
+                else:
+                    logging.error(f"perf benchmark command failed with exit code {benchmark_result.exit_code}")
+            else:
+                benchmark_result = ""
+                logging.warning("benchmark_cmd is null, skip benchmark task.")
+
+            if not benchmark_result.success:
+                result["message"] = f"Benchmark command failed with exit code {benchmark_result.exit_code}"
+                logging.error(result["message"])
+            
+            # 19. 获取容器日志
+            logs = container_manager.get_container_logs(result["container_id"], tail=100)
+            result["logs"] = logs
+            
+            # 20. 标记执行成功
+            result["success"] = True
+            result["message"] = f"Task scheduled successfully in container {result['container_id']}"
+            logging.info(result["message"])
         else:
             result["message"] = f"Service health check failed: {health_result.stderr}"
             logging.error(result["message"])
-
-        
-        # 17. 执行性能基准测试命令
-        logging.info(f"Executing benchmark command: {benchmark_cmd}")
-        
-        if benchmark_cmd:
-            benchmark_result = container_manager.exec_in_container(
-                container_config.container_name,
-                benchmark_cmd,
-                timeout=framework_config.get("benchmark_timeout", 3600)
-            )
-            result["benchmark_success"] = benchmark_result.success
-            result["benchmark_exit_code"] = benchmark_result.exit_code
-            result["benchmark_stdout"] = benchmark_result.stdout
-            result["benchmark_stderr"] = benchmark_result.stderr
-            result["benchmark_execution_time"] = benchmark_result.execution_time
-
-            if benchmark_result.success:
-                logging.info("perf benchmark completed successfully.")
-                # 18.1 解析精度执行结果
-                if "acc" in task_config.get("metrics"):
-                    logging.info("Start to check acc benchmark result.")
-                    from xtask.benckmarks.base_benchmark import acc_result_postprocess
-                    result["benchmark_acc_result"] = acc_result_postprocess(task_config, output_file_path)
-                else:
-                    logging.warning(f"metrics is {task_config.get('metrics')}，skip accaurcy task.")
-                
-                # 18.2 解析精度执行结果
-                from xtask.benckmarks.base_benchmark import result_postprocess
-                result["benchmark_perf_result"] = result_postprocess(benchmark_result.stdout, task_config, output_file_path)
-            else:
-                logging.error(f"perf benchmark command failed with exit code {benchmark_result.exit_code}")
-        else:
-            benchmark_result = ""
-            logging.warning("benchmark_cmd is null, skip benchmark task.")
-
-        if not benchmark_result.success:
-            result["message"] = f"Benchmark command failed with exit code {benchmark_result.exit_code}"
-            logging.error(result["message"])
-        
-        # 19. 获取容器日志
-        logs = container_manager.get_container_logs(result["container_id"], tail=100)
-        result["logs"] = logs
-        
-        # 20. 标记执行成功
-        result["success"] = True
-        result["message"] = f"Task scheduled successfully in container {result['container_id']}"
-        logging.info(result["message"])
-        
     except Exception as e:
         result["message"] = f"Error in scheduler: {str(e)}"
         logging.error(result["message"], exc_info=True)
