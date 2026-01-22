@@ -1,4 +1,4 @@
-
+import logging
 
 def download_dataset(task_config):
     download_cmd = list()
@@ -25,7 +25,10 @@ def aisbench_download_gsm8k(download_cmd, cut_len=100):
     download_cmd.append('rm gsm8k.zip')
     download_cmd.append('cp $AIS_BENCH_PATH/datasets/gsm8k/test.jsonl $AIS_BENCH_PATH/datasets/gsm8k/test.jsonl_bak')
     if cut_len:
+        logging.info("gsm8k demo cut len is: %s"% cut_len)
         download_cmd.append(f'head -n {cut_len} $AIS_BENCH_PATH/datasets/gsm8k/test.jsonl_bak > $AIS_BENCH_PATH/datasets/gsm8k/test.jsonl')
+    else:
+        logging.info("cut_len is: %s, skip to cut dataset gsm8k."% cut_len)
 
     return download_cmd
     

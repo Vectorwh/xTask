@@ -959,5 +959,8 @@ def path_mapping_in_container(path: str):
     volumes = get_config_data().get("DOCKER_CONFIG").get("volumes")
     for outside_path, inside_path in volumes.items():
         if outside_path in path:
-            return path.replace(outside_path, inside_path + "/")
+            if str(inside_path).endswith("/"):
+                return path.replace(outside_path, inside_path)
+            else:
+                return path.replace(outside_path, inside_path + "/")
     return path

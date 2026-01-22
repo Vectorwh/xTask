@@ -331,8 +331,9 @@ class EnhancedResult(AisbenchResult):
         logging.info("\n" + "=" * 80)
 
 
-def aisbench_post_process(task_config, output_path):
-    aisbench_output_dir = find_aisbench_directory(output_path)
+def aisbench_post_process(task_config, output_path, init_entries):
+    aisbench_output_dir = find_aisbench_directory(output_path, init_entries)
+    logging.info(f"aisbench的结果目录: {aisbench_output_dir}")
     if aisbench_output_dir and os.path.exists(os.path.join(output_path, aisbench_output_dir)):
         aisbench_csv = get_aisbench_csv(os.path.join(output_path, aisbench_output_dir), 
                                         task_config.get("benchmark").get("perf").get("api_type").replace("_", "-"))
@@ -391,8 +392,9 @@ def aisbench_post_process(task_config, output_path):
     return result
     
 
-def aisbench_acc_post_process(task_config, output_path):
-    aisbench_output_dir = find_aisbench_directory(output_path, aisbench_type="acc")
+def aisbench_acc_post_process(task_config, output_path, init_entries):
+    aisbench_output_dir = find_aisbench_directory(output_path, init_entries, aisbench_type="acc")
+    logging.info(f"aisbench的结果目录: {aisbench_output_dir}")
     api_type= task_config.get("benchmark").get("perf").get("api_type").replace("_", "-")
     if aisbench_output_dir and os.path.exists(os.path.join(output_path, aisbench_output_dir)):
         aisbench_csv = get_aisbench_csv(os.path.join(output_path, aisbench_output_dir), api_type, output_type="accaurcy")
@@ -413,7 +415,7 @@ def aisbench_acc_post_process(task_config, output_path):
     return result
 
 
-def find_aisbench_directory(directory_path=".", aisbench_type="perf"):
+def find_aisbench_directory(directory_path=".", init_entries=list(), aisbench_type="perf"):
     """
     查找指定目录下最新生成的日期格式目录
     
@@ -441,7 +443,7 @@ def find_aisbench_directory(directory_path=".", aisbench_type="perf"):
     date_dirs = []
     for entry in entries:
         entry_path = os.path.join(directory_path, entry)
-        if os.path.isdir(entry_path) and date_pattern.match(entry):
+        if os.path.isdir(entry_path) and date_pattern.match(entry) and entry not in init_entries:
             date_dirs.append(entry)
     
     # 如果没有找到日期目录
@@ -462,14 +464,13 @@ def find_aisbench_directory(directory_path=".", aisbench_type="perf"):
     date_dirs.sort(key=extract_datetime, reverse=True)
     
     # 返回最新的目录
-    if aisbench_type == "perf":
-        latest_dir = date_dirs[0]
-    elif aisbench_type == "acc":
-        latest_dir = date_dirs[1]
-    else:
-        latest_dir = None
-    logging.info(f"aisbench的结果目录: {latest_dir}")
-    return latest_dir
+    for data_dir in date_dirs:
+        if "summary" in os.listdir(os.path.join(directory_path, data_dir)) and aisbench_type == "acc":
+            return data_dir
+        elif "performances" in os.listdir(os.path.join(directory_path, data_dir)) and aisbench_type == "perf":
+            return data_dir
+    
+    logging.error("can not match aisbech result dir.")
 
 
 def get_aisbench_csv(aisbench_output_path, api_type, output_type="performances"):
