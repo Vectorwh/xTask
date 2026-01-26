@@ -2,10 +2,10 @@ import os
 import json
 import logging
 
-from xtask.utils.config_parser import get_config_data
+from xtask.utils.config_parser import get_xtask_config_data
 
 def init_logger():
-    config_data = get_config_data()
+    config_data = get_xtask_config_data()
     xtask_log_level = config_data.get("ENV_CONFIG").get("XTask_LOG_LEVEL", "INFO")
     root_logger = logging.getLogger()
     root_logger.handlers.clear()

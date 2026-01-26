@@ -6,8 +6,12 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Any
 
 
+from xtask.benchmarks.base_benchmark import get_acc_config
+from xtask.utils.config_parser import get_config_data
+
+
 def get_case_name_by_args(args):
-    return f"{args.model_name.lower()}_{args.framework.lower()}_{args.input_len}_{args.output_len}_{args.batch_size}"
+    return f"{args.model_name.lower()}_{args.engine_type.lower()}_{args.input_len}_{args.output_len}_{args.batch_size}"
 
 
 @dataclass
@@ -31,7 +35,14 @@ class BenchmarkConfig:
     dump_eval_details: bool = False
     dump_extract_rate: bool = False
     pressure: bool = False
-    acc_dataset_len: int = 0
+    acc_dataset_len: int = 0  # 精度验证数据集截断长度，用于精度脚本调测验证
+    temperature: int = 0
+    top_k: float = -1
+    top_p: float = 0.95
+    seed: int = 1024
+    repetition_penalty: int = 1,
+    ignore_eos: bool = False
+    enable_thinking: bool = False
 
 
 @dataclass
@@ -40,6 +51,7 @@ class TaskConfig:
     # 基础配置
     case_name: str = ""
     model_path: str = ""
+    engine_type: str = ""
     served_model_name: str = ""
     start_device_id: int = 0
     max_memory_utiliization: float = 0.9
@@ -216,28 +228,40 @@ class TaskConfig:
             config.perf.threshold = getattr(args, 'perf_threshold', 0.05)
         
         # 设置acc配置
+        acc_config_data_file = os.path.join(os.getcwd(), "xtask/benchmarks/aisbench/aisbench_acc_config.json")
+        acc_config_data = get_config_data(acc_config_data_file)
         if hasattr(args, 'acc_type'):
             config.acc.case_type = getattr(args, 'acc_case_type', "accuracy")
         if hasattr(args, 'dataset_path'):
             config.acc.dataset_path = getattr(args, 'dataset_path', "vllm")
-        if hasattr(args, 'dataset_conf'):
-            config.acc.dataset_conf = getattr(args, 'dataset_conf', "")
+        # if hasattr(args, 'dataset_conf'):
+        #     config.acc.dataset_conf = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("dataset_conf")
         if hasattr(args, 'request_conf'):
             config.acc.request_conf = getattr(args, 'request_conf', "")
         if hasattr(args, 'num_prompts'):
             config.acc.num_prompts = getattr(args, 'num_prompts', "")
         if hasattr(args, 'output_len'):
-            config.acc.output_len = getattr(args, 'output_len', "")
+            config.acc.output_len = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("max_out_len")
         if hasattr(args, 'batch_size'):
-            config.acc.batch_size = getattr(args, 'batch_size', "")
+            config.acc.batch_size = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("batch_size")
         if hasattr(args, 'request_rate'):
-            config.acc.request_rate = getattr(args, 'request_rate', "")
+            config.acc.request_rate = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("request_rate")
         if hasattr(args, 'acc_baseline'):
             config.acc.baseline = getattr(args, 'acc_baseline', "95")
         if hasattr(args, 'acc_threshold'):
             config.acc.threshold = getattr(args, 'acc_threshold', 0.05)
         if hasattr(args, 'acc_dataset_len'):
             config.acc.acc_dataset_len = getattr(args, 'acc_dataset_len', 0)
+        
+        config.acc.dataset_conf = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("datasets")
+        config.acc.temperature = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("temperature")
+        config.acc.top_k = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("top_k")
+        config.acc.top_p = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("top_p")
+        config.acc.seed = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("seed")
+        config.acc.repetition_penalty = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("repetition_penalty", 1)
+        config.acc.api_type = acc_config_data.get(getattr(args, 'dataset_name', "synthetic")).get("api_type")
+
+        config.perf.repetition_penalty = getattr(args, 'repetition_penalty', 1)
         
         logging.info("Task info summary: %s"% config)
 
@@ -316,3 +340,13 @@ class Task:
     def create_from_args(args, xtask_config) -> TaskConfig:
         """从命令行参数创建配置"""
         return TaskConfig.from_args(args, xtask_config)
+    
+
+    @staticmethod
+    def check_case_yaml(case_yaml):
+        """检查case_yaml 格式"""
+        if case_yaml:
+            Task.load_from_yaml(case_yaml)
+            return True
+
+        return False

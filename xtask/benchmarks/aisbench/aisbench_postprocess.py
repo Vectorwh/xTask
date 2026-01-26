@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 from typing import Dict, Optional, Any, List
 
-from xtask.benckmarks.base_benchmark import PerformanceMetrics, ResultSummary
+from xtask.benchmarks.base_benchmark import PerformanceMetrics, ResultSummary
 
 
 class AisbenchResult:
@@ -333,7 +333,7 @@ class EnhancedResult(AisbenchResult):
 
 def aisbench_post_process(task_config, output_path, init_entries):
     aisbench_output_dir = find_aisbench_directory(output_path, init_entries)
-    logging.info(f"aisbench的结果目录: {aisbench_output_dir}")
+    logging.info(f"aisbench perf的结果目录: {aisbench_output_dir}")
     if aisbench_output_dir and os.path.exists(os.path.join(output_path, aisbench_output_dir)):
         aisbench_csv = get_aisbench_csv(os.path.join(output_path, aisbench_output_dir), 
                                         task_config.get("benchmark").get("perf").get("api_type").replace("_", "-"))
@@ -386,7 +386,7 @@ def aisbench_post_process(task_config, output_path, init_entries):
         logging.info(f"   Result JSON file: {json_path}")
         logging.info(f"   Result Summary file: {summary_path}")
     else:
-        logging.error(f"aisbench csv: {aisbench_csv} is not exist.")
+        logging.error(f"aisbench csv: {aisbench_csv} is not exist. aisbench perf run failed.")
         result = None
     
     return result
@@ -394,8 +394,8 @@ def aisbench_post_process(task_config, output_path, init_entries):
 
 def aisbench_acc_post_process(task_config, output_path, init_entries):
     aisbench_output_dir = find_aisbench_directory(output_path, init_entries, aisbench_type="acc")
-    logging.info(f"aisbench的结果目录: {aisbench_output_dir}")
-    api_type= task_config.get("benchmark").get("perf").get("api_type").replace("_", "-")
+    logging.info(f"aisbench acc的结果目录: {aisbench_output_dir}")
+    api_type= task_config.get("benchmark").get("acc").get("api_type").replace("_", "-")
     if aisbench_output_dir and os.path.exists(os.path.join(output_path, aisbench_output_dir)):
         aisbench_csv = get_aisbench_csv(os.path.join(output_path, aisbench_output_dir), api_type, output_type="accaurcy")
     else:
@@ -488,7 +488,7 @@ def get_aisbench_csv(aisbench_output_path, api_type, output_type="performances")
             entry_path = os.path.join(csv_path, entry)
             if entry_path.endswith(".csv"):
                 return entry_path
-        logging.error("Can't find aisbench csv output.")
+        logging.error(f"Can't find aisbench csv output. {output_type} run failed.")
         return
     else:
         logging.error(f"aisbench output path: {csv_path} is not exist.")

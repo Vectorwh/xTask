@@ -9,11 +9,15 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
+from xtask.utils import check_port_available
+from xtask.tasks.task_parser import find_case_file
+
 
 class ConfigSource(Enum):
     """Configuration source type"""
     TEMPLATE = "template"
     CASE_NAME = "case_name"
+    CASE_GROUP = "case_group"
     ARGUMENTS = "arguments"
     UNKNOWN = "unknown"
 
@@ -81,6 +85,11 @@ Usage Examples:
             help="Test case name, corresponding to YAML file in config/cases/"
         )
         input_group.add_argument(
+            "--case_group", "-g",
+            type=str,
+            help="Test cases groups, corresponding to YAML file in config/cases/"
+        )
+        input_group.add_argument(
             "--model_name", "-m",
             type=str,
             help="Model name (direct argument mode)"
@@ -93,11 +102,11 @@ Usage Examples:
             help="Model path (local or remote URL)"
         )
         parser.add_argument(
-            "--framework", "-fmk",
+            "--engine_type", "-engine",
             type=str,
             choices=['xllm', 'mindie', 'vllm-ascend'],
             default='xllm',
-            help="Inference framework type"
+            help="engine type"
         )
         parser.add_argument(
             "--trust_remote_code", "-trc",
@@ -244,8 +253,9 @@ Usage Examples:
             help="start_device_id"
         )
         parser.add_argument(
-            "--gpu_ids", "-g",
+            "--gpu_ids",
             type=str,
+            default="0",
             help="GPU ID list, comma-separated"
         )
         parser.add_argument(
@@ -389,11 +399,16 @@ Usage Examples:
             config_source = ConfigSource.TEMPLATE
             if not self._validate_template(args.template):
                 errors.append(f"Template file does not exist or has invalid format: {args.template}")
-                
+
         elif args.case_name:
             config_source = ConfigSource.CASE_NAME
-            if not self._validate_case_name(args.case_name):
+            case_dir = os.path.join(os.getcwd(), "tests")
+            case_file = find_case_file(args.case_name, case_dir)
+            if not self._validate_case_name(case_file):
                 errors.append(f"Test case does not exist: {args.case_name}")
+        
+        elif args.case_group:
+            config_source = ConfigSource.CASE_GROUP
                 
         elif args.model_name:
             config_source = ConfigSource.ARGUMENTS
@@ -401,7 +416,7 @@ Usage Examples:
                 errors.extend(self._get_direct_args_errors(args))
         
         else:
-            errors.append("Must provide one of: --template, --case_name, or --model_name")
+            errors.append("Must provide one of: --template, --case_name, --case_group or --model_name")
         
         # Check required arguments for each configuration source
         required_args = self.REQUIRED_GROUPS.get(config_source, [])
@@ -423,6 +438,9 @@ Usage Examples:
             if args.port < 1024 or args.port > 65535:
                 errors.append(f"Port must be in range 1024-65535: {args.port}")
             
+            if not check_port_available(args.port):
+                errors.append(f"serv port: {args.port} is already in used.")
+
             # Validate GPU ID format
             if args.gpu_ids:
                 if not self._validate_gpu_ids(args.gpu_ids):
@@ -434,8 +452,9 @@ Usage Examples:
             config_data = self._generate_config_data(args, config_source)
             
             # Validate generated configuration
-            config_errors = self._validate_config_data(config_data)
-            errors.extend(config_errors)
+            if config_source == ConfigSource.ARGUMENTS:
+                config_errors = self._validate_config_data(config_data)
+                errors.extend(config_errors)
         
         return ValidationResult(
             is_valid=len(errors) == 0,
@@ -457,10 +476,10 @@ Usage Examples:
             
         return True
     
-    def _validate_case_name(self, case_name: str) -> bool:
+    def _validate_case_name(self, case_file: str) -> bool:
         """Validate if test case exists"""
-        case_file = self.case_dir / f"{case_name}.yaml"
-        return case_file.exists()
+        from pathlib import Path
+        return Path(case_file).exists()
     
     def _validate_direct_args(self, args: argparse.Namespace) -> bool:
         """Validate direct argument mode parameters"""
@@ -537,6 +556,7 @@ Usage Examples:
         """Validate configuration data structure and values"""
         errors = []
         
+        logging.info("=============== config_data is: %s"% config_data)
         # Basic structure validation
         required_sections = ['model', 'inference']
         for section in required_sections:
@@ -610,7 +630,7 @@ Usage Examples:
                 'model': {
                     'name': args.model_name,
                     'path': args.model_path,
-                    'framework': args.framework,
+                    'framework': args.engine_type,
                     'benchmark_type': args.benchmark_type
                 },
                 'inference': {
@@ -651,7 +671,7 @@ Usage Examples:
                 config['inference']['container_image'] = args.container_image
             else:
                 # Generate default container image name based on framework
-                framework = args.framework
+                framework = args.engine_type
                 config['inference']['container_image'] = \
                     f"inference-{framework}:latest"
             
@@ -659,7 +679,8 @@ Usage Examples:
     
     def _load_case_config(self, case_name: str) -> Dict:
         """Load configuration from test case YAML file"""
-        case_file = self.case_dir / f"{case_name}.yaml"
+        case_dir = os.path.join(os.getcwd(), "tests")
+        case_file = find_case_file(case_name, case_dir)
         with open(case_file, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
     

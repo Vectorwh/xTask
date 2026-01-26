@@ -3,7 +3,7 @@
         "xllm_version": "0.7.2",
         "image_home": "quay.io/jd_xllm/xllm-ai",
         "default_image_name": "xllm-dev-hc-rc2-arm",
-        "enable_proxy": "False",
+        "enable_proxy": false,
         "https_proxy_url": "",
         "http_proxy_url": "",
         "sering_container_name": "",

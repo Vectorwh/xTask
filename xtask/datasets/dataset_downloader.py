@@ -2,7 +2,10 @@ import logging
 
 def download_dataset(task_config):
     download_cmd = list()
-    acc_dataset_len = task_config.get("benchmark").get("acc").get("acc_dataset_len")
+    if task_config.get("benchmark").get("acc"):
+        acc_dataset_len = task_config.get("benchmark").get("acc").get("acc_dataset_len")
+    else:
+        acc_dataset_len = 0
     if task_config.get("dataset_name").lower() == "gsm8k" and task_config.get("benchmark").get("benchmark_type") == "aisbench":
         download_cmd = aisbench_download_gsm8k(download_cmd, acc_dataset_len)
     elif task_config.get("dataset_name").lower() == "ceavl" and task_config.get("benchmark").get("benchmark_type") == "aisbench":
@@ -11,7 +14,7 @@ def download_dataset(task_config):
     return download_cmd
 
 
-def aisbench_download_gsm8k(download_cmd, cut_len=100):
+def aisbench_download_gsm8k(download_cmd, cut_len=0):
     download_cmd.append('\necho "下载gsm8k dataset：$AIS_BENCH_PATH/datasets/gsm8"')
     download_cmd.append('if [ ! -d "$AIS_BENCH_PATH/datasets/gsm8k" ]; then')
     download_cmd.append('    cd $AIS_BENCH_PATH/datasets')

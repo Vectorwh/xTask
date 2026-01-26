@@ -30,11 +30,11 @@ def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
         'WORLD_SIZE': config.get('world_size', 1),
         'LOG_DIR': 'log',
         'BLOCK_SIZE': config.get('block_size', 128),
-        'ENABLE_PREFIX_CACHE': str(config.get('enable_prefix_cache', False)).lower(),
-        'ENABLE_CHUNKED_PREFILL': str(config.get('enable_chunked_prefill', False)).lower(),
+        'ENABLE_PREFIX_CACHE': config.get('enable_prefix_cache', False),
+        'ENABLE_CHUNKED_PREFILL': config.get('enable_chunked_prefill', False),
         'COMMUNICATION_BACKEND': config.get('communication_backend', 'hccl'),
-        'ENABLE_SCHEDULE_OVERLAP': str(config.get('enable_schedule_overlap', False)).lower(),
-        'ENABLE_MLA': str(config.get('enable_mla', False)).lower(),
+        'ENABLE_SCHEDULE_OVERLAP': config.get('enable_schedule_overlap', False),
+        'ENABLE_MLA': config.get('enable_mla', False),
         'MAX_MEMORY_UTILIZATION': config.get('max_memory_utiliization', 0.9),
         'MAX_TOKENS_PER_BATCH': config.get('max_tokens_per_batch', 20000),
         'MAX_SEQS_PER_BATCH': config.get('max_seqs_per_batch', 256),
@@ -85,17 +85,8 @@ def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
 def generate_xllm_serv_commands(task_config, framework_config):
     cmd_file = "start_xllm_serv.sh"
     # 单卡
-    if int(task_config.get("world_size")) == 1:
+    if 0 < int(task_config.get("world_size")) < 17:
         start_serv_script, script_path = generate_xllm_script(task_config, cmd_file)
-        if start_serv_script:
-            startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/;" \
-                f"rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"
-        else:
-            logging.error("generate xllm serv script failed.")
-    # 多卡
-    elif 1 < int(task_config.get("world_size")) < 17:
-        start_serv_script, script_path = generate_xllm_script(task_config, cmd_file)
-        
         if start_serv_script:
             startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/;" \
                 f"rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"

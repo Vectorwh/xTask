@@ -1,11 +1,21 @@
 import os
 import json
 import logging
-from typing import Dict, Optional, List
+from typing import Dict
 
 from xtask.utils.container_manager import path_mapping_in_container
 from xtask.datasets.dataset_downloader import download_dataset
 from xtask.datasets.dataset_manger import preprocess_dataset
+
+
+def get_api_type_file(api_type):
+    if api_type == "vllm_api_general_stream":
+        return "$CONFIG_FILE"
+    elif api_type == "vllm_api_general_chat":
+        return "$CHAT_CONFIG_FILE"
+    else:
+        logging.error(f"api_type: {api_type} is invaild.")
+        return None
 
 
 def generate_aisbench_script(
@@ -38,11 +48,9 @@ def generate_aisbench_script(
     model_path = task_config.get("model_path", "")
     dataset_name = task_config.get("dataset_name").lower()
     dataset_path = perf_cfg.get("dataset_path", "")
-    dataset_cut_len = accuracy_cfg.get("cut_len", 100)
     output_len = perf_cfg.get("output_len", 1024)
-    batch_size = perf_cfg.get("batch_size", 1)
     request_rate = perf_cfg.get("request_rate", 0)
-    batch_size = perf_cfg.get("batch_size", 1)
+    batch_size = perf_cfg.get("batch_size", 32)
     temperature = perf_cfg.get("temperature", 0)
     top_k = perf_cfg.get("top_k", -1)
     top_p = perf_cfg.get("top_p", 0.95)
@@ -87,6 +95,7 @@ def generate_aisbench_script(
     shell_content.append('fi')
     shell_content.append('echo "目标配置文件：$CHAT_CONFIG_FILE"')
 
+
     # Step 3: 修改配置文件中的核心参数（使用sed命令）
     shell_content.append("\n# 3. 修改vllm_api配置文件$CONFIG_FILE参数")
     # 替换API地址
@@ -108,8 +117,6 @@ def generate_aisbench_script(
     shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={top_k},/g" "$CONFIG_FILE"')
     shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={top_p},/g" "$CONFIG_FILE"')
     shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={seed},/g" "$CONFIG_FILE"')
-    shell_content.append(f'cp $CONFIG_FILE {output_file_path_incontainer}/ ')
-    shell_content.append('echo "配置文件修改完成（已生成备份文件 ${CONFIG_FILE}.bak）"')
 
     # 修改配置文件 $CHAT_CONFIG_FILE 中的核心参数（使用sed命令）
     shell_content.append("\n# 3. 修改vllm_api配置文件$CHAT_CONFIG_FILE")
@@ -123,28 +130,30 @@ def generate_aisbench_script(
     shell_content.append(f'sed -i "s#path\s*=\s*\\"\\",#path=\'{model_path_inside}\',#g" "$CHAT_CONFIG_FILE"')
     # 替换数据集路径
     shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={request_rate},/g" "$CHAT_CONFIG_FILE"')
-    # 替换最大生成token数
-    shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={output_len},/g" "$CHAT_CONFIG_FILE"')
-    # 替换batchsize
-    shell_content.append(f'sed -i "s/batch_size\s*=\s*.*,/batch_size={batch_size},/g" "$CHAT_CONFIG_FILE"')
 
     shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={temperature},/g" "$CHAT_CONFIG_FILE"')
     shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={top_k},/g" "$CHAT_CONFIG_FILE"')
     shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={top_p},/g" "$CHAT_CONFIG_FILE"')
     shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={seed},/g" "$CHAT_CONFIG_FILE"')
-    shell_content.append(f'cp $CHAT_CONFIG_FILE {output_file_path_incontainer}/ ')
-    shell_content.append('echo "配置文件修改完成（已生成备份文件 ${CHAT_CONFIG_FILE}.bak）"')
 
-    # Step 4: 生成精度测试命令, 如果配置了 dataset_conf则说明要跑对应数据集的精度
+    # Step 4: 生成精度测试命令, 如果--metrics配置了acc, 则读取benchmark xxx_acc_config.json配置我呢见中的参数
     if "acc" in task_config.get("metrics") and accuracy_cfg.get("dataset_conf"):
         shell_content.append("\n# 4. 执行精度测试")
-        api_type = perf_cfg.get("api_type", "vllm_api_general_stream")
+        api_type = accuracy_cfg.get("api_type", "vllm_api_general_stream")
         # metrics_str = ",".join(accuracy_metrics)
         dataset_conf = accuracy_cfg.get("dataset_conf")
-        accuracy_metrics = accuracy_cfg.get("metrics", ["bleu", "rouge"])
+        # accuracy_metrics = accuracy_cfg.get("metrics", ["bleu", "rouge"])
         accuracy_batch_size = accuracy_cfg.get("batch_size", batch_size)
-        accuracy_max_out_len = accuracy_cfg.get("max_out_len", output_len)
+        accuracy_max_out_len = accuracy_cfg.get("output_len", output_len)
+        acc_concurrency = accuracy_cfg.get("concurrency", 0)
         dump_eval_details = task_config.get("dump_eval_details", "")
+
+        api_type_file = get_api_type_file(api_type)
+        # 替换最大生成token数
+        shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={accuracy_max_out_len},/g" {api_type_file}')
+        # 替换batchsize
+        shell_content.append(f'sed -i "s/batch_size\s*=\s*.*,/batch_size={accuracy_batch_size},/g" {api_type_file}')
+        shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={acc_concurrency},/g" {api_type_file}')
         if dump_eval_details:
             dump_eval_details_str = "--dump-eval-details "
         else:
@@ -170,11 +179,29 @@ def generate_aisbench_script(
         perf_total_requests = perf_cfg.get("total_requests", 1000)
         perf_timeout = perf_cfg.get("timeout", 600)
         perf_warmup = perf_cfg.get("warmup_requests", 100)
+        perf_batch_size = perf_cfg.get("batch_size", batch_size)
+        perf_max_out_len = perf_cfg.get("output_len", output_len)
         api_type = perf_cfg.get("api_type", "vllm_api_general_stream")
         mode = perf_cfg.get("mode", "perf") # 精度: all/infer/eval/viz  性能: perf/perf_viz
         summarizer = perf_cfg.get("summarizer", "default_perf")
+        perf_temperature = perf_cfg.get("temperature", 0)
+        perf_top_k = perf_cfg.get("top_k", -1)
+        perf_top_p = perf_cfg.get("top_p", 10)
+        perf_seed = perf_cfg.get("seed", 1024)
+        api_type_file = get_api_type_file(api_type)
 
         process_dataset_cmd, dataset_conf_type = preprocess_dataset(dataset_name, task_config, output_file_path)
+        shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={perf_concurrency},/g" {api_type_file}')
+        # 替换最大生成token数
+        shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={perf_max_out_len},/g" {api_type_file}')
+        # 替换batchsize
+        shell_content.append(f'sed -i "s/batch_size\s*=\s*.*,/batch_size={perf_batch_size},/g" {api_type_file}')
+
+        shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={perf_temperature},/g" {api_type_file}')
+        shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={perf_top_k},/g" {api_type_file}')
+        shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={perf_top_p},/g" {api_type_file}')
+        shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={perf_seed},/g" {api_type_file}')
+
         if process_dataset_cmd:
             shell_content.extend(process_dataset_cmd)
         else:
@@ -195,6 +222,12 @@ def generate_aisbench_script(
         shell_content.append("\n# 5. 执行性能测试，skip task...")
     
     shell_content.append(f'chown -R {user_id}:{user_id} {output_file_path_incontainer}/* ')
+
+    shell_content.append(f'cp $CONFIG_FILE {output_file_path_incontainer}/ ')
+    shell_content.append('echo "配置文件修改完成（已生成备份文件 ${CONFIG_FILE}.bak）"')
+
+    shell_content.append(f'cp $CHAT_CONFIG_FILE {output_file_path_incontainer}/ ')
+    shell_content.append('echo "配置文件修改完成（已生成备份文件 ${CHAT_CONFIG_FILE}.bak）"')
 
     # 收尾：提示脚本完成
     shell_content.append("\necho \"===== ais-bench测试脚本执行完成 =====\"")

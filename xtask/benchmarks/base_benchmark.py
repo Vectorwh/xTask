@@ -1,3 +1,4 @@
+import os
 import logging
 from dataclasses import dataclass
 
@@ -36,12 +37,12 @@ def result_postprocess(benchmark_stdout, task_config, output_file_path, init_ent
     post_processed_result = {}
     benchmark_type = task_config.get("benchmark").get("benchmark_type")
     if benchmark_type == "aisbench":
-        from xtask.benckmarks.aisbench.aisbench_postprocess import aisbench_post_process
+        from xtask.benchmarks.aisbench.aisbench_postprocess import aisbench_post_process
 
         post_processed_result = aisbench_post_process(task_config, output_file_path, init_entries)
 
     elif benchmark_type == "vllm_bench":
-        from xtask.benckmarks.vllm_bench.vllm_bench_postprocess import vllm_ascend_post_process
+        from xtask.benchmarks.vllm_bench.vllm_bench_postprocess import vllm_ascend_post_process
 
         post_processed_result = vllm_ascend_post_process(benchmark_type)
 
@@ -54,12 +55,12 @@ def acc_result_postprocess(task_config, output_file_path, init_entries):
     post_processed_result = ""
     benchmark_type = task_config.get("benchmark").get("benchmark_type")
     if benchmark_type == "aisbench":
-        from xtask.benckmarks.aisbench.aisbench_postprocess import aisbench_acc_post_process
+        from xtask.benchmarks.aisbench.aisbench_postprocess import aisbench_acc_post_process
 
         post_processed_result = aisbench_acc_post_process(task_config, output_file_path, init_entries)
 
     elif benchmark_type == "vllm_bench":
-        from xtask.benckmarks.vllm_bench.vllm_bench_postprocess import vllm_ascend_post_process
+        from xtask.benchmarks.vllm_bench.vllm_bench_postprocess import vllm_ascend_post_process
 
         post_processed_result = vllm_ascend_post_process(benchmark_type)
 
@@ -72,3 +73,12 @@ def acc_result_postprocess(task_config, output_file_path, init_entries):
     
     logging.info("acc dataset name is: %s, acc result is: %s"% (task_config.get("dataset_name"), post_processed_result))
     return post_processed_result
+
+
+def get_acc_config(benchmark_type):
+    if benchmark_type == "aisbench":
+        aisbench_acc_config_file = os.path.join(os.getcwd(), "xtask/benchmarks/aisbench/aisbench_acc_config.json")
+    elif benchmark_type == "vllm_bench":
+        pass
+    else:
+        logging.error("benchmark_type: %s is invalid."% benchmark_type)
