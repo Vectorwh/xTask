@@ -4,7 +4,7 @@
 rm -rf xllm_pack xllm_pack.tar.gz
 #wget https://9n-das-tools.s3-internal.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_release/0.7.0/a3-arm/xllm_pack.tar.gz
 # A3
-wget https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_release/0.7.0/a3-arm/xllm_pack.tar.gz
+wget https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_release/0.8.0/a3-arm/xllm_pack.tar.gz
 # A2
 # wget https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_release/0.7.0/a2-x86/xllm_pack.tar.gz
 

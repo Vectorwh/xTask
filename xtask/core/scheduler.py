@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
 from xtask.utils.container_manager import ContainerManager, ContainerConfig
-from xtask.utils.config_parser import get_config_data
+from xtask.utils.config_parser import get_xtask_config_data
 from xtask.serv_fmk.serv_common import wait_serv_start
 
 
@@ -43,7 +43,7 @@ class Json_Reader:
             raise
     
     @staticmethod
-    def get_container_config(config_data: Dict[str, Any], framework: str = "xllm") -> Dict[str, Any]:
+    def get_container_config(config_data: Dict[str, Any], engine: str = "xllm") -> Dict[str, Any]:
         """
         从XLLM配置中获取容器配置
         
@@ -54,11 +54,11 @@ class Json_Reader:
         Returns:
             容器配置字典
         """
-        cfg_data = config_data.get(f"{framework.upper()}_CONFIG", {})
+        cfg_data = config_data.get(f"{engine.upper()}_CONFIG", {})
         
         # 构建容器配置
         container_config = {
-            "framework": framework,
+            "engine_type": engine,
             "container_home": cfg_data.get("image_home", 'xllm/xllm-ai'),
             "container_image": cfg_data.get("default_image_name", "latest"),
             "runtime": "docker",
@@ -85,7 +85,7 @@ class Json_Reader:
             "startup_command": "",  # 启动命令（根据任务动态生成）
             "startup_timeout": 300,
             "benchmark_command": "",  # 基准测试命令（根据任务动态生成）
-            "benchmark_timeout": 3600,
+            "benchmark_timeout": 7200,
             "network_mode": "host",
             "privileged": True,
             "auto_remove": False,  # 默认不自动删除，便于调试
@@ -101,7 +101,7 @@ class Json_Reader:
                 "HTTP_PROXY": cfg_data.get("http_proxy_url", ""),
             })
         
-        logging.info(f"Generated container config for framework: {framework}")
+        logging.info(f"Generated container config for framework: {engine}")
         return container_config
 
 
@@ -163,7 +163,7 @@ class ContainerConfigBuilder:
     
     @staticmethod
     def create_container_config(
-        framework_config: Dict[str, Any],
+        engine_config: Dict[str, Any],
         task_config: Dict[str, Any],
         task_yaml_path: str
     ) -> ContainerConfig:
@@ -179,8 +179,8 @@ class ContainerConfigBuilder:
             容器配置
         """
         # 获取容器镜像
-        container_home = framework_config.get("container_home", "xllm/xllm-ai")
-        container_image = framework_config.get("container_image", "latest")
+        container_home = engine_config.get("container_home", "xllm/xllm-ai")
+        container_image = engine_config.get("container_image", "latest")
         
         # 构建容器名称（使用case_name或生成唯一名称）
         case_name = task_config.get("case_name", "")
@@ -190,10 +190,10 @@ class ContainerConfigBuilder:
             container_name = f"xllm-task-{int(time.time())}"
         
         # 获取工作目录
-        work_dir = framework_config.get("working_dir", "/workspace")
+        work_dir = engine_config.get("working_dir", "/workspace")
         
         # 构建挂载卷
-        volumes = get_config_data().get("DOCKER_CONFIG").get("volumes")
+        volumes = get_xtask_config_data().get("DOCKER_CONFIG").get("volumes")
         
         # 从任务配置中获取模型路径，如果存在则添加到挂载卷
         # model_path = task_config.get("model_path", "")
@@ -203,7 +203,7 @@ class ContainerConfigBuilder:
         # 构建环境变量
         environment = {
             "TASK_CONFIG_PATH": f"{work_dir}/config/{os.path.basename(task_yaml_path)}",
-            "FRAMEWORK": framework_config.get("framework", "xllm"),
+            "FRAMEWORK": engine_config.get("engine_type", "xllm"),
             "WORKING_DIR": work_dir,
             "MODEL_PATH": task_config.get("model_path", ""),
             "SERVED_MODEL_NAME": task_config.get("served_model_name", ""),
@@ -216,27 +216,27 @@ class ContainerConfigBuilder:
         }
         
         # 添加框架配置中的环境变量
-        environment.update(framework_config.get("environment", {}))
+        environment.update(engine_config.get("environment", {}))
         
         # 构建容器配置
         container_config = ContainerConfig(
             image_home=container_home,
             image_name=container_image,
             container_name=container_name,
-            runtime=framework_config.get("runtime", "docker"),
-            gpu_ids=framework_config.get("gpu_ids", []),
-            ports=framework_config.get("ports", {}),
+            runtime=engine_config.get("runtime", "docker"),
+            gpu_ids=engine_config.get("gpu_ids", []),
+            ports=engine_config.get("ports", {}),
             volumes=volumes,
             environment=environment,
             working_dir=work_dir,
-            entrypoint=framework_config.get("entrypoint"),
-            command=framework_config.get("command"),
-            network_mode=framework_config.get("network_mode", "host"),
-            privileged=framework_config.get("privileged", True),
-            auto_remove=framework_config.get("auto_remove", False),
+            entrypoint=engine_config.get("entrypoint"),
+            command=engine_config.get("command"),
+            network_mode=engine_config.get("network_mode", "host"),
+            privileged=engine_config.get("privileged", True),
+            auto_remove=engine_config.get("auto_remove", False),
             detach=True,
-            stdin_open=framework_config.get("stdin_open", True),
-            tty=framework_config.get("tty", True)
+            stdin_open=engine_config.get("stdin_open", True),
+            tty=engine_config.get("tty", True)
         )
         
         logging.info(f"Created container config: {container_name}")
@@ -244,7 +244,7 @@ class ContainerConfigBuilder:
 
 
 def generate_commands(
-    framework_config: Dict[str, Any], 
+    engine_config: Dict[str, Any], 
     task_config: Dict[str, Any],
     task_yaml_path: str
 ) -> Tuple[str, str]:
@@ -259,35 +259,35 @@ def generate_commands(
     Returns:
         (启动命令, 基准测试命令)
     """
-    work_dir = framework_config.get("working_dir", "/workspace")
+    work_dir = engine_config.get("working_dir", "/workspace")
     config_file = f"{work_dir}/config/{os.path.basename(task_yaml_path)}"
     startup_cmd = ""
     benchmark_cmd = ""
     
     # 生成启动命令
-    if framework_config.get("framework") == "xllm":
+    if engine_config.get("engine_type") == "xllm":
         from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_serv_commands
 
-        startup_cmd = generate_xllm_serv_commands(task_config, framework_config)
+        startup_cmd = generate_xllm_serv_commands(task_config, engine_config)
 
-    elif framework_config.get("framework") == "vllm-ascend":
+    elif engine_config.get("engine_type") == "vllm-ascend":
         from xtask.serv_fmk.vllm_ascend_serv.generate_vllm_ascend_serv \
             import generate_vllm_ascend_serv_commands
 
-        startup_cmd = generate_vllm_ascend_serv_commands(task_config, framework_config)
+        startup_cmd = generate_vllm_ascend_serv_commands(task_config, engine_config)
 
-    elif framework_config.get("framework") == "mindie":
+    elif engine_config.get("engine_type") == "mindie":
         from xtask.serv_fmk.mindie_serv.generate_mindie_serv \
             import generate_mindie_serv_commands
 
-        startup_cmd = generate_mindie_serv_commands(task_config, framework_config)
+        startup_cmd = generate_mindie_serv_commands(task_config, engine_config)
 
     else:
-        logging.error("framework: %s is invalid."% framework_config.get("framework"))
+        logging.error("engine_type: %s is invalid."% engine_config.get("engine_type"))
     
     # 生成基准测试命令
     if task_config.get("benchmark").get("benchmark_type") == "aisbench":
-        from xtask.benckmarks.aisbench.generate_aisbench_script import generate_aisbench_script
+        from xtask.benchmarks.aisbench.generate_aisbench_script import generate_aisbench_script
         benchmark_cmd = generate_aisbench_script(
             task_config=task_config,
             output_shell_file="run_aisbench_test.sh",
@@ -342,28 +342,28 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         result["task_config"] = task_config
         
         # 2. 提取框架信息
-        framework = TaskConfig.extract_framework(task_config)
-        logging.info(f"Detected framework: {framework}")
+        engine = TaskConfig.extract_framework(task_config)
+        logging.info(f"Detected engine type: {engine}")
         
         # 3. 加载XLLM配置
         try:
-            config_path = os.path.join(os.getcwd(), "config", f"{framework}_config.json")
+            config_path = os.path.join(os.getcwd(), "config", f"{engine}_config.json")
             config_data = Json_Reader.load_config(config_path)
-            framework_config = Json_Reader.get_container_config(config_data, framework)
-            result["framework_config"] = framework_config
+            engine_config = Json_Reader.get_container_config(config_data, engine)
+            result["framework_config"] = engine_config
         except Exception as e:
             result["message"] = f"Failed to load XLLM config: {str(e)}"
             logging.error(result["message"])
             return result
         
         # 4. 生成命令
-        startup_cmd, benchmark_cmd = generate_commands(framework_config, task_config, task_yaml_path)
+        startup_cmd, benchmark_cmd = generate_commands(engine_config, task_config, task_yaml_path)
         result["startup_command"] = startup_cmd
         result["benchmark_command"] = benchmark_cmd
         
         # 5. 创建容器配置
         container_config = ContainerConfigBuilder.create_container_config(
-            framework_config, 
+            engine_config, 
             task_config, 
             task_yaml_path
         )
@@ -379,14 +379,14 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         
         image_url = f"{container_config.image_home}:{container_config.image_name}"
         # 8. 检查指定容器是否已存在
-        if framework_config.get("serving_container_name") and \
-            container_manager.container_exists(framework_config.get("serving_container_name")):
+        if engine_config.get("serving_container_name") and \
+            container_manager.container_exists(engine_config.get("serving_container_name")):
 
-            logging.info(f"Container {framework_config.get('serving_container_name')} already exists")
-            if container_manager.container_is_running(framework_config.get("serving_container_name")):
-                logging.info(f"Container logging.inf{framework_config.get('serving_container_name')}o( is already running")
-                result["container_id"] = framework_config.get("serving_container_name")
-                container_config.container_name = framework_config.get("serving_container_name")
+            logging.info(f"Container {engine_config.get('serving_container_name')} already exists")
+            if container_manager.container_is_running(engine_config.get("serving_container_name")):
+                logging.info(f"Container logging.inf{engine_config.get('serving_container_name')}o( is already running")
+                result["container_id"] = engine_config.get("serving_container_name")
+                container_config.container_name = engine_config.get("serving_container_name")
 
         elif not container_manager.image_exists(image_url):
             # 8. 检查镜像是否存在，不存在则拉取
@@ -453,7 +453,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         startup_result = container_manager.exec_in_container(
             container_config.container_name,
             compilation_cmd,
-            timeout=framework_config.get("startup_timeout", 300)
+            timeout=engine_config.get("startup_timeout", 300)
         )
 
         # 读取model/config.json中 transformers的版本号，容器中transformers升级到指定版本
@@ -465,7 +465,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             install_result = container_manager.exec_in_container(
                 container_config.container_name,
                 install_transformers_cmd,
-                timeout=framework_config.get("startup_timeout", 300)
+                timeout=engine_config.get("startup_timeout", 300)
             )
             if not install_result.success:
                 logging.error("transformer upgrade to %s failed."% transformers_version)
@@ -482,7 +482,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         startup_result = container_manager.exec_in_container(
             container_config.container_name,
             startup_cmd,
-            timeout=framework_config.get("startup_timeout", 300)
+            timeout=engine_config.get("startup_timeout", 300)
         )
         
         if not startup_result.success:
@@ -496,9 +496,9 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         logging.info("Waiting for service to start...")
         serving_wait_time = config_data.get("XLLM_CONFIG").get("serving_wait_time")
         time.sleep(serving_wait_time) # 等待服务真正启动
-        ret = wait_serv_start(framework, task_config, serving_wait_time)
+        ret = wait_serv_start(engine, task_config, serving_wait_time)
         if ret:
-            logging.error(f"{framework} serv startup failed.")
+            logging.error(f"{engine} serv startup failed.")
         
         # 16. 检查服务是否运行
         check_cmd = f"curl -s http://{task_config.get('host_addr', '0.0.0.0')}:{task_config.get('port', 14830)}/health"
@@ -518,7 +518,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
                 benchmark_result = container_manager.exec_in_container(
                     container_config.container_name,
                     benchmark_cmd,
-                    timeout=framework_config.get("benchmark_timeout", 3600)
+                    timeout=engine_config.get("benchmark_timeout", 3600)
                 )
                 result["benchmark_success"] = benchmark_result.success
                 result["benchmark_exit_code"] = benchmark_result.exit_code
@@ -531,15 +531,16 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
                     # 18.1 解析精度执行结果
                     if "acc" in task_config.get("metrics"):
                         logging.info("Start to check acc benchmark result.")
-                        from xtask.benckmarks.base_benchmark import acc_result_postprocess
+                        from xtask.benchmarks.base_benchmark import acc_result_postprocess
                         result["benchmark_acc_result"] = acc_result_postprocess(task_config, output_file_path, init_entries)
                     else:
                         logging.warning(f"metrics is {task_config.get('metrics')}，skip accaurcy task.")
                     
                     # 18.2 解析性能执行结果
-                    from xtask.benckmarks.base_benchmark import result_postprocess
-                    result["benchmark_perf_result"] = result_postprocess(benchmark_result.stdout, task_config, 
-                                                                        output_file_path, init_entries)
+                    if "perf" in task_config.get("metrics"):
+                        from xtask.benchmarks.base_benchmark import result_postprocess
+                        result["benchmark_perf_result"] = result_postprocess(benchmark_result.stdout, task_config, 
+                                                                            output_file_path, init_entries)
                 else:
                     logging.error(f"perf benchmark command failed with exit code {benchmark_result.exit_code}")
             else:
@@ -570,8 +571,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         result["execution_time"] = time.time() - start_time
         bool_map = {"true": True, "false": False}
         # 如果启动是通过已存在的容器或者 全局配置 CLEAN_RESULTS是Fasle，则任务退出时不会清除容器实例
-        if not framework_config.get("serving_container_name") and \
-            bool_map.get(get_config_data().get("ENV_CONFIG").get("CLEAN_RESULTS").lower()):
+        if not engine_config.get("serving_container_name") and get_xtask_config_data().get("ENV_CONFIG").get("CLEAN_RESULTS"):
             container_manager.cleanup()
         
         # 记录执行时间

@@ -4,7 +4,7 @@ import traceback
 
 from xtask.utils.logger import init_logger
 from xtask.utils.arg_parser import ArgumentChecker
-from xtask.utils.config_parser import get_config_data
+from xtask.utils.config_parser import get_xtask_config_data
 from xtask.tasks.task_parser import get_tasks
 from xtask.core.scheduler import run_scheduler
 from xtask.core.result_processor import verify_result, write_result
@@ -12,15 +12,15 @@ from xtask.core.result_processor import verify_result, write_result
 
 def main():
     """Main function for command line testing"""
-    init_logger()
-    checker = ArgumentChecker()
-    
     try:
+        init_logger()
+        checker = ArgumentChecker()
+    
         # Parse command line arguments
         args = checker.parse_arguments()
         args_result = checker.validate_arguments(args)
         checker.print_validation_result(args_result)
-        xtask_config = get_config_data()
+        xtask_config = get_xtask_config_data()
         logging.debug("args_result is: %s"% args_result)
         if args_result.is_valid:
             tasks = get_tasks(args, xtask_config)

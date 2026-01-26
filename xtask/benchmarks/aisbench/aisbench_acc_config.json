@@ -1,0 +1,29 @@
+{
+    "gsm8k": {
+        "max_out_len": 38912,
+        "batch_size": 32,
+        "request_rate": 0,
+        "ignore_eos": false,
+        "enable_thinking": false,
+        "temperature": 0.6,
+        "top_k": -1,
+        "top_p": 0.95,
+        "seed": 1024,
+        "repetition_penalty": 1,
+        "datasets": "gsm8k_gen_0_shot_noncot_chat_prompt",
+        "api_type": "vllm_api_general_chat"
+    },
+    "synthetic": {
+        "max_out_len": 38912,
+        "batch_size": 32,
+        "request_rate": 0,
+        "ignore_eos": false,
+        "enable_thinking": false,
+        "temperature": 0.6,
+        "top_k": -1,
+        "top_p": 0.95,
+        "seed": 1024,
+        "repetition_penalty": 1,
+        "api_type": "vllm_api_general_chat"
+    }
+}

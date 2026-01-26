@@ -52,7 +52,7 @@
     ├── tests/                          # 测试文件目录
     ├── tools/                          # 工具脚本目录
     ├── xtask/                          # 核心代码目录
-    │   ├── benckmarks/                 # 基准测试相关
+    │   ├── benchmarks/                 # 基准测试相关
     │   ├── core/                       # 核心模块
     │   ├── datasets/                   # 数据集管理
     │   ├── distributed/                # 分布式相关
@@ -70,15 +70,18 @@
 ## 执行样例
 
 ###  xLLM Qwen3-4b 性能+精度
-    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=32 -fmk=xllm --dataset_conf=gsm8k_gen_4_shot_cot_chat_prompt --dataset_name=gsm8k --metrics="acc,perf" --input_len=1024 --output_len=1024
+    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=32 -engine=xllm --dataset_conf=gsm8k_gen_4_shot_cot_chat_prompt --dataset_name=gsm8k --metrics="acc,perf" --input_len=1024 --output_len=1024
 
-    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=32 -fmk=xllm --dataset_conf=gsm8k_gen_4_shot_cot_chat_prompt --dataset_name=gsm8k --metrics="acc,perf" --input_len=1024 --output_len=1024 --acc_dataset_len=100
+    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=32 -engine=xllm --dataset_conf=gsm8k_gen_4_shot_cot_chat_prompt --dataset_name=gsm8k --metrics="acc,perf" --input_len=1024 --output_len=1024 --acc_dataset_len=100
 
 ###  xLLM Qwen3-4b 性能
-    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=32 -fmk=xllm
+    python main.py --model_path=/export/home/models/Qwen3-4B --model_name=Qwen3-4B -bs=32 -engine=xllm
 
 ### xLLM Qwen3-4b case_name
-    python main.py --case_name qwen3_4b_xllm_001
+    python main.py --case_name qwen3_30b_xllm_001
+
+### xLLM Qwen3-4b case_group
+    python main.py --case_group base_case_group
 
 ### xLLM Qwen3-4b template
     python main.py --template {template_path}
