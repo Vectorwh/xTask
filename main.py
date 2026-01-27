@@ -26,8 +26,8 @@ def main():
             tasks = get_tasks(args, xtask_config)
             for task in tasks:
                 result = run_scheduler(task)
-                verified_result = verify_result(result)
-                write_result(verified_result)
+                # verified_result = verify_result(result)
+                # write_result(verified_result)
         else:
             sys.exit(1)
     except Exception as e:

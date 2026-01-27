@@ -4,7 +4,7 @@ benchmark:
   perf:
     acc_dataset_len: 0
     api_type: vllm_api_general_stream
-    baseline: ''
+    baseline: 19.4
     batch_size: 32
     case_type: performance
     dataset_conf: gsm8k_gen_4_shot_cot_chat_prompt
@@ -14,7 +14,7 @@ benchmark:
     enable_debug: false
     enable_thinking: false
     ignore_eos: false
-    input_len: 1024
+    input_len: 5120
     max_num_worker: 1
     max_out_len: ''
     merge_ds: false
@@ -42,7 +42,7 @@ enable_schedule_overlap: false
 host_addr: 0.0.0.0
 max_memory_utiliization: 0.9
 max_seqs_per_batch: 256
-max_tokens_per_batch: 1024
+max_tokens_per_batch: 6144
 metrics: perf
 model_path: /export/home/models/Qwen3-30B-A3B
 num_devices: 2

@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional, Tuple
 from xtask.utils.container_manager import ContainerManager, ContainerConfig
 from xtask.utils.config_parser import get_xtask_config_data
 from xtask.serv_fmk.serv_common import wait_serv_start
+from xtask.core.result_processor import verify_result, write_result
 
 
 class Json_Reader:
@@ -494,7 +495,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         
         # 15. 等待服务启动
         logging.info("Waiting for service to start...")
-        serving_wait_time = config_data.get("XLLM_CONFIG").get("serving_wait_time")
+        serving_wait_time = task_config.get("serving_wait_time") if task_config.get("serving_wait_time") else config_data.get("XLLM_CONFIG").get("serving_wait_time")
         time.sleep(serving_wait_time) # 等待服务真正启动
         ret = wait_serv_start(engine, task_config, serving_wait_time)
         if ret:
@@ -558,7 +559,13 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             # 20. 标记执行成功
             result["success"] = True
             result["message"] = f"Task scheduled successfully in container {result['container_id']}"
-            logging.info(result["message"])
+
+            ret = verify_result(result, task_config)
+            
+            if ret:
+                write_result(result)
+            else:
+                logging.error("verify result failed.")
         else:
             result["message"] = f"Service health check failed: {health_result.stderr}"
             logging.error(result["message"])

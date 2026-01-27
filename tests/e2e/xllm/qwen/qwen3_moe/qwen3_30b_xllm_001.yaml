@@ -3,7 +3,7 @@ benchmark:
   acc:
     acc_dataset_len: 100
     api_type: vllm_api_general_chat
-    baseline: 96
+    baseline: 97
     batch_size: 32
     case_type: accuracy
     dataset_conf: gsm8k_gen_0_shot_noncot_chat_prompt
@@ -31,22 +31,22 @@ benchmark:
   perf:
     acc_dataset_len: 0
     api_type: vllm_api_general_stream
-    baseline: ''
+    baseline: 29.4
     batch_size: 32
     case_type: performance
-    dataset_conf: gsm8k_gen_4_shot_cot_chat_prompt
+    dataset_conf: gsm8k_gen_0_shot_noncot_chat_prompt
     dataset_path: null
     dump_eval_details: false
     dump_extract_rate: false
     enable_debug: false
     enable_thinking: false
     ignore_eos: false
-    input_len: 1024
+    input_len: 3584
     max_num_worker: 1
     max_out_len: ''
     merge_ds: false
     num_prompts: ''
-    output_len: 1024
+    output_len: 512
     pressure: false
     repetition_penalty: 1
     request_rate: 1
@@ -70,12 +70,13 @@ engine_type: xllm
 host_addr: 0.0.0.0
 max_memory_utiliization: 0.9
 max_seqs_per_batch: 256
-max_tokens_per_batch: 1024
+max_tokens_per_batch: 4096
 metrics: acc,perf
 model_path: /export/home/models/Qwen3-4B
-num_devices: 1
+num_devices: 2
 port: 8000
 served_model_name: Qwen3-4B
 start_device_id: 10
 userid: 1048
-world_size: 1
+world_size: 2
+serving_wait_time: 30
