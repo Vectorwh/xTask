@@ -77,6 +77,7 @@ class TaskConfig:
     serving_extensiable_param = ""
     additional_config: str = ""
     userid: int = os.getuid()
+    serving_wait_time = 30
 
     # 基准测试配置
     benchmark_type: str = "aisbench"
