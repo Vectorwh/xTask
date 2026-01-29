@@ -99,6 +99,8 @@ def generate_aisbench_script(
         shell_content.append(f'sed -i "s#path\s*=\s*\\"\\",#path=\'{model_path_inside}\',#g" {api_type_file}')
 
         shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={temperature},/g" {api_type_file}')
+        shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={request_rate},/g" {api_type_file}')
+
         shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={top_k},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={top_p},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={seed},/g" {api_type_file}')
@@ -111,7 +113,7 @@ def generate_aisbench_script(
         accuracy_max_out_len = accuracy_cfg.get("output_len", output_len)
         acc_concurrency = accuracy_cfg.get("concurrency", 0)
         dump_eval_details = task_config.get("dump_eval_details", "")
-        
+
         # 替换最大生成token数
         shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={accuracy_max_out_len},/g" {api_type_file}')
         # 替换batchsize
@@ -121,7 +123,7 @@ def generate_aisbench_script(
             dump_eval_details_str = "--dump-eval-details "
         else:
             dump_eval_details_str = ""
-        
+
         # 构造ais-bench精度测试命令（参考ais-bench官方文档）
         accuracy_cmd = (
             f'ais_bench --models {api_type} '
@@ -177,6 +179,7 @@ def generate_aisbench_script(
         shell_content.append(f'sed -i "s/batch_size\s*=\s*.*,/batch_size={perf_batch_size},/g" {api_type_file}')
 
         shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={perf_temperature},/g" {api_type_file}')
+        shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={request_rate},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={perf_top_k},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={perf_top_p},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={perf_seed},/g" {api_type_file}')
