@@ -55,6 +55,9 @@ MAX_SEQS_PER_BATCH={MAX_SEQS_PER_BATCH}
 DP_SIZE={DP_SIZE}
 EP_SIZE={EP_SIZE}
 USERID={USERID}
+ENABLE_GRAPH={ENABLE_GRAPH}
+NUM_SPECULATIVE_TOKENS={NUM_SPECULATIVE_TOKENS}
+SERVING_EXTENSIABLE_PARAM={SERVING_EXTENSIABLE_PARAM}
 mkdir -p $LOG_DIR
 # ========================================
 
@@ -85,7 +88,10 @@ xllm_command=(
   --enable_chunked_prefill "$ENABLE_CHUNKED_PREFILL"
   --communication_backend "$COMMUNICATION_BACKEND"
   --enable_schedule_overlap "$ENABLE_SCHEDULE_OVERLAP"
-  $serving_extensiable_param
+  --enable_mla "$ENABLE_MLA"
+  --enable_graph "$ENABLE_GRAPH"
+  --num_speculative_tokens "$NUM_SPECULATIVE_TOKENS"
+  $SERVING_EXTENSIABLE_PARAM
 )
 
 echo "服务启动命令: ${xllm_command[*]}"

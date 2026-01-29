@@ -1,0 +1,56 @@
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    acc_dataset_len: 0
+    api_type: vllm_api_stream_chat
+    baseline: 16.0
+    batch_size: 75
+    case_type: performance
+    dataset_conf: gsm8k_gen_0_shot_cot_chat_prompt
+    dataset_path: null
+    dump_eval_details: false
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    ignore_eos: false
+    input_len: 2048
+    max_num_worker: 1
+    max_out_len: ''
+    merge_ds: false
+    num_prompts: 225
+    output_len: 2048
+    pressure: false
+    repetition_penalty: 1
+    request_rate: 75
+    seed: 1024
+    temperature: 0
+    threshold: 0.05
+    top_k: -1
+    top_p: 1
+block_size: 128
+case_name: qwen3_8b_xllm_005
+communication_backend: hccl
+dataset_format: json
+dataset_name: gsm8k
+dataset_path: ''
+enable_chunked_prefill: true
+enable_mla: true
+enable_mtp: false
+enable_graph: true
+enable_prefix_cache: true
+enable_schedule_overlap: true
+engine_type: xllm
+host_addr: 0.0.0.0
+max_memory_utiliization: 0.9
+max_seqs_per_batch: 256
+max_tokens_per_batch: 4096
+metrics: perf
+model_path: /export/home/models/Qwen3-8B
+num_devices: 1
+num_speculative_tokens: 1
+port: 8000
+served_model_name: Qwen3-8B
+userid: 1048
+world_size: 1
+serving_wait_time: 30

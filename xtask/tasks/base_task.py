@@ -68,6 +68,7 @@ class TaskConfig:
     enable_chunked_prefill: bool = False
     enable_schedule_overlap: bool = False
     enable_mtp: bool = False
+    enable_graph: bool = False
     dataset_name: str = "synthetic"   # synthetic: 随机数，GSM8K，sonnet
     dataset_path: str = ""
     dataset_format: str = "json"  # choices: ['json', 'jsonl', 'csv', 'huggingface']
@@ -78,6 +79,7 @@ class TaskConfig:
     additional_config: str = ""
     userid: int = os.getuid()
     serving_wait_time = 30
+    num_speculative_tokens = 1
 
     # 基准测试配置
     benchmark_type: str = "aisbench"
@@ -163,8 +165,7 @@ class TaskConfig:
         setattr(config, "case_name", get_case_name_by_args(args).lower()) 
         for field_name in cls.__dataclass_fields__:
             if field_name == "start_device_id":
-                env_start_device_id = xtask_config.get("ENV_CONFIG").get("start_device_id")
-                value = env_start_device_id if env_start_device_id else getattr(args, field_name)
+                value = xtask_config.get("ENV_CONFIG").get("start_device_id")
                 setattr(config, field_name, value)
                 continue
     

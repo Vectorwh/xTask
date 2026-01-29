@@ -24,14 +24,15 @@ def preprocess_gsm8k(process_dataset_cmd, task_config, output_path):
 
     batch_size = task_config.get("benchmark").get("perf").get("batch_size")
     input_len = task_config.get("benchmark").get("perf").get("input_len")
+    num_prompts = task_config.get("benchmark").get("perf").get("num_prompts", batch_size)
     dataset_type = get_dataset_type(task_config.get("dataset_name"))
     model_path = task_config.get("model_path", "")
     output_file = path_mapping_in_container(process_dataset_gsm8k(batch_size, input_len, dataset_type, 
-                                                            model_path, output_path))
+                                                            model_path, output_path, num_prompts))
     dataset_conf_type = "gsm8k_gen_0_shot_cot_str_perf"
 
     process_dataset_cmd.append('\necho "开始生成 gsm8k dataset：$AIS_BENCH_PATH/datasets/gsm8k"')
-    process_dataset_cmd.append(f'mv {output_file} $AIS_BENCH_PATH/datasets/gsm8k/test.jsonl')
+    process_dataset_cmd.append(f'cp -f {output_file} $AIS_BENCH_PATH/datasets/gsm8k/test.jsonl')
 
     return process_dataset_cmd, dataset_conf_type
 
@@ -39,3 +40,5 @@ def preprocess_gsm8k(process_dataset_cmd, task_config, output_path):
 def preprocess_ceavl(process_dataset_cmd, task_config, output_path):
     pass
 
+def preprocess_shareGPT_V3(process_dataset_cmd, task_config, output_path):
+    pass

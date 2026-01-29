@@ -35,13 +35,15 @@ def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
         'COMMUNICATION_BACKEND': config.get('communication_backend', 'hccl'),
         'ENABLE_SCHEDULE_OVERLAP': config.get('enable_schedule_overlap', False),
         'ENABLE_MLA': config.get('enable_mla', False),
+        'ENABLE_GRAPH': config.get('enable_graph', False),
         'MAX_MEMORY_UTILIZATION': config.get('max_memory_utiliization', 0.9),
         'MAX_TOKENS_PER_BATCH': config.get('max_tokens_per_batch', 20000),
         'MAX_SEQS_PER_BATCH': config.get('max_seqs_per_batch', 256),
-        'DP_SIZE': config.get("serving_extensiable_param", ""),  # 默认值
-        'EP_SIZE': config.get("serving_extensiable_param", ""),  # 默认值
+        'DP_SIZE': config.get("dp_size", ""),  # 默认值
+        'EP_SIZE': config.get("tp_size", ""),  # 默认值
         "SERVING_EXTENSIABLE_PARAM": config.get("serving_extensiable_param", ""),
-        "USERID": config.get("userid", 0)
+        "USERID": config.get("userid", 0),
+        "NUM_SPECULATIVE_TOKENS": config.get("num_speculative_tokens", 0)
     }
     
     # 读取模板
@@ -65,6 +67,9 @@ def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
             if key == "MODEL_PATH":
                 from xtask.utils.container_manager import path_mapping_in_container
                 value = path_mapping_in_container(value)
+            if key == "NUM_SPECULATIVE_TOKENS":
+                if not value:
+                    continue
             script_content = script_content.replace(f'{{{key}}}', str(value))
         
         output_file_path = os.path.join("./outputs", f"{config.get('case_name').lower()}")

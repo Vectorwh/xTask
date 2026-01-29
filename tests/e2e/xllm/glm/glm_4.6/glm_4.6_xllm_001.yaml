@@ -30,7 +30,7 @@ benchmark:
   benchmark_type: aisbench
   perf:
     acc_dataset_len: 0
-    api_type: vllm_api_general_stream
+    api_type: vllm_api_stream_chat
     baseline: ''
     batch_size: 32
     case_type: performance
@@ -51,10 +51,10 @@ benchmark:
     repetition_penalty: 1
     request_rate: 1
     seed: 1024
-    temperature: 0.6
+    temperature: 0
     threshold: 0.05
     top_k: -1
-    top_p: 0.95
+    top_p: 1
 block_size: 128
 case_name: glm_4.6_xllm_001
 communication_backend: hccl
