@@ -36,6 +36,7 @@ def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
         'ENABLE_SCHEDULE_OVERLAP': config.get('enable_schedule_overlap', False),
         'ENABLE_MLA': config.get('enable_mla', False),
         'ENABLE_GRAPH': config.get('enable_graph', False),
+        'ENABLE_SHM': config.get('enable_shm', False),
         'MAX_MEMORY_UTILIZATION': config.get('max_memory_utiliization', 0.9),
         'MAX_TOKENS_PER_BATCH': config.get('max_tokens_per_batch', 20000),
         'MAX_SEQS_PER_BATCH': config.get('max_seqs_per_batch', 256),

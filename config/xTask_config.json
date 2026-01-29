@@ -30,7 +30,7 @@
         "benchmark_script_path": "",
         "volumes": {
             "/export/home/models/": "/models",
-            "/export/home/weinan5/jiji6/xTask": "/workspace",
+            "/export/home/weinan5/jiangenbao/xTask20260128/xTask": "/workspace",
             "/export/home/weinan5/xllm_test_060": "/xllm_test_060",
             "/usr/local/dcmi": "/usr/local/dcmi",
             "/usr/local/bin/npu-smi": "/usr/local/bin/npu-smi",
