@@ -54,8 +54,10 @@ MAX_TOKENS_PER_BATCH={MAX_TOKENS_PER_BATCH}
 MAX_SEQS_PER_BATCH={MAX_SEQS_PER_BATCH}
 DP_SIZE={DP_SIZE}
 EP_SIZE={EP_SIZE}
+NUM_SPECULATIVE_TOKENS={NUM_SPECULATIVE_TOKENS}
 SERVING_EXTENSIABLE_PARAM={SERVING_EXTENSIABLE_PARAM}
 USERID={USERID}
+ENABLE_GRAPH={ENABLE_GRAPH}
 mkdir -p $LOG_DIR
 # ========================================
 
@@ -89,6 +91,8 @@ do
     --communication_backend "$COMMUNICATION_BACKEND"
     --enable_schedule_overlap "$ENABLE_SCHEDULE_OVERLAP"
     --enable_mla "$ENABLE_MLA"
+    --enable_graph "$ENABLE_GRAPH"
+    --num_speculative_tokens "$NUM_SPECULATIVE_TOKENS"
     $SERVING_EXTENSIABLE_PARAM
   )
   echo '服务启动命令: ${xllm_command[*]}' >> "$LOG_FILE"

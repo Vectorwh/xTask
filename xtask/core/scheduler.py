@@ -561,14 +561,13 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             result["message"] = f"Task scheduled successfully in container {result['container_id']}"
 
             ret = verify_result(result, task_config)
-            
-            if ret:
-                write_result(result)
-            else:
+            if not ret:
                 logging.error("verify result failed.")
+                result["success"] = False
         else:
             result["message"] = f"Service health check failed: {health_result.stderr}"
             logging.error(result["message"])
+        write_result(result, task_config)
     except Exception as e:
         result["message"] = f"Error in scheduler: {str(e)}"
         logging.error(result["message"], exc_info=True)
@@ -576,7 +575,6 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
     finally:
         # 计算执行时间
         result["execution_time"] = time.time() - start_time
-        bool_map = {"true": True, "false": False}
         # 如果启动是通过已存在的容器或者 全局配置 CLEAN_RESULTS是Fasle，则任务退出时不会清除容器实例
         if not engine_config.get("serving_container_name") and get_xtask_config_data().get("ENV_CONFIG").get("CLEAN_RESULTS"):
             container_manager.cleanup()

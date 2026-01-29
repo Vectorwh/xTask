@@ -1,5 +1,8 @@
+import os
 import inspect
 import logging
+import stat
+from datetime import datetime, timezone
 
 
 def check_accuracy_within_threshold(baseline, threshold, result_value):
@@ -64,7 +67,7 @@ def verify_result(result, task_config):
         baseline = task_config.get("benchmark").get("perf").get("baseline")
         if baseline:
             threshold = task_config.get("benchmark").get("perf").get("threshold")
-            benchmark_perf_result = float(result.get("benchmark_acc_result").output_tokens_avg)
+            benchmark_perf_result = float(result.get("benchmark_perf_result").summary.output_token_throughput)
             if check_accuracy_within_threshold(baseline, threshold, benchmark_perf_result):
                 return True
         else:
@@ -75,5 +78,33 @@ def verify_result(result, task_config):
     return ret
 
 
-def write_result(result):
+def write_result(result, task_config):
     logging.debug("entry function: %s"% inspect.currentframe().f_code.co_name)
+    case_name = task_config.get("case_name")
+    current_datetime = datetime.now(tz=timezone.utc)
+    date_time = current_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    local_host_ip = os.getenv('LOCAL_HOST_IP')
+    results_path = os.path.join(os.getcwd(), "outputs")
+    if not os.path.exists(results_path):
+        os.mkdir(results_path)
+    result_file = os.path.join(results_path, 'result.csv')
+    first_row = 'case_name,results,precision,max_deviation,time_cost,local_host_ip,date_time'
+    modes = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+    if not os.path.exists(result_file):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        with os.fdopen(os.open(result_file, flags, modes), 'w') as f:
+            f.write(first_row + '\n')
+
+    if result.get("success"):
+        result_ret = "pass"
+    else:
+        result_ret = "fail"
+    error_num = result.get("error_num")
+    time_cost = result.get("execution_time")
+    logging.info('Case report: %s, %s, %s, %.2f, %s, %s', case_name, result_ret, error_num,
+                 time_cost / 1000, local_host_ip, date_time)
+    case_flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
+    with os.fdopen(os.open(result_file, case_flags, modes), 'a+') as case_file:
+        case_file.write('%s,%s,%s,%.2f,%s,%s\n' % (case_name, result_ret, error_num, time_cost / 1000,
+                                                      local_host_ip, date_time))
+        case_file.close()

@@ -66,7 +66,7 @@ def generate_annotations_file(batch_size, start_question_id=3602, output_file="t
 
 #########################################################################################
 #数据集问题文本生成函数
-def datatmp_generator(input_len, tokenizer, dataset, batch_size):
+def datatmp_generator(input_len, tokenizer, dataset, num_prompts):
     dataset_tmp = []
     for sentence in dataset:
         words = tokenizer.tokenize(sentence)
@@ -84,18 +84,35 @@ def datatmp_generator(input_len, tokenizer, dataset, batch_size):
             decoded_text = tokenizer.convert_tokens_to_string(words)
             dataset_tmp.append(decoded_text)
 
-    batch_num = len(dataset_tmp) // batch_size
-    if batch_num == 0:
-        multiplier = (batch_size // len(dataset_tmp)) + 1
-        repeat_batch = dataset_tmp * multiplier
-        dataset_tmp = repeat_batch[:batch_size]
+    if num_prompts < len(dataset_tmp):
+        dataset_tmp = dataset_tmp[:num_prompts]
     else:
-        dataset_tmp = dataset_tmp[:batch_size]
+        multiplier = (num_prompts // len(dataset_tmp)) + 1
+        repeat_batch = dataset_tmp * multiplier
+        dataset_tmp = repeat_batch[:num_prompts]
     return dataset_tmp
 
 ################################自定义函数区域#############################################
 
-def process_dataset_gsm8k(batch_size, input_len, dataset_type, model_path, output_path):
+def convert_to_int_or_default(s, back_v):
+    """
+    如果字符串可以转换为整数，则返回其整数值；
+    否则返回默认值 1
+    
+    Args:
+        s: 要转换的字符串
+    
+    Returns:
+        int: 转换后的整数值或默认值 1
+    """
+    try:
+        # 尝试转换为整数
+        return int(s)
+    except (ValueError, TypeError):
+        # 如果转换失败（非数字字符串或类型错误），返回默认值 1
+        return back_v
+
+def process_dataset_gsm8k(batch_size, input_len, dataset_type, model_path, output_path, num_prompts):
     #调用tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     logging.info(f"[process_dataset]: 数据集生成基于该权重产生:{model_path}")
@@ -112,7 +129,8 @@ def process_dataset_gsm8k(batch_size, input_len, dataset_type, model_path, outpu
             dataset.append(data['question'])
 
     dataset_tmp = []
-    dataset_tmp = datatmp_generator(input_len, tokenizer, dataset, batch_size)
+    num_prompts = convert_to_int_or_default(num_prompts, batch_size)
+    dataset_tmp = datatmp_generator(input_len, tokenizer, dataset, num_prompts)
     logging.info("=== 生成GSM8K.jsonl文件 ===")
     json.dumps(dataset_tmp, ensure_ascii=False, indent=4)
     output_file = os.path.join(output_path, f'GSM8K-in{input_len}-bs{batch_size}.jsonl')
