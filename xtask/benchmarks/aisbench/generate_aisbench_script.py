@@ -60,6 +60,7 @@ def generate_aisbench_script(
     top_k = perf_cfg.get("top_k", -1)
     top_p = perf_cfg.get("top_p", 0.95)
     seed = perf_cfg.get("seed", 1024)
+    repetition_penalty = perf_cfg.get("repetition_penalty", 1)
     model_path_inside = path_mapping_in_container(model_path)
     user_id = os.getuid()
 
@@ -104,6 +105,7 @@ def generate_aisbench_script(
         shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={top_k},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={top_p},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={seed},/g" {api_type_file}')
+        shell_content.append(f'sed -i "s/repetition_penalty\s*=\s*.*,/repetition_penalty={repetition_penalty},/g" {api_type_file}')
 
         shell_content.append("\n# 4. 执行精度测试")
         # metrics_str = ",".join(accuracy_metrics)
@@ -183,6 +185,7 @@ def generate_aisbench_script(
         shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={perf_top_k},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={perf_top_p},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={perf_seed},/g" {api_type_file}')
+        shell_content.append(f'sed -i "s/repetition_penalty\s*=\s*.*,/repetition_penalty={repetition_penalty},/g" {api_type_file}')
 
         if process_dataset_cmd:
             shell_content.extend(process_dataset_cmd)
