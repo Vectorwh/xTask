@@ -60,6 +60,7 @@ def generate_aisbench_script(
     top_k = perf_cfg.get("top_k", -1)
     top_p = perf_cfg.get("top_p", 0.95)
     seed = perf_cfg.get("seed", 1024)
+    num_warmups = perf_cfg.get("num_warmups", 0)
     repetition_penalty = perf_cfg.get("repetition_penalty", 1)
     model_path_inside = path_mapping_in_container(model_path)
     user_id = os.getuid()
@@ -196,6 +197,7 @@ def generate_aisbench_script(
         perf_cmd = (
             f'ais_bench --models {api_type} '
             f'--datasets {dataset_conf_type} '
+            f'--num-warmups {num_warmups} '
             f'--mode {mode} --debug '
             f'--summarizer {summarizer} '
             f'--work-dir {output_file_path_incontainer}'
