@@ -457,6 +457,15 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             timeout=engine_config.get("startup_timeout", 300)
         )
 
+        down_aisbench_cmd = "bash /workspace/tools/download_ais_bench.sh;"
+        logging.info(f"Starting the compilation task: {down_aisbench_cmd}")
+
+        startup_result = container_manager.exec_in_container(
+            container_config.container_name,
+            down_aisbench_cmd,
+            timeout=engine_config.get("startup_timeout", 300)
+        )
+
         # 读取model/config.json中 transformers的版本号，容器中transformers升级到指定版本
         model_config_path = os.path.join(task_config.get("model_path"), "config.json")
         if os.path.exists(model_config_path):
