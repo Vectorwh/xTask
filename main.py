@@ -5,6 +5,7 @@ import traceback
 from xtask.utils.logger import init_logger
 from xtask.utils.arg_parser import ArgumentChecker
 from xtask.utils.config_parser import get_xtask_config_data
+from xtask.utils.openme import OpenMeClient
 from xtask.tasks.task_parser import get_tasks
 from xtask.core.scheduler import run_scheduler
 from xtask.core.result_processor import verify_result, write_result
@@ -15,7 +16,8 @@ def main():
     try:
         init_logger()
         checker = ArgumentChecker()
-    
+        openme_client = OpenMeClient("v0.8.0", "A3", "11.87.191.101")
+
         # Parse command line arguments
         args = checker.parse_arguments()
         args_result = checker.validate_arguments(args)
@@ -26,8 +28,10 @@ def main():
             tasks = get_tasks(args, xtask_config)
             for task in tasks:
                 result = run_scheduler(task)
+                openme_client.AddCaseResult(result["success"], result["task_config"]["case_name"], result["task_config"]["model_path"], result["message"])
                 # verified_result = verify_result(result)
                 # write_result(verified_result)
+            openme_client.SendJUEMsgCard()
         else:
             sys.exit(1)
     except Exception as e:
