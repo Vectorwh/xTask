@@ -511,7 +511,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             logging.error(f"{engine} serv startup failed.")
         
         # 16. 检查服务是否运行
-        check_cmd = f"curl -s http://{task_config.get('host_addr', '0.0.0.0')}:{task_config.get('port', 14830)}/health"
+        check_cmd = f"curl -i http://{task_config.get('host_addr', '0.0.0.0')}:{task_config.get('port', 14830)}/health"
         health_result = container_manager.exec_in_container(
             container_config.container_name,
             check_cmd,
