@@ -20,7 +20,7 @@
     "DOCKER_CONFIG": {
         "docker_cmd": "docker",
         "docker_home_path": "/data/",
-        "local_home_path": "/export/home/weinan5/",
+        "local_home_path": "/export/home/kongshuaikang1/",
         "enable_proxy": "True",
         "https_proxy_url": "http://bamboo-proxy.jd.com:80",
         "http_proxy_url": "http://bamboo-proxy.jd.com:80",
@@ -30,8 +30,8 @@
         "benchmark_script_path": "",
         "volumes": {
             "/export/home/models/": "/models",
-            "/export/home/weinan5/jiangenbao/xTask20260128/xTask": "/workspace",
-            "/export/home/weinan5/xllm_test_060": "/xllm_test_060",
+            "/export/home/kongshuaikang1/xTask": "/workspace",
+            "/export/home/kongshuaikang1/xllm_test_060": "/xllm_test_060",
             "/usr/local/dcmi": "/usr/local/dcmi",
             "/usr/local/bin/npu-smi": "/usr/local/bin/npu-smi",
             "/usr/local/Ascend/driver": "/usr/local/Ascend/driver",

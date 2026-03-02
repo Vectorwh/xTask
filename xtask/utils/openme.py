@@ -17,7 +17,7 @@ class OpenMeClient:
             "GroupId": "10224622479",         # 发送京me群ID
             "RobotId": "00_df87bfb3cfd340ec",   # 机器人ID
             "TemplateCardId": "YWYOs4nghsVy1VWPHngjS",  # 卡片ID
-            "TemplateCardVersion": "0.0.3"              # 卡片版本
+            "TemplateCardVersion": "0.0.5"              # 卡片版本
             }
 
     URL_CONFIG = {
@@ -61,7 +61,8 @@ class OpenMeClient:
                             "execution_time": formatted_time,
                             "all_case_num": "0",
                             "fail_case_num": "0",
-                            "case_details": []
+                            "case_details": [],
+                            "case_framework_log": "[测试框架执行日志](http://xllm-ci-hud.jd.com/case_framework.log)"
                         }
 				    },
 				    "forward": {
@@ -88,20 +89,22 @@ class OpenMeClient:
         response = requests.post(OpenMeClient.URL_CONFIG["JUEMsgUrl"], headers=headers, data=json.dumps(self.dataMap))
         
         # 打印结果
-        logging.info(response.status_code)
         logging.info(response.json())
 
-    def AddCaseResult(self, success, case_name, model, report):
+    def AddCaseResult(self, result):
         """case result handle """
+        case_name = result["task_config"]["case_name"]
         case_detail = {
             "case_name": case_name,
-            "model": model.split("/")[-1],
-            "report": "[summary](http://xllm-ci-hud.jd.com/" + case_name + "/" + case_name + ".json)"
+            "model": result["task_config"]["served_model_name"],
+            "report": "[Summary](http://xllm-ci-hud.jd.com/" + case_name + "/" + case_name + ".json)",
+            "case_exec_time": str(int(result['execution_time'])) + "s",
+            "xllm_log": "[NodeLOG](http://xllm-ci-hud.jd.com/" + case_name + "/log/)"
         }
 
         self.all_case_num = self.all_case_num + 1
-        if success:
-            case_detail["status"] = [
+        if result["success"]:
+            case_detail["case_status"] = [
                 {
                     "color": "green",
                     "text": "成功"
@@ -109,7 +112,22 @@ class OpenMeClient:
             ]
         else:
             self.fail_case_num = self.fail_case_num + 1
-            case_detail["status"] = [
+            case_detail["case_status"] = [
+                {
+                    "color": "red",
+                    "text": "失败"
+                }
+            ]
+
+        if 'benchmark_success' in result.keys() and result['benchmark_success']:
+            case_detail['case_result'] = [
+                {
+                    "color": "green",
+                    "text": "成功"
+                }
+            ]
+        else:
+            case_detail["case_result"] = [
                 {
                     "color": "red",
                     "text": "失败"
@@ -134,7 +152,6 @@ class OpenMeClient:
             response = requests.post(OpenMeClient.URL_CONFIG["AppAccessTokenUrl"], headers=headers, data=json.dumps(dataMap))
         
             # 打印结果
-            logging.info(response.status_code)
             logging.info(response.json())
             
             self.appAccessToken = response.json()["data"]["appAccessToken"]
@@ -152,7 +169,6 @@ class OpenMeClient:
             response = requests.post(OpenMeClient.URL_CONFIG["TeamAccessTokenUrl"], headers=headers, data=json.dumps(dataMap))
         
             # 打印结果
-            logging.info(response.status_code)
             logging.info(response.json())
 
             self.teamAccessToken = response.json()["data"]["teamAccessToken"]
