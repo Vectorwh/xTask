@@ -40,10 +40,10 @@ class BenchmarkConfig:
     top_k: float = -1
     top_p: float = 0.95
     seed: int = 1024
-    repetition_penalty: int = 1,
+    repetition_penalty: int = 1
     ignore_eos: bool = False
     enable_thinking: bool = False
-
+    num_warmups: int = 20
 
 @dataclass
 class TaskConfig:

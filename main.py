@@ -16,7 +16,7 @@ def main():
     try:
         init_logger()
         checker = ArgumentChecker()
-        openme_client = OpenMeClient("v0.8.0", "A3", "11.87.191.101")
+        openme_client = OpenMeClient("main", "A3-ARM", "11.87.191.101")
 
         # Parse command line arguments
         args = checker.parse_arguments()
@@ -27,11 +27,16 @@ def main():
         if args_result.is_valid:
             tasks = get_tasks(args, xtask_config)
             for task in tasks:
-                result = run_scheduler(task)
-                openme_client.AddCaseResult(result["success"], result["task_config"]["case_name"], result["task_config"]["model_path"], result["message"])
+                try:
+                    result = run_scheduler(task)
+                    openme_client.AddCaseResult(result)
+                except Exception as e:
+                    result["message"] = f"Error in scheduler: {str(e)}"
+                    logging.error(result["message"], exc_info=True)
+                
                 # verified_result = verify_result(result)
                 # write_result(verified_result)
-            openme_client.SendJUEMsgCard()
+            # openme_client.SendJUEMsgCard()
         else:
             sys.exit(1)
     except Exception as e:

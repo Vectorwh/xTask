@@ -74,25 +74,25 @@ LOG_DIR="log"
 LOG_FILE="$LOG_DIR/node_$START_DEVICE.log"
 
 xllm_command=(
-  xllm
-  --model "$MODEL_PATH"
-  --port "$START_PORT"
-  --devices "npu:$START_DEVICE"
-  --master_node_addr "$MASTER_NODE_ADDR"
-  --nnodes "$WORLD_SIZE"
-  --node_rank 0
-  --max_memory_utilization "$MAX_MEMORY_UTILIZATION"
-  --max_tokens_per_batch "$MAX_TOKENS_PER_BATCH"
-  --max_seqs_per_batch "$MAX_SEQS_PER_BATCH"
-  --block_size "$BLOCK_SIZE"
-  --enable_prefix_cache "$ENABLE_PREFIX_CACHE"
-  --enable_chunked_prefill "$ENABLE_CHUNKED_PREFILL"
-  --communication_backend "$COMMUNICATION_BACKEND"
-  --enable_schedule_overlap "$ENABLE_SCHEDULE_OVERLAP"
-  --enable_mla "$ENABLE_MLA"
-  --enable_graph "$ENABLE_GRAPH"
-  --enable_shm "$ENABLE_SHM"
-  --num_speculative_tokens "$NUM_SPECULATIVE_TOKENS"
+  xllm \
+  --model "$MODEL_PATH" \
+  --port "$START_PORT" \
+  --devices="npu:$START_DEVICE" \
+  --master_node_addr="$MASTER_NODE_ADDR" \
+  --nnodes="$WORLD_SIZE" \
+  --node_rank=0 \
+  --max_memory_utilization="$MAX_MEMORY_UTILIZATION" \
+  --max_tokens_per_batch="$MAX_TOKENS_PER_BATCH" \
+  --max_seqs_per_batch="$MAX_SEQS_PER_BATCH" \
+  --block_size="$BLOCK_SIZE" \
+  --enable_prefix_cache="$ENABLE_PREFIX_CACHE" \
+  --enable_chunked_prefill="$ENABLE_CHUNKED_PREFILL" \
+  --communication_backend="$COMMUNICATION_BACKEND" \
+  --enable_schedule_overlap="$ENABLE_SCHEDULE_OVERLAP" \
+  --enable_mla="$ENABLE_MLA" \
+  --enable_graph="$ENABLE_GRAPH" \
+  --enable_shm="$ENABLE_SHM" \
+  --num_speculative_tokens="$NUM_SPECULATIVE_TOKENS" \
   $SERVING_EXTENSIABLE_PARAM
 )
 

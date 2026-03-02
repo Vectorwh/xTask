@@ -478,7 +478,8 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
                 timeout=engine_config.get("startup_timeout", 300)
             )
             if not install_result.success:
-                logging.error("transformer upgrade to %s failed."% transformers_version)
+                logging.error("transformer upgrade to %s failed,stdout:%s,stderr:%s." \
+                             % (transformers_version, install_result.stdout, install_result.stderr))
                 return result
         else:
             logging.error("model config file: %s is not exist"% model_config_path)

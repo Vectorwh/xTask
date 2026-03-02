@@ -52,16 +52,6 @@ def generate_aisbench_script(
     model_name = task_config.get("served_model_name", "model")
     model_path = task_config.get("model_path", "")
     dataset_name = task_config.get("dataset_name").lower()
-    dataset_path = perf_cfg.get("dataset_path", "")
-    output_len = perf_cfg.get("output_len", 1024)
-    request_rate = perf_cfg.get("request_rate", 0)
-    batch_size = perf_cfg.get("batch_size", 32)
-    temperature = perf_cfg.get("temperature", 0)
-    top_k = perf_cfg.get("top_k", -1)
-    top_p = perf_cfg.get("top_p", 0.95)
-    seed = perf_cfg.get("seed", 1024)
-    num_warmups = perf_cfg.get("num_warmups", 0)
-    repetition_penalty = perf_cfg.get("repetition_penalty", 1)
     model_path_inside = path_mapping_in_container(model_path)
     user_id = os.getuid()
 
@@ -86,6 +76,17 @@ def generate_aisbench_script(
 
     # Step 2: 生成精度测试命令, 如果--metrics配置了acc, 则读取benchmark xxx_acc_config.json配置我呢见中的参数
     if "acc" in task_config.get("metrics") and accuracy_cfg.get("dataset_conf"):
+        dataset_path = accuracy_cfg.get("dataset_path", "")
+        output_len = accuracy_cfg.get("output_len", 1024)
+        request_rate = accuracy_cfg.get("request_rate", 0)
+        batch_size = accuracy_cfg.get("batch_size", 32)
+        temperature = accuracy_cfg.get("temperature", 0)
+        top_k = accuracy_cfg.get("top_k", -1)
+        top_p = accuracy_cfg.get("top_p", 0.95)
+        seed = accuracy_cfg.get("seed", 1024)
+        num_warmups = accuracy_cfg.get("num_warmups", 0)
+        repetition_penalty = accuracy_cfg.get("repetition_penalty", 1)
+
         api_type = accuracy_cfg.get("api_type", "vllm_api_general_chat")
         api_type_file, shell_content = get_api_type_file(api_type, shell_content)
 
@@ -145,6 +146,17 @@ def generate_aisbench_script(
 
     # Step 4: 生成性能测试命令（若开启）
     if "perf" in task_config.get("metrics"):
+        dataset_path = perf_cfg.get("dataset_path", "")
+        output_len = perf_cfg.get("output_len", 1024)
+        request_rate = perf_cfg.get("request_rate", 0)
+        batch_size = perf_cfg.get("batch_size", 32)
+        temperature = perf_cfg.get("temperature", 0)
+        top_k = perf_cfg.get("top_k", -1)
+        top_p = perf_cfg.get("top_p", 0.95)
+        seed = perf_cfg.get("seed", 1024)
+        num_warmups = perf_cfg.get("num_warmups", 0)
+        repetition_penalty = perf_cfg.get("repetition_penalty", 1)
+
         api_type = perf_cfg.get("api_type", "vllm_api_general_stream")
         api_type_file, shell_content = get_api_type_file(api_type, shell_content)
 
