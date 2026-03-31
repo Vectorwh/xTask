@@ -25,6 +25,7 @@ def get_api_type_file(api_type, shell_content):
 
 def generate_aisbench_script(
     task_config: Dict,
+    output_file_path: str,
     output_shell_file: str = "run_aisbench_test.sh",
     python_exec: str = "python3"  # 指定python解释器路径，适配不同环境
 ) -> None:
@@ -36,7 +37,7 @@ def generate_aisbench_script(
         output_shell_file: 生成的shell脚本输出脚本名称
         python_exec: Python解释器路径（如python/python3/anaconda3/bin/python）
     """
-    output_file_path = os.path.join(os.getcwd(), "outputs", f"{task_config.get('case_name').lower()}")
+    #output_file_path = os.path.join(os.getcwd(), "outputs", f"{task_config.get('case_name').lower()}")
     output_file_path_incontainer = path_mapping_in_container(output_file_path)
     output_shell_path = os.path.join(output_file_path, output_shell_file)
     output_shell_path_incontainer = path_mapping_in_container(output_shell_path)

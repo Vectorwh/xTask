@@ -1,9 +1,7 @@
 import os
 import inspect
 import logging
-
 from xtask.tasks.base_task import Task, get_case_name_by_args
-
 
 def init_task_path(args):
     if args.template:
@@ -11,7 +9,7 @@ def init_task_path(args):
     elif args.case_name:
         task_file_path = os.path.join(os.getcwd(), "outputs", args.case_name.lower())
     elif args.case_group:
-        return None
+        task_file_path = os.path.join(os.getcwd(), "outputs", args.case_group.lower())
     elif args.model_name:
         temp_case_name = get_case_name_by_args(args)
         task_file_path = os.path.join(os.getcwd(), "outputs", temp_case_name)
@@ -88,17 +86,17 @@ def gen_task_file_by_template(template_name: str, task_file_path: str, xtask_con
     try:
         config = Task.create_from_template(template_name)
         if config is None:
-            return False, []
+            return False, {}
         
         # 保存到任务目录
         output_file = os.path.join(task_file_path, "case.yaml")
         success = config.save_to_yaml(output_file)
-        
-        return success, [output_file] if success else []
-    
+
+        return success, {output_file:task_file_path} if success else {}
+
     except Exception as e:
         logging.error(f"Error generating task from template: {e}")
-        return False, []
+        return False, {}
 
 
 def gen_task_file_by_casename(case_name: str, task_file_path: str, xtask_config: dict):
@@ -109,35 +107,180 @@ def gen_task_file_by_casename(case_name: str, task_file_path: str, xtask_config:
         case_file = find_case_file(case_name, case_dir)
         success = Task.check_case_yaml(case_file)
         
-        return success, [case_file] if success else []
+        return success, {case_file:task_file_path} if success else {}
     
     except Exception as e:
         logging.error(f"Error generating task from case: {e}")
-        return False, []
+        return False, {}
 
-def gen_task_file_by_casegroup(case_group: str, task_file_path: str, xtask_config: dict):
-    """根据用例名称生成任务文件"""
+
+def dynamic_loops_from_dict(data_dict, key_patterns=None):
+    """
+    从字典中提取值进行动态循环
+
+    参数:
+        data_dict: 包含列表值的字典
+        key_patterns: 要使用的键列表，如果为None则使用所有列表类型的值
+
+    返回:
+        生成器，产生包含各种组合的字典
+    """
+    import itertools
+
+    # 参数验证
+    if not isinstance(data_dict, dict):
+        raise TypeError("data_dict 必须是字典类型")
+
+    # 提取键和值
+    if key_patterns is None:
+        keys = [k for k, v in data_dict.items() if isinstance(v, (list, tuple, set))]
+        ranges = [data_dict[k] for k in keys]
+    else:
+        # 验证指定的键都存在
+        missing_keys = [k for k in key_patterns if k not in data_dict]
+        if missing_keys:
+            raise KeyError(f"字典中缺少以下键: {missing_keys}")
+
+        keys = key_patterns
+        ranges = [data_dict[key] for key in key_patterns]
+
+    # 检查是否有可迭代对象
+    if not ranges:
+        print("警告: 字典中没有列表/元组/集合类型的值")
+        return
+        yield  # 空生成器
+
+    # 动态生成组合
+    for combo in itertools.product(*ranges):
+        yield dict(zip(keys, combo))
+
+import yaml
+import logging
+from typing import Dict, List, Tuple, Optional, Any
+from pathlib import Path
+
+def _update_config_by_path(
+        config: Dict[str, Any],
+        key_path: str,
+        value: Any
+) -> None:
+    """
+    根据键路径更新配置字典
+
+    """
+    if config.get("benchmark").get("perf") is not None and key_path in config.get("benchmark").get("perf"):
+        config["benchmark"]["perf"].update({key_path: value})
+
+        # 修改bs关联配置
+        if key_path == "batch_size":
+            config["benchmark"]["perf"].update({"num_prompts": (value * 8)})
+            config["benchmark"]["perf"].update({"request_rate": value})
+
+    elif config.get("benchmark").get("acc") is not None and key_path in config.get("benchmark").get("acc"):
+        config["benchmark"]["acc"].update({key_path: value})
+
+    elif config.get("serving_extensiable_param") is not None and key_path in config.get("serving_extensiable_param"):
+        config["serving_extensiable_param"].update({key_path: value})
+
+def get_specific_letters(para_name: str):
+    # 使用 split('_') 按下划线分割字符串
+    parts = para_name.split('_')
+
+    # 检查分割后的部分数量是否足够（至少要有两部分）
+    if len(parts) < 2:
+        return para_name  # 如果没有下划线或格式不符，返回原字符串或做其他处理
+
+    spec_letter = ""
+    for part in parts:
+        spec_letter += part[0]
+
+    return spec_letter
+
+def gen_group_normal_task(
+        case_name: str,
+        task_file_path: str,
+        xtask_config: Dict[str, Any],
+        tasks: Dict[str, str]
+) -> bool:
+    """处理普通测试用例"""
     try:
-        case_name_list = list()
-        tasks = list()
-        case_name_list = get_case_list_from_group(case_group)
+        case_file_path = os.path.join(task_file_path, case_name)
+        os.makedirs(case_file_path, exist_ok=True)
 
-        if case_name_list:
-            for case_name in case_name_list:
-                case_file_path = os.path.join(os.getcwd(), "outputs", case_name)
-                os.makedirs(case_file_path, exist_ok=True)
-                ret, task = gen_task_file_by_casename(case_name, case_file_path, xtask_config)
-                if ret:
-                    tasks.extend(task)
-                else:
-                    logging.error(f"parser case name: {case_name} from case group: {case_group} failed.")
-            return True, tasks
-        else:
-            logging.error(f"get case name: {case_name} from case group: {case_group} failed.")
+        ret, task = gen_task_file_by_casename(
+            case_name,
+            case_file_path,
+            xtask_config
+        )
+
+        if not ret:
+            return False
+
+        # 合并任务字典
+        if isinstance(task, dict):
+            tasks.update(task)
+        elif isinstance(task, list):
+            # 假设任务列表中的每个元素是文件路径
+            for task_item in task:
+                tasks[task_item] = str(case_file_path)
+
+        return True
+
     except Exception as e:
-        logging.error(f"Error generating task from case group: {e}")
-        return False, []
+        logging.error(f"处理普通用例组出错: {case_name} - {e}", exc_info=True)
+        return False
 
+def gen_task_file_by_casegroup(
+        case_group: str,
+        task_file_path: str,
+        xtask_config: Dict[str, Any],
+        config_para: Dict,
+        ass_test_type = "none"
+) -> Tuple[bool, Dict[str, str]]:
+    """
+    根据用例组名称生成任务文件
+
+    Args:
+        case_group: 用例组名称
+        task_file_path: 任务文件输出路径
+        xtask_config: XTask配置字典
+        ass_test: 是否进行评估测试
+
+    Returns:
+        Tuple[bool, Dict[str, str]]: (是否成功, 任务文件路径字典)
+    """
+    try:
+        # 获取用例列表
+        case_name_list = get_case_list_from_group(case_group)
+        if not case_name_list:
+            logging.error(f"获取用例组失败: {case_group}")
+            return False, {}
+
+        tasks = {}
+
+        for case_name in case_name_list:
+            if 'para_set' == ass_test_type:
+                # 参数组合测试，to do: 待合入
+                pass
+            elif 'auto_assess' == ass_test_type:
+                # 自动评估测试，to do: 待合入
+                pass
+            else:
+                result = gen_group_normal_task(
+                    case_name,
+                    task_file_path,
+                    xtask_config,
+                    tasks
+                )
+
+            if not result:
+                logging.error(f"处理用例失败: {case_name} (用例组: {case_group})")
+
+        return True, tasks
+
+    except Exception as e:
+        logging.error(f"从用例组生成任务文件时出错: {e}", exc_info=True)
+        return False, {}
 
 def gen_task_file_by_args(args, task_file_path: str, xtask_config: dict):
     """根据命令行参数生成任务文件"""
@@ -148,23 +291,24 @@ def gen_task_file_by_args(args, task_file_path: str, xtask_config: dict):
         output_file = os.path.join(task_file_path, f"{config.case_name}.yaml")
         success = config.save_to_yaml(output_file)
         
-        return success, [output_file] if success else []
+        return success, {output_file:task_file_path} if success else {}
     
     except Exception as e:
         logging.error(f"Error generating task from args: {e}")
-        return False, []
+        return False, {}
 
 
-def gen_task_file(args, task_output_path: str, xtask_config: dict):
+def gen_task_file(args, task_output_path: str, xtask_config: dict, config_para: Dict):
     ret = False
-    tasks = list()
+    tasks = {}
 
     if args.template:
         ret, tasks = gen_task_file_by_template(args.template, task_output_path, xtask_config)
     elif args.case_name:
         ret, tasks = gen_task_file_by_casename(args.case_name, task_output_path, xtask_config)
     elif args.case_group:
-        ret, tasks = gen_task_file_by_casegroup(args.case_group, task_output_path, xtask_config)
+        ret, tasks = gen_task_file_by_casegroup(args.case_group, task_output_path, xtask_config,
+                                                config_para, args.assess_test_type)
     elif args.model_name:
         ret, tasks = gen_task_file_by_args(args, task_output_path, xtask_config)
     else:
@@ -174,16 +318,16 @@ def gen_task_file(args, task_output_path: str, xtask_config: dict):
     return ret, tasks
 
 
-def get_tasks(args, xtask_config):
+def get_tasks(args, xtask_config, config_para: Dict):
     logging.debug("entry function: %s"% inspect.currentframe().f_code.co_name)
-    tasks = list()
+    tasks = {}
 
     # init task file path
     task_output_path = init_task_path(args)
     logging.debug("task_file_path is: %s"% task_output_path)
 
     # gen task file
-    ret, tasks = gen_task_file(args, task_output_path, xtask_config)
+    ret, tasks = gen_task_file(args, task_output_path, xtask_config, config_para)
     if not ret:
         logging.error("gen task file failed.")
 

@@ -235,6 +235,11 @@ Usage Examples:
             help="Inference service host address"
         )
         parser.add_argument(
+            "--host_addr",
+            type=str,
+            help="Host IP address to override host_addr in yaml config (e.g., 192.168.1.100)"
+        )
+        parser.add_argument(
             "--world_size",
             type=int,
             default=1,
@@ -385,7 +390,28 @@ Usage Examples:
             action="store_true",
             help="Dry run mode, only check without execution"
         )
-        
+
+        parser.add_argument(
+            "--assess_test_type", "-assess_tp",
+            type=str,
+            choices=['none', 'para_set', 'auto_assess'],
+            default='none',
+            help="assess test type"
+        )
+
+        parser.add_argument(
+            "--target_ttft",
+            type=float,
+            default=2000,
+            help="Target TTFT (Time to First Token) value for auto assessment"
+        )
+        parser.add_argument(
+            "--target_tpot",
+            type=float,
+            default=100,
+            help="Target TPOT (Time Per Output Token) value for auto assessment"
+        )
+
         return parser.parse_args()
     
     def validate_arguments(self, args: argparse.Namespace) -> ValidationResult:

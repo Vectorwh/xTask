@@ -25,25 +25,40 @@ def main():
         xtask_config = get_xtask_config_data()
         logging.debug("args_result is: %s"% args_result)
         if args_result.is_valid:
-            tasks = get_tasks(args, xtask_config)
-            for task in tasks:
+            config_para = {}
+            tasks = get_tasks(args, xtask_config, config_para)
+            keys_to_process = list(tasks.keys())
+
+            index = 0
+            while index < len(keys_to_process):
+                current_task_key = keys_to_process[index]
+                index += 1
+                logging.info(
+                    f"======== Processing task [{index}/{len(keys_to_process)}]: {current_task_key} ========")
+
                 try:
-                    result = run_scheduler(task)
+                    # 1. 检查任务是否存在
+                    if current_task_key not in tasks:
+                        logging.warning(f"Task key '{current_task_key}' not found in tasks dictionary. Skipping.")
+                        continue
+
+                    # 2. 执行任务
+                    logging.info(f"Running scheduler for task: {current_task_key} ...")
+                    result = run_scheduler(current_task_key, tasks[current_task_key], args)
                     openme_client.AddCaseResult(result)
+
+                    # 调用封装好的自动评估函数, To do: 待合入
+
                 except Exception as e:
-                    result["message"] = f"Error in scheduler: {str(e)}"
-                    logging.error(result["message"], exc_info=True)
-                
-                # verified_result = verify_result(result)
-                # write_result(verified_result)
-            # openme_client.SendJUEMsgCard()
+                    logging.error(f"Failed to run scheduler for task '{current_task_key}': {str(e)}")
+                    traceback.print_exc()
+
         else:
             sys.exit(1)
     except Exception as e:
         logging.error(f"Argument validation failed: {str(e)}")
         traceback.print_exc()
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

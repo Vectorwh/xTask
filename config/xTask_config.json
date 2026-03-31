@@ -29,8 +29,7 @@
         "benchmark_container_name": "",
         "benchmark_script_path": "",
         "volumes": {
-            "/export/home/models/": "/models",
-            "/export/home/kongshuaikang1/xTask": "/workspace",
+            "/export/home/models/": "/export/home/models",
             "/export/home/kongshuaikang1/xllm_test_060": "/xllm_test_060",
             "/usr/local/dcmi": "/usr/local/dcmi",
             "/usr/local/bin/npu-smi": "/usr/local/bin/npu-smi",

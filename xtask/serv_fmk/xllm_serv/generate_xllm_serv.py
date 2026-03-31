@@ -5,6 +5,7 @@ import socket
 import logging
 import time
 from xtask.utils import get_host_ip as get_local_ip
+import re
 
 def load_yaml_config(yaml_file):
     """加载 YAML 配置文件"""
@@ -12,7 +13,96 @@ def load_yaml_config(yaml_file):
         config = yaml.safe_load(f)
     return config
 
-def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
+def generate_xllm_script(config, output_file_path: str, output_file="xllm_serv_single_card.sh"):
+    """生成单卡启动脚本"""
+    # 获取本地 IP
+    local_ip = get_local_ip()
+    if config.get('host_addr') and config['host_addr'] != '0.0.0.0':
+        local_ip = config['host_addr']
+
+    # 参数映射
+    params = {
+        'LOCAL_IP': local_ip,
+        'HCCL_IF_PORT': config.get('hccl_if_port', 43439),
+        'PROGRESS_CONN_PORT': config.get('progress_conn_port', 9590),
+        'MODEL_PATH': config.get('model_path', '/models/Qwen3-4B'),
+        'START_PORT': config.get('port', 14830),
+        'START_DEVICE': config.get('start_device_id', 0),
+        'NNODES': config.get('num_devices', 1),
+        'WORLD_SIZE': config.get('world_size', 1),
+        'LOG_DIR': 'log',
+        #'BLOCK_SIZE': config.get('block_size', 128),
+        #'ENABLE_PREFIX_CACHE': config.get('enable_prefix_cache', False),
+        #'ENABLE_CHUNKED_PREFILL': config.get('enable_chunked_prefill', False),
+        'COMMUNICATION_BACKEND': config.get('communication_backend', 'hccl'),
+        #'ENABLE_SCHEDULE_OVERLAP': config.get('enable_schedule_overlap', False),
+        #'ENABLE_MLA': config.get('enable_mla', False),
+        #'ENABLE_GRAPH': config.get('enable_graph', False),
+        #'ENABLE_SHM': config.get('enable_shm', False),
+        #'MAX_MEMORY_UTILIZATION': config.get('max_memory_utiliization', 0.9),
+        #'MAX_TOKENS_PER_BATCH': config.get('max_tokens_per_batch', 20000),
+        #'MAX_SEQS_PER_BATCH': config.get('max_seqs_per_batch', 256),
+        'DP_SIZE': config.get("dp_size", ""),  # 默认值
+        'EP_SIZE': config.get("tp_size", ""),  # 默认值
+        #"SERVING_EXTENSIABLE_PARAM": config.get("serving_extensiable_param", ""),
+        "USERID": config.get("userid", 0),
+        #"NUM_SPECULATIVE_TOKENS": config.get("num_speculative_tokens", 0)
+    }
+
+    # 读取模板
+    if params.get("WORLD_SIZE") == 1:
+        template_path = "xllm_single_card_template.sh"
+    elif 1 < params.get("WORLD_SIZE") < 17:
+        template_path = "xllm_mutil_cards_template.sh"
+    else:
+        template_path = ""
+        logging.error("WORLD_SIZE is: %s is not supported yet." % params.get("WORLD_SIZE"))
+    if template_path:
+        template_path = os.path.join("xtask/serv_fmk/xllm_serv/", template_path)
+        logging.info("template_path is: %s" % template_path)
+        with open(template_path, 'r', encoding='utf-8') as f:
+            template = f.read()
+
+    # 替换模板中的参数
+    script_content = template
+    if script_content:
+        for key, value in params.items():
+            if key == "MODEL_PATH":
+                from xtask.utils.container_manager import path_mapping_in_container
+                value = path_mapping_in_container(value)
+            if key == "NUM_SPECULATIVE_TOKENS":
+                if not value:
+                    continue
+            script_content = script_content.replace(f'{{{key}}}', str(value))
+
+        # 在模板中插入扩展变量
+        extense_str = ""
+        extense_para = config.get("serving_extensiable_param", {})
+        match_str = re.search('\n( *)\$SERVING_EXTENSIABLE_PARAM\n', script_content)
+        space_str = match_str.group(1) if match_str else ""
+        for key, value in extense_para.items():
+            extense_str += f"{space_str}--{key}={value} \\\n"
+        script_content = script_content.replace(f"{space_str}$SERVING_EXTENSIABLE_PARAM\n", extense_str)
+
+        # output_file_path = path_mapping_in_container(output_file_path)
+        # inner_output_path = os.path.join(inner_output_path, f"{config.get('case_name').lower()}")
+        # output_file_path = os.path.join("./outputs", f"{config.get('case_name').lower()}")
+        # 写入输出文件
+        with open(os.path.join(output_file_path, output_file), 'w', encoding='utf-8') as f:
+            f.write(script_content)
+
+        # 添加执行权限
+        os.chmod(os.path.join(output_file_path, output_file), 0o755)
+
+        logging.debug("generate single card script successfully.")
+    else:
+        output_file = ""
+        output_file_path = ""
+
+    return output_file, path_mapping_in_container(output_file_path)
+
+'''
+def generate_xllm_script(config, output_file_path: str, output_file="xllm_serv_single_card.sh"):
     """生成单卡启动脚本"""
     
     # 获取本地 IP
@@ -72,8 +162,10 @@ def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
                 if not value:
                     continue
             script_content = script_content.replace(f'{{{key}}}', str(value))
-        
-        output_file_path = os.path.join("./outputs", f"{config.get('case_name').lower()}")
+
+        #output_file_path = path_mapping_in_container(output_file_path)
+        #inner_output_path = os.path.join(inner_output_path, f"{config.get('case_name').lower()}")
+        #output_file_path = os.path.join("./outputs", f"{config.get('case_name').lower()}")
         # 写入输出文件
         with open(os.path.join(output_file_path, output_file), 'w', encoding='utf-8') as f:
             f.write(script_content)
@@ -86,16 +178,16 @@ def generate_xllm_script(config, output_file="xllm_serv_single_card.sh"):
         output_file = ""
         output_file_path = ""
     
-    return output_file, output_file_path
+    return output_file, path_mapping_in_container(output_file_path)
+'''
 
-def generate_xllm_serv_commands(task_config, framework_config):
+def generate_xllm_serv_commands(task_config, framework_config, output_file_path: str):
     cmd_file = "start_xllm_serv.sh"
     # 单卡
     if 0 < int(task_config.get("world_size")) < 17:
-        start_serv_script, script_path = generate_xllm_script(task_config, cmd_file)
+        start_serv_script, script_path = generate_xllm_script(task_config, output_file_path, cmd_file)
         if start_serv_script:
-            startup_cmd = f"cp /xllm_test_060/vendors/xllm/op_api/lib/libcust_opapi.so /usr/lib64/;" \
-                f"rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"
+            startup_cmd = f"rm -rf {script_path}/log;cd {script_path}; bash {start_serv_script};"
         else:
             logging.error("generate xllm serv script failed.")
     # 多机
@@ -111,14 +203,14 @@ def generate_xllm_serv_commands(task_config, framework_config):
     return startup_cmd
 
 
-def wait_xllm_serv_start(task_config, serving_wait_time):
+def wait_xllm_serv_start(task_config, serving_wait_time, output_file_path: str):
     from xtask.utils.watchdog import WatchdogConfig, WatchdogManager
     state = False
     
-    output_path = os.path.join(os.getcwd(), "outputs", task_config.get("case_name").lower())
+    #output_path = os.path.join(os.getcwd(), "outputs", task_config.get("case_name").lower())
     current_pid = os.getpid()
     test_config = WatchdogConfig(
-        log_file=os.path.join(output_path, f"log/node_{task_config.get('start_device_id')}.log"),  # 推理服务日志路径
+        log_file=os.path.join(output_file_path, f"log/node_{task_config.get('start_device_id')}.log"),  # 推理服务日志路径
         success_keywords=["is serving on port", "服务启动完成"],  # 启动成功关键词
         npu_card_id=task_config.get("start_device_id"),  # 监控0号NPU卡
         target_pid=current_pid,  # 推理服务PID（可从容器启动时获取）

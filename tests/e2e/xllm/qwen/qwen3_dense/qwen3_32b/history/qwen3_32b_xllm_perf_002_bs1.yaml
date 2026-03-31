@@ -3,11 +3,11 @@ benchmark:
   benchmark_type: aisbench
   perf:
     acc_dataset_len: 0
-    api_type: vllm_api_stream_chat
-    baseline: 23.0
-    batch_size: 32
+    api_type: vllm_api_general_stream
+    baseline: 48.49
+    batch_size: 1
     case_type: performance
-    dataset_conf: gsm8k_gen_0_shot_cot_chat_prompt
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
     dataset_path: null
     dump_eval_details: false
     dump_extract_rate: false
@@ -16,9 +16,9 @@ benchmark:
     ignore_eos: false
     input_len: 5120
     max_num_worker: 1
-    max_out_len: ''
+    max_out_len: 1024
     merge_ds: false
-    num_prompts: ''
+    num_prompts: 8
     output_len: 1024
     pressure: false
     repetition_penalty: 1
@@ -28,27 +28,32 @@ benchmark:
     threshold: 0.05
     top_k: -1
     top_p: 1
+    num_warmups: 20
 block_size: 128
-case_name: qwen3_30b_xllm_004
+case_name: qwen3_32b_xllm_perf_002_bs1
 communication_backend: hccl
 dataset_format: json
 dataset_name: gsm8k
 dataset_path: ''
-enable_chunked_prefill: true
-enable_mla: true
-enable_mtp: false
-enable_graph: true
-enable_prefix_cache: true
-enable_schedule_overlap: true
-host_addr: 0.0.0.0
-max_memory_utiliization: 0.9
+engine_type: xllm
+host_addr: 11.87.191.101
+max_memory_utiliization: 0.86
 max_seqs_per_batch: 256
-max_tokens_per_batch: 6144
+max_tokens_per_batch: 20000
 metrics: perf
-model_path: /export/home/models/Qwen3-30B-A3B
+model_path: /export/home/models/Qwen3-32B
 num_devices: 4
-num_speculative_tokens: 1
-port: 28000
-served_model_name: Qwen3-30B-A3B
+start_device_id: 0
+port: 8800
+served_model_name: Qwen3-32B
 userid: 1048
 world_size: 4
+serving_wait_time: 90
+serving_extensiable_param:
+  enable_graph: true
+  enable_chunked_prefill: true
+  enable_mla: true
+  enable_shm: true
+  enable_prefix_cache: true
+  enable_schedule_overlap: true
+  num_speculative_tokens: 1
