@@ -3,9 +3,9 @@
         "xllm_version": "0.7.2",
         "image_home": "quay.io/jd_xllm/xllm-ai",
         "default_image_name": "xllm-dev-hc-rc2-arm",
-        "enable_proxy": false,
-        "https_proxy_url": "",
-        "http_proxy_url": "",
+        "enable_proxy": true,
+        "https_proxy_url": "http://bamboo-proxy.jd.com:80",
+        "http_proxy_url": "http://bamboo-proxy.jd.com:80",
         "sering_container_name": "",
         "serving_script_path": "",
         "serving_wait_time": 30

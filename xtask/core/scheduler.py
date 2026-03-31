@@ -77,8 +77,8 @@ class Json_Reader:
                 "XLLM_VERSION": cfg_data.get("xllm_version", "docker"),
                 "IMAGE_HOME": cfg_data.get("image_home", "xllm/xllm-ai"),
                 "ENABLE_PROXY": cfg_data.get("enable_proxy", "False"),
-                "HTTPS_PROXY": cfg_data.get("https_proxy_url", ""),
-                "HTTP_PROXY": cfg_data.get("http_proxy_url", ""),
+                "https_proxy": cfg_data.get("https_proxy_url", ""),
+                "http_proxy": cfg_data.get("http_proxy_url", ""),
                 "WORKING_DIR": "/workspace"
             },
             "serving_container_name": cfg_data.get("serving_container_name", ""),
@@ -98,8 +98,8 @@ class Json_Reader:
         # 如果有代理配置，添加到环境变量
         if cfg_data.get("enable_proxy", "False") == "True":
             container_config["environment"].update({
-                "HTTPS_PROXY": cfg_data.get("https_proxy_url", ""),
-                "HTTP_PROXY": cfg_data.get("http_proxy_url", ""),
+                "https_proxy": cfg_data.get("https_proxy_url", ""),
+                "http_proxy": cfg_data.get("http_proxy_url", ""),
             })
         
         logging.info(f"Generated container config for framework: {engine}")
@@ -247,7 +247,8 @@ class ContainerConfigBuilder:
 def generate_commands(
     engine_config: Dict[str, Any], 
     task_config: Dict[str, Any],
-    task_yaml_path: str
+    task_yaml_path: str,
+    output_file_path: str
 ) -> Tuple[str, str]:
     """
     生成启动命令和基准测试命令
@@ -269,7 +270,7 @@ def generate_commands(
     if engine_config.get("engine_type") == "xllm":
         from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_serv_commands
 
-        startup_cmd = generate_xllm_serv_commands(task_config, engine_config)
+        startup_cmd = generate_xllm_serv_commands(task_config, engine_config, output_file_path)
 
     elif engine_config.get("engine_type") == "vllm-ascend":
         from xtask.serv_fmk.vllm_ascend_serv.generate_vllm_ascend_serv \
@@ -291,6 +292,7 @@ def generate_commands(
         from xtask.benchmarks.aisbench.generate_aisbench_script import generate_aisbench_script
         benchmark_cmd = generate_aisbench_script(
             task_config=task_config,
+            output_file_path = output_file_path,
             output_shell_file="run_aisbench_test.sh",
             python_exec="python"
         )
@@ -303,12 +305,14 @@ def generate_commands(
     return startup_cmd, benchmark_cmd
 
 
-def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
+def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Dict[str, Any]:
     """
     调度器主函数
     
     Args:
         task_yaml_path: 任务YAML文件路径
+        output_file_path: 输出文件路径
+        args: 命令行参数对象，用于覆盖yaml中的配置
         
     Returns:
         执行结果字典
@@ -333,12 +337,21 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         # 1. 读取任务YAML文件
         logging.info(f"Loading task config from: {task_yaml_path}")
         task_config = TaskConfig.load_task_config(task_yaml_path)
-        output_file_path = os.path.join(os.getcwd(), "outputs", task_config.get('case_name'))
+        #output_file_path = os.path.join(os.getcwd(), "outputs", task_config.get('case_name'))
+        #output_file_path = task_out_path
         
         if not task_config:
             result["message"] = f"Failed to load task config from {task_yaml_path}"
             logging.error(result["message"])
             return result
+        
+        # 1.1 如果提供了args，根据args中的参数覆盖yaml配置
+        if args:
+            host_addr_override = getattr(args, 'host_addr', None)
+            if host_addr_override:
+                original_addr = task_config.get("host_addr")
+                task_config["host_addr"] = host_addr_override
+                logging.info(f"Overriding host_addr from '{original_addr}' to '{host_addr_override}'")
         
         result["task_config"] = task_config
         
@@ -358,7 +371,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
             return result
         
         # 4. 生成命令
-        startup_cmd, benchmark_cmd = generate_commands(engine_config, task_config, task_yaml_path)
+        startup_cmd, benchmark_cmd = generate_commands(engine_config, task_config, task_yaml_path, output_file_path)
         result["startup_command"] = startup_cmd
         result["benchmark_command"] = benchmark_cmd
         
@@ -507,7 +520,7 @@ def run_scheduler(task_yaml_path: str) -> Dict[str, Any]:
         logging.info("Waiting for service to start...")
         serving_wait_time = task_config.get("serving_wait_time") if task_config.get("serving_wait_time") else config_data.get("XLLM_CONFIG").get("serving_wait_time")
         time.sleep(serving_wait_time) # 等待服务真正启动
-        ret = wait_serv_start(engine, task_config, serving_wait_time)
+        ret = wait_serv_start(engine, task_config, serving_wait_time, output_file_path)
         if ret:
             logging.error(f"{engine} serv startup failed.")
         

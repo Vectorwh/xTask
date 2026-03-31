@@ -322,7 +322,13 @@ class ContainerManager:
         # Add environment variables
         # for key, value in config.environment.items():
         #     cmd_parts.extend(["-e", f"{key}={value}"])
-        
+
+        # Add environment variables
+        # Add environment proxy
+        for key, value in config.environment.items():
+            if key == "http_proxy" or key == "https_proxy":
+                cmd_parts.extend(["-e", f"{key}={value}"])
+
         # Add port mappings
         # for host_port, container_port in config.ports.items():
         #     cmd_parts.extend(["-p", f"{host_port}:{container_port}"])
