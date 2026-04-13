@@ -46,7 +46,8 @@ userid: 1048
 world_size: 16
 serving_wait_time: 290
 serving_extensiable_param:
-  max_seqs_per_batch: 3000
+  max_memory_utilization: 0.85
+  max_seqs_per_batch: 64
   enable_chunked_prefill: true
   enable_schedule_overlap: true
   enable_prefix_cache: false
@@ -57,5 +58,5 @@ serving_extensiable_param:
   draft_model: /export/home/models/DeepSeek-V3.2-w8a8-mtp
   draft_devices: "npu:$DEVICE"
   num_speculative_tokens: 3
-  enable_graph: true
-  enable_graph_mode_decode_no_padding: true
+  enable_graph: false
+  enable_graph_mode_decode_no_padding: false

@@ -492,8 +492,20 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
             )
             if not install_result.success:
                 logging.error("transformer upgrade to %s failed,stdout:%s,stderr:%s." \
-                             % (transformers_version, install_result.stdout, install_result.stderr))
-                return result
+                              % (transformers_version, install_result.stdout, install_result.stderr))
+
+                # GLM5等模型保底安装4.51.0
+                install_transformers_cmd = "pip install transformers==4.51.0 --upgrade"
+                install_result = container_manager.exec_in_container(
+                    container_config.container_name,
+                    install_transformers_cmd,
+                    timeout=engine_config.get("startup_timeout", 300)
+                )
+
+                if not install_result.success:
+                    logging.error("transformer upgrade to 4.51.0 failed,stdout:%s,stderr:%s." \
+                                 % (install_result.stdout, install_result.stderr))
+                    return result
         else:
             logging.error("model config file: %s is not exist"% model_config_path)
             return result
