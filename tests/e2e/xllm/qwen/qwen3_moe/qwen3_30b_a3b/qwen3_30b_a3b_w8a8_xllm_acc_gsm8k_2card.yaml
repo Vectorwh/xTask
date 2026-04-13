@@ -37,11 +37,11 @@ dataset_path: ''
 engine_type: xllm
 host_addr: 11.87.191.101
 metrics: acc
-model_path: /export/home/models/Qwen3-30B-A3B
+model_path: /export/home/models/Qwen3-30B-A3B-Instruct-2507
 num_devices: 4
 start_device_id: 0
 port: 8800
-served_model_name: Qwen3-30B-A3B
+served_model_name: Qwen3-30B-A3B-Instruct-2507
 userid: 1048
 world_size: 4
 serving_wait_time: 90
