@@ -16,7 +16,7 @@ def main():
     try:
         init_logger()
         checker = ArgumentChecker()
-        openme_client = OpenMeClient("main", "A3-ARM", "11.87.191.101")
+        openme_client = OpenMeClient("v0.9.0", "A3-ARM", "11.87.191.101")
 
         # Parse command line arguments
         args = checker.parse_arguments()
@@ -52,7 +52,8 @@ def main():
                 except Exception as e:
                     logging.error(f"Failed to run scheduler for task '{current_task_key}': {str(e)}")
                     traceback.print_exc()
-
+            # 发送京me通报
+            # openme_client.SendJUEMsgCard()
         else:
             sys.exit(1)
     except Exception as e:
