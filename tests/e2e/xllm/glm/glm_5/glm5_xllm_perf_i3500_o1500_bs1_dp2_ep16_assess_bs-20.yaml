@@ -1,0 +1,64 @@
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    acc_dataset_len: 0
+    api_type: vllm_api_general_stream
+    baseline: 21.8253
+    batch_size: 20
+    bs_assess:
+      high_thrld: 26
+      low_thrld: 10
+    case_type: performance
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    dataset_path: null
+    dump_eval_details: false
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    input_len: 3500
+    max_num_worker: 1
+    max_out_len: 1500
+    merge_ds: false
+    num_prompts: 80
+    num_warmups: 20
+    output_len: 1500
+    pressure: false
+    request_rate: 12
+    threshold: 0.1
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: True
+block_size: 128
+case_name: glm5_xllm_perf_i3500_o1500_bs1_dp2_ep16_assess_bs-20
+communication_backend: hccl
+dataset_format: json
+dataset_name: gsm8k
+dataset_path: ''
+engine_type: xllm
+host_addr: 11.87.191.75
+metrics: perf
+model_path: /export/home/models/GLM-5-final-w8a8
+num_devices: 16
+port: 8800
+served_model_name: GLM-5-final-w8a8
+serving_extensiable_param:
+  block_size: 128
+  dp_size: 2
+  draft_devices: npu:$DEVICE
+  draft_model: /export/home/models/GLM-5-final-w8a8-MTP
+  enable_chunked_prefill: true
+  enable_graph: false
+  enable_graph_mode_decode_no_padding: false
+  enable_prefix_cache: false
+  enable_schedule_overlap: true
+  enable_shm: true
+  ep_size: 16
+  max_memory_utilization: 0.91
+  max_seqs_per_batch: 28
+  max_tokens_per_batch: 4096
+  num_speculative_tokens: 3
+serving_wait_time: 220
+start_device_id: 0
+userid: 1048
+world_size: 16

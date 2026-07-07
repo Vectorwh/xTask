@@ -1,0 +1,58 @@
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    acc_dataset_len: 0
+    api_type: vllm_api_general_stream
+    baseline: 31.2796
+    batch_size: 199
+    case_type: performance
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    dataset_path: null
+    dump_eval_details: false
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    input_len: 2048
+    max_num_worker: 1
+    max_out_len: 2048
+    merge_ds: false
+    num_prompts: 796
+    num_warmups: 20
+    output_len: 2048
+    pressure: false
+    request_rate: 12
+    threshold: 0.1
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: True
+block_size: 128
+case_name: qwen3_30b_a3b_bf16_xllm_perf_i2048_o2048_bs1_2card_ass50_bs-199
+communication_backend: hccl
+dataset_format: json
+dataset_name: gsm8k
+dataset_path: ''
+engine_type: xllm
+host_addr: 11.87.191.101
+metrics: perf
+model_path: /export/home/models/Qwen3-30B-A3B-Instruct-2507
+num_devices: 4
+port: 8800
+served_model_name: Qwen3-30B-A3B-Instruct-2507
+serving_extensiable_param:
+  block_size: 128
+  draft_devices: npu:$DEVICE
+  draft_model: /export/home/models/Qwen3-30B-A3B-Instruct-2507-Eagle3
+  enable_chunked_prefill: false
+  enable_graph: true
+  enable_graph_mode_decode_no_padding: true
+  enable_intralayer_addnorm: true
+  enable_prefix_cache: false
+  enable_shm: true
+  max_seqs_per_batch: 208
+  num_speculative_tokens: 3
+  speculative_algorithm: Eagle3
+serving_wait_time: 90
+start_device_id: 0
+userid: 1048
+world_size: 4

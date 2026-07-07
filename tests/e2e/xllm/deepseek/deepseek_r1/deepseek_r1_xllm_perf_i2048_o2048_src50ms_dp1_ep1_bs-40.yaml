@@ -1,0 +1,64 @@
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    acc_dataset_len: 0
+    api_type: vllm_api_general_stream
+    baseline: 21.7926
+    batch_size: 40
+    bs_assess:
+      high_thrld: 72
+      low_thrld: 6
+    case_type: performance
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    dataset_path: null
+    dump_eval_details: false
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    input_len: 2048
+    max_num_worker: 1
+    max_out_len: 2048
+    merge_ds: false
+    num_prompts: 160
+    num_warmups: 20
+    output_len: 2048
+    pressure: false
+    request_rate: 12
+    threshold: 0.1
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: True
+block_size: 128
+case_name: deepseek_r1_xllm_perf_i2048_o2048_src50ms_dp1_ep1_bs-40
+communication_backend: hccl
+dataset_format: json
+dataset_name: gsm8k
+dataset_path: ''
+engine_type: xllm
+host_addr: 11.87.191.82
+metrics: perf
+model_path: /export/home/models/DeepSeek-R1-w8a8
+num_devices: 16
+port: 8800
+served_model_name: DeepSeek-R1-w8a8
+serving_extensiable_param:
+  block_size: 128
+  dp_size: 1
+  draft_devices: npu:$DEVICE
+  draft_model: /export/home/models/DeepSeek-R1-mtp
+  enable_chunked_prefill: false
+  enable_graph: false
+  enable_graph_mode_decode_no_padding: true
+  enable_prefix_cache: false
+  enable_schedule_overlap: true
+  enable_shm: true
+  ep_size: 1
+  max_memory_utilization: 0.88
+  max_seqs_per_batch: 48
+  max_tokens_per_batch: 5120
+  num_speculative_tokens: 2
+serving_wait_time: 290
+start_device_id: 0
+userid: 1048
+world_size: 16

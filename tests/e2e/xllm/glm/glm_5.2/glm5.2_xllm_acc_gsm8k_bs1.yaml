@@ -1,0 +1,60 @@
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    acc_dataset_len: 200
+    api_type: vllm_api_general_chat
+    baseline: 97.50
+    batch_size: 8
+    case_type: accuracy
+    dataset_conf: gsm8k_gen_0_shot_noncot_chat_prompt
+    dataset_path: null
+    dump_eval_details: true
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    input_len: ''
+    max_num_worker: 1
+    max_out_len: ''
+    merge_ds: false
+    num_prompts: ''
+    output_len: 32768
+    pressure: false
+    request_rate: 8
+    threshold: 0.05
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: False
+block_size: 128
+case_name: glm5.2_xllm_acc_gsm8k_bs1
+communication_backend: hccl
+dataset_format: json
+dataset_name: gsm8k
+dataset_path: ''
+engine_type: xllm
+host_addr: 11.87.191.83
+metrics: acc
+model_path: /export/home/models/GLM-5.2-W8A8-EcoTech
+num_devices: 16
+start_device_id: 0
+port: 8800
+served_model_name: GLM-5.2-W8A8-EcoTech
+userid: 1048
+world_size: 16
+serving_wait_time: 220
+serving_extensiable_param:
+  max_memory_utilization: 0.85
+  max_tokens_per_batch: 2048
+  max_seqs_per_batch: 16
+  enable_chunked_prefill: true
+  enable_schedule_overlap: false
+  enable_prefix_cache: false
+  enable_shm: false
+  block_size: 128
+  dp_size: 4
+  ep_size: 16
+  draft_model: /export/home/models/GLM-5.2-w8a8-mtponly
+  draft_devices: "npu:$DEVICE"
+  num_speculative_tokens: 3
+  enable_graph: true
+  enable_graph_mode_decode_no_padding: true

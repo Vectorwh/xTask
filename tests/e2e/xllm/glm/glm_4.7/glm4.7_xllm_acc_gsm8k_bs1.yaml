@@ -13,7 +13,6 @@ benchmark:
     dump_extract_rate: false
     enable_debug: false
     enable_thinking: false
-    ignore_eos: false
     input_len: ''
     max_num_worker: 1
     max_out_len: ''
@@ -21,13 +20,11 @@ benchmark:
     num_prompts: ''
     output_len: 32768
     pressure: false
-    repetition_penalty: 1
     request_rate: 8
-    seed: 1024
-    temperature: 0
-    threshold: 0.05
-    top_k: -1
-    top_p: 1
+    threshold: 0.04
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: False
 block_size: 128
 case_name: glm4.7_xllm_acc_gsm8k_bs1
 communication_backend: hccl
@@ -46,7 +43,7 @@ userid: 1048
 world_size: 16
 serving_wait_time: 290
 serving_extensiable_param:
-  max_seqs_per_batch: 3000
+  max_seqs_per_batch: 16
   enable_chunked_prefill: true
   enable_schedule_overlap: true
   enable_prefix_cache: false

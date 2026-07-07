@@ -56,8 +56,10 @@ class AisbenchResult:
             output_token_throughput=output_throughput.average,
             ttft_avg=ttft.average,
             ttft_p90=ttft.p90,
+            ttft_p99=ttft.p99,
             tpot_avg=tpot.average,
             tpot_p90=tpot.p90,
+            tpot_p99=tpot.p99,
             e2el_avg=e2el.average,
             e2el_p90=e2el.p90
         )
@@ -339,7 +341,7 @@ def aisbench_post_process(task_config, output_path, init_entries):
                                         task_config.get("benchmark").get("perf").get("api_type").replace("_", "-"))
     else:
         logging.error("get aisbench output path failed.")
-        return
+        return None, ""
     
     # 解析结果
     if aisbench_csv and os.path.exists(aisbench_csv):
@@ -389,8 +391,25 @@ def aisbench_post_process(task_config, output_path, init_entries):
         logging.error(f"aisbench csv: {aisbench_csv} is not exist. aisbench perf run failed.")
         result = None
     
-    return result
-    
+    return result, (os.path.join(output_path, aisbench_output_dir))    
+
+def convert_aisbench_csv_to_json(csv_rows, save_dir, case_name):
+    """
+    将aisbench的csv结果(已读取的行数据)转换为json并保存到指定目录下。
+
+    Args:
+        csv_rows (list): 已从csv读取的行数据(每行为dict)。
+        save_dir (str): json文件保存目录。
+        case_name (str): 用例名称，作为json文件名。
+    """
+    try:
+        json_path = os.path.join(save_dir, (case_name + ".json"))
+        with open(json_path, mode='w', encoding='utf-8') as f:
+            json.dump(csv_rows, f, ensure_ascii=False, indent=4)
+        logging.info(f"aisbench acc csv已转换为json并保存: {json_path}")
+    except Exception as e:
+        logging.error(f"aisbench acc csv转换为json失败: {e}")
+
 
 def aisbench_acc_post_process(task_config, output_path, init_entries):
     aisbench_output_dir = find_aisbench_directory(output_path, init_entries, aisbench_type="acc")
@@ -403,16 +422,29 @@ def aisbench_acc_post_process(task_config, output_path, init_entries):
         return
     
     if os.path.exists(aisbench_csv):
-        result_value = read_csv_value(aisbench_csv, api_type)
+        # 只打开一次csv文件，读取所有行数据，供转换json和取值复用
+        try:
+            with open(aisbench_csv, mode='r', encoding='utf-8') as f:
+                csv_rows = [dict(row) for row in csv.DictReader(f)]
+        except Exception as e:
+            logging.error(f"读取aisbench csv失败: {e}")
+            return
+
+        # 将aisbench的csv结果转换为json并保存到结果目录下
+        # save_dir = os.path.join(output_path, aisbench_output_dir)
+        convert_aisbench_csv_to_json(csv_rows, output_path, task_config.get("case_name").lower())
+
+        # 从已读取的行数据中提取目标列的值
+        result_value = get_column_values(csv_rows, api_type)
         if result_value and len(result_value) == 1:
-            return result_value[0]
+            return result_value[0], (os.path.join(output_path, aisbench_output_dir))
         else:
             logging.error("")
-            return 
+            return
     else:
         logging.error(f"aisbench csv: {aisbench_csv} is not exist.")
         result = None
-    return result
+    return result, (os.path.join(output_path, aisbench_output_dir))
 
 
 def find_aisbench_directory(directory_path=".", init_entries=list(), aisbench_type="perf"):
@@ -495,6 +527,28 @@ def get_aisbench_csv(aisbench_output_path, api_type, output_type="performances")
         return
 
 
+def get_column_values(csv_rows, target_column):
+    """
+    从已读取的csv行数据中提取指定列的值。
+
+    Args:
+        csv_rows (list): 已从csv读取的行数据(每行为dict)。
+        target_column (str): 要读取的列名。
+
+    Returns:
+        list: 包含目标列所有值的列表；若某行缺少该列则返回空列表。
+    """
+    values = []
+    for row in csv_rows:
+        # 通过列名（键）获取对应单元格的值
+        if target_column in row:
+            values.append(row[target_column])
+        else:
+            logging.error(f"警告：文件中未找到列名 '{target_column}'")
+            return []
+    return values
+
+
 def read_csv_value(file_path, target_column):
     """
     读取 CSV 文件并返回特定列的值。
@@ -506,14 +560,6 @@ def read_csv_value(file_path, target_column):
     Returns:
         list: 包含目标列所有值的列表。
     """
-    values = []
     with open(file_path, mode='r', encoding='utf-8') as file:
-        reader = csv.DictReader(file) # 每一行是一个 OrderedDict
-        for row in reader:
-            # 通过列名（键）获取对应单元格的值
-            if target_column in row:
-                values.append(row[target_column])
-            else:
-                logging.error(f"警告：文件中未找到列名 '{target_column}'")
-                return []
-    return values
+        csv_rows = [dict(row) for row in csv.DictReader(file)]
+    return get_column_values(csv_rows, target_column)

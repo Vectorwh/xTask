@@ -22,6 +22,53 @@ def get_api_type_file(api_type, shell_content):
 
     return "$CONFIG_FILE", shell_content
 
+def get_syn_config_file(shell_content):
+    shell_content.append("\n# 2. 定位syn_config配置文件")
+    shell_content.append(f'SYN_FILE="$AIS_BENCH_PATH/datasets/synthetic/synthetic_config.py"')
+    shell_content.append('if [ ! -f "$SYN_FILE" ]; then')
+    shell_content.append('    echo "错误：配置文件不存在 $SYN_FILE"')
+    shell_content.append('    exit 1')
+    shell_content.append('fi')
+    shell_content.append('echo "目标配置文件：$SYN_FILE"')
+
+    return "$SYN_FILE", shell_content
+
+def build_kwargs_block(generation_kwargs):
+    """根据 generation_kwargs 字典构建替换内容"""
+    kwargs_lines = []
+    for key, value in generation_kwargs.items():
+        if value is None:
+            kwargs_lines.append(f'            {key}=None,')
+        elif isinstance(value, str):
+            if value == 'None':
+                kwargs_lines.append(f'            {key}=None,')
+            elif value in ('True', 'False'):
+                kwargs_lines.append(f'            {key}={value},')
+            elif "dict" in value:
+                kwargs_lines.append(f'            {key}={value},')
+            else:
+                kwargs_lines.append(f'            {key}="{value}",')
+        elif isinstance(value, bool):
+            kwargs_lines.append(f'            {key}={value},')
+        else:
+            kwargs_lines.append(f'            {key}={value},')
+    return kwargs_lines
+
+def update_generation_kwargs(generation_kwargs, api_type_file):
+    update_cmd = list()
+    kwargs_lines = build_kwargs_block(generation_kwargs)
+    new_lines = ['        generation_kwargs=dict(']
+    new_lines.extend(kwargs_lines)
+    new_lines.append('        ),')
+    new_block = '\\n'.join(new_lines)
+
+    update_cmd.append(f'START=$(grep -n "generation_kwargs=dict(" "{api_type_file}" | head -1 | cut -d: -f1)')
+    update_cmd.append(f'END=$(awk "NR>$START && /^[[:space:]]*\\),?[[:space:]]*$/ {{print NR; exit}}" "{api_type_file}")')
+    update_cmd.append(f'echo "替换范围: $START - $END"')
+    update_cmd.append(f'sed -i "${{START}},${{END}}c\\{new_block}" "{api_type_file}"')
+    update_cmd.append(f'echo "替换完成"')
+
+    return update_cmd
 
 def generate_aisbench_script(
     task_config: Dict,
@@ -118,24 +165,39 @@ def generate_aisbench_script(
         accuracy_max_out_len = accuracy_cfg.get("output_len", output_len)
         acc_concurrency = accuracy_cfg.get("concurrency", 0)
         dump_eval_details = task_config.get("dump_eval_details", "")
+        num_prompts = accuracy_cfg.get("num_prompts", "")
 
         # 替换最大生成token数
         shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={accuracy_max_out_len},/g" {api_type_file}')
         # 替换batchsize
         shell_content.append(f'sed -i "s/batch_size\s*=\s*.*,/batch_size={accuracy_batch_size},/g" {api_type_file}')
-        shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={acc_concurrency},/g" {api_type_file}')
+        # shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={acc_concurrency},/g" {api_type_file}')
+
+        # 更新aisbench模型配置中generation_kwargs后端参数
+        generation_kwargs = accuracy_cfg.get('generation_kwargs', {})
+        if generation_kwargs:  # 如果有需要更新的参数
+            update_cmd = update_generation_kwargs(generation_kwargs, api_type_file)
+            shell_content.extend(update_cmd)
+
         if dump_eval_details:
             dump_eval_details_str = "--dump-eval-details "
         else:
             dump_eval_details_str = ""
+
+        if num_prompts and isinstance(num_prompts, int): 
+            num_prompts_str = f"--num-prompts {num_prompts} "
+        else:
+            num_prompts_str = ""
 
         # 构造ais-bench精度测试命令（参考ais-bench官方文档）
         accuracy_cmd = (
             f'ais_bench --models {api_type} '
             f'--datasets {dataset_conf} '
             f'{dump_eval_details_str} '
+            f'{num_prompts_str} '
             f'--work-dir {output_file_path_incontainer}'
         )
+
         shell_content.append(f'echo "执行精度测试命令：{accuracy_cmd}"')
         shell_content.append(accuracy_cmd)
         shell_content.append(f'echo "精度测试完成，结果保存至 {output_file_path_incontainer}"')
@@ -157,6 +219,7 @@ def generate_aisbench_script(
         seed = perf_cfg.get("seed", 1024)
         num_warmups = perf_cfg.get("num_warmups", 0)
         repetition_penalty = perf_cfg.get("repetition_penalty", 1)
+        ignore_eos = perf_cfg.get("ignore_eos", "True")
 
         api_type = perf_cfg.get("api_type", "vllm_api_general_stream")
         api_type_file, shell_content = get_api_type_file(api_type, shell_content)
@@ -200,6 +263,31 @@ def generate_aisbench_script(
         shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={perf_top_p},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={perf_seed},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/repetition_penalty\s*=\s*.*,/repetition_penalty={repetition_penalty},/g" {api_type_file}')
+        # 替换ignore_eos配置
+        shell_content.append(f'sed -i "s/ignore_eos\s*=\s*.*,/ignore_eos={ignore_eos},/g" {api_type_file}')
+
+        # 更新aisbench模型配置中generation_kwargs后端参数
+        generation_kwargs = perf_cfg.get('generation_kwargs', {})
+        if generation_kwargs:  # 如果有需要更新的参数
+            update_cmd = update_generation_kwargs(generation_kwargs, api_type_file)
+            shell_content.extend(update_cmd)
+
+        if dataset_name == "syn" and task_config.get("benchmark").get("benchmark_type") == "aisbench":
+            syn_config_file, shell_content = get_syn_config_file(shell_content)
+            num_prompts_cnt = task_config.get("benchmark").get("perf").get("num_prompts", batch_size)
+            input_len = task_config.get("benchmark").get("perf").get("input_len")
+            trust_remote_mode = "True"
+
+            shell_content.append(f'sed -i \'s/"RequestCount"\s*:\s*.*,/"RequestCount": {num_prompts_cnt},/g\' {syn_config_file}')
+            shell_content.append(f'sed -i \'s/"TrustRemoteCode"\s*:\s*.*,/"TrustRemoteCode": {trust_remote_mode},/g\' {syn_config_file}')
+            shell_content.append(f'sed -i \'s/"RequestSize"\s*:\s*.*,/"RequestSize": {input_len},/g\' {syn_config_file}')
+
+            #shell_content.append(f'sed -i "s/RequestCount\s*=\s*.*,/RequestCount={num_prompts_cnt},/g" {syn_config_file}')
+            #shell_content.append(f'sed -i "s/TrustRemoteCode\s*=\s*.*,/TrustRemoteCode={trust_remote_mode},/g" {syn_config_file}')
+            #shell_content.append(f'sed -i "s/RequestSize\s*=\s*.*,/RequestSize={input_len},/g" {syn_config_file}')
+
+            # 随机合成数据集
+            dataset_conf_type = "synthetic_gen"
 
         if process_dataset_cmd:
             shell_content.extend(process_dataset_cmd)

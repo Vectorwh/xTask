@@ -20,7 +20,7 @@
     "DOCKER_CONFIG": {
         "docker_cmd": "docker",
         "docker_home_path": "/data/",
-        "local_home_path": "/export/home/kongshuaikang1/",
+        "local_home_path": "/export/home/",
         "enable_proxy": "True",
         "https_proxy_url": "http://bamboo-proxy.jd.com:80",
         "http_proxy_url": "http://bamboo-proxy.jd.com:80",
@@ -30,13 +30,12 @@
         "benchmark_script_path": "",
         "volumes": {
             "/export/home/models/": "/export/home/models",
-            "/export/home/kongshuaikang1/xllm_test_060": "/xllm_test_060",
+            "/export/home/models/xllm_test_060": "/xllm_test_060",
             "/usr/local/dcmi": "/usr/local/dcmi",
             "/usr/local/bin/npu-smi": "/usr/local/bin/npu-smi",
             "/usr/local/Ascend/driver": "/usr/local/Ascend/driver",
             "/usr/local/Ascend/add-ons/": "/usr/local/Ascend/add-ons/",
-	    "/etc/ascend_install.info": "/etc/ascend_install.info",
-            "/root/.cache": "/root/.cache"
+            "/etc/ascend_install.info": "/etc/ascend_install.info"
         }
     }
 }

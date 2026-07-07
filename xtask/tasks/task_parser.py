@@ -106,7 +106,16 @@ def gen_task_file_by_casename(case_name: str, task_file_path: str, xtask_config:
         case_dir = os.path.join(os.getcwd(), "tests")
         case_file = find_case_file(case_name, case_dir)
         success = Task.check_case_yaml(case_file)
-        
+
+        #删除上一次的case_name.json文件
+        try:
+            os.remove(os.path.join(task_file_path, (case_name + ".json")))
+            logging.info("remove last casename.json success.")
+        except FileNotFoundError:
+            logging.info("casename.json is not exist.")
+        except PermissionError:
+            logging.info("no right to remove casename.json.")
+
         return success, {case_file:task_file_path} if success else {}
     
     except Exception as e:
@@ -173,8 +182,8 @@ def _update_config_by_path(
 
         # 修改bs关联配置
         if key_path == "batch_size":
-            config["benchmark"]["perf"].update({"num_prompts": (value * 8)})
-            config["benchmark"]["perf"].update({"request_rate": value})
+            config["benchmark"]["perf"].update({"num_prompts": (value * 4)})
+            # config["benchmark"]["perf"].update({"request_rate": value})
 
     elif config.get("benchmark").get("acc") is not None and key_path in config.get("benchmark").get("acc"):
         config["benchmark"]["acc"].update({key_path: value})
@@ -195,6 +204,163 @@ def get_specific_letters(para_name: str):
         spec_letter += part[0]
 
     return spec_letter
+
+def gen_group_paraset_task(
+        case_name: str,
+        task_file_path: str,
+        tasks: Dict[str, str]
+) -> bool:
+    """处理评估测试用例"""
+    try:
+        # 查找并加载基础配置文件
+        basecase_dir = Path.cwd() / "tests"
+        basecase_file = find_case_file(case_name, str(basecase_dir))
+
+        with open(basecase_file, 'r', encoding='utf-8') as f:
+            base_config = yaml.safe_load(f)
+
+        if base_config is None:
+            logging.error(f"基础配置文件为空: {basecase_file}")
+            return False
+
+        # 获取评估测试配置
+        assess_test = base_config.get("assess_test_param", {})
+        if not assess_test:
+            logging.warning(f"用例 {case_name} 没有评估测试配置")
+            return False
+
+        # 生成动态参数组合
+        for param_dict in dynamic_loops_from_dict(assess_test):
+            config_copy = base_config.copy()
+            param_parts = []
+
+            for param_name, param_value in param_dict.items():
+                # 更新配置
+                _update_config_by_path(config_copy, param_name, param_value)
+                spec_letters = get_specific_letters(param_name)
+                param_parts.append(f"{spec_letters}-{param_value}")
+                #param_parts.append(f"{param_name}-{param_value}")
+
+            # 生成新用例名称
+            param_suffix = "_".join(param_parts)
+            new_case_name = (f"{case_name}_{param_suffix}").lower()
+            config_copy.update({"case_name": new_case_name})
+            task_new_file_path = os.path.join(task_file_path, new_case_name)
+            os.makedirs(task_new_file_path, exist_ok=True)
+
+            new_case_dir = Path(task_new_file_path) / f"{new_case_name}.yaml"
+            #task_file_path = os.path.join(task_file_path, new_case_name.lower())
+            #case_path = Path(task_file_path) / new_case_name
+
+            # 保存配置文件
+            with open(new_case_dir, 'w', encoding='utf-8') as f:
+                yaml.dump(config_copy, f, default_flow_style=False, allow_unicode=True)
+
+            tasks[str(new_case_dir)] = task_new_file_path
+
+            #删除上一次的case_name.json文件
+            try:
+                os.remove(os.path.join(str(task_new_file_path), (str(new_case_name) + ".json")))
+                logging.info("remove last casename.json success.")
+            except FileNotFoundError:
+                logging.info("casename.json is not exist.")
+            except PermissionError:
+                logging.info("no right to remove casename.json.")            
+
+        return True
+
+    except FileNotFoundError as e:
+        logging.error(f"找不到用例文件: {case_name} - {e}")
+        return False
+    except yaml.YAMLError as e:
+        logging.error(f"YAML解析错误: {case_name} - {e}")
+        return False
+    except Exception as e:
+        logging.error(f"处理评估用例时出错: {case_name} - {e}", exc_info=True)
+        return False
+
+def gen_group_autoassess_task(
+        case_name: str,
+        task_file_path: str,
+        tasks: Dict[str, str],
+        config_para: Dict
+) -> bool:
+    """
+    处理评估测试用例：
+    1. 加载基础配置。
+    2. 根据 config_para 更新 batch_size (如果提供)。
+    3. 生成新的配置文件并更新任务列表。
+    """
+    PARAM_NAME = "batch_size"
+
+    try:
+        # 1. 查找并加载基础配置文件
+        basecase_dir = Path.cwd() / "tests"
+        basecase_file = find_case_file(case_name, str(basecase_dir))
+
+        with open(basecase_file, 'r', encoding='utf-8') as f:
+            base_config = yaml.safe_load(f)
+
+        if not base_config:
+            logging.error(f"基础配置文件为空或解析失败: {basecase_file}")
+            return False
+
+        # 2. 准备配置副本
+        config_copy = base_config.copy()
+        param_value = None
+
+        # 3. 确定参数值并更新配置
+        if config_para and PARAM_NAME in config_para:
+            # 优先使用传入的参数
+            param_value = config_para[PARAM_NAME]
+            # 更新配置字典中的值
+            _update_config_by_path(config_copy, PARAM_NAME, param_value)
+        else:
+            # 回退：从基础配置中获取默认值 (使用链式 get 防止 KeyError)
+            param_value = base_config.get("benchmark", {}).get("perf", {}).get(PARAM_NAME)
+
+            if param_value is None:
+                logging.error(f"无法获取有效的 {PARAM_NAME}，请检查 config_para 或基础配置文件结构。")
+                return False
+
+        # 4. 公共逻辑：生成新用例名称、路径并保存
+        new_case_name = f"{case_name}_bs-{param_value}".lower()
+        config_copy["case_name"] = new_case_name
+
+        # 使用 pathlib 规范化路径处理
+        task_root_path = Path(task_file_path)
+        new_task_dir = task_root_path / new_case_name
+        new_task_dir.mkdir(parents=True, exist_ok=True)
+
+        new_case_file = new_task_dir / f"{new_case_name}.yaml"
+
+        # 保存配置文件
+        with open(new_case_file, 'w', encoding='utf-8') as f:
+            yaml.dump(config_copy, f, default_flow_style=False, allow_unicode=True)
+
+        # 更新任务字典 (key: 文件路径, value: 目录路径)
+        tasks[str(new_case_file)] = str(new_task_dir)
+
+        #删除上一次的case_name.json文件
+        try:
+            os.remove(os.path.join(str(new_task_dir), (str(new_case_name) + ".json")))
+            logging.info("remove last casename.json success.")
+        except FileNotFoundError:
+            logging.info("casename.json is not exist.")
+        except PermissionError:
+            logging.info("no right to remove casename.json.")
+
+        logging.info(f"Successfully generated auto-assess task: {new_case_name}")
+        return True
+
+    except FileNotFoundError as e:
+        logging.error(f"找不到用例文件: {case_name} - {e}")
+    except yaml.YAMLError as e:
+        logging.error(f"YAML解析错误: {case_name} - {e}")
+    except Exception as e:
+        logging.error(f"处理评估用例时出错: {case_name} - {e}", exc_info=True)
+
+    return False
 
 def gen_group_normal_task(
         case_name: str,
@@ -260,11 +426,19 @@ def gen_task_file_by_casegroup(
 
         for case_name in case_name_list:
             if 'para_set' == ass_test_type:
-                # 参数组合测试，to do: 待合入
-                pass
+                result = gen_group_paraset_task(
+                    case_name,
+                    task_file_path,
+                    tasks
+                )
             elif 'auto_assess' == ass_test_type:
-                # 自动评估测试，to do: 待合入
-                pass
+                #当前自动评估测试，仅支持固定参数组合下并发摸高
+                result = gen_group_autoassess_task(
+                    case_name,
+                    task_file_path,
+                    tasks,
+                    config_para
+                )
             else:
                 result = gen_group_normal_task(
                     case_name,
