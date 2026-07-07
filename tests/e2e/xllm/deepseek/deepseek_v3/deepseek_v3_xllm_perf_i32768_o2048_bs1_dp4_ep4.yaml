@@ -13,7 +13,6 @@ benchmark:
     dump_extract_rate: false
     enable_debug: false
     enable_thinking: false
-    ignore_eos: false
     input_len: 32768
     max_num_worker: 1
     max_out_len: 2048
@@ -21,14 +20,12 @@ benchmark:
     num_prompts: 6
     output_len: 2048
     pressure: false
-    repetition_penalty: 1
     request_rate: 1
-    seed: 1024
-    temperature: 0
     threshold: 0.05
-    top_k: -1
-    top_p: 1
     num_warmups: 20
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: True
 block_size: 128
 case_name: deepseek_v3_xllm_perf_i32768_o2048_bs1_dp4_ep4
 communication_backend: hccl
@@ -48,7 +45,7 @@ world_size: 16
 serving_wait_time: 290
 serving_extensiable_param:
   max_tokens_per_batch: 35840
-  max_seqs_per_batch: 3000
+  max_seqs_per_batch: 10
   enable_chunked_prefill: false
   enable_schedule_overlap: true
   enable_prefix_cache: false

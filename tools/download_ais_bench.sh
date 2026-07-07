@@ -8,6 +8,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+rm -rf /workspace/benchmark
 cp -r /xllm_test_060/benchmark /workspace/
 
 cd /workspace/benchmark/

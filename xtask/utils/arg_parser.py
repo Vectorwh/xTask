@@ -402,7 +402,7 @@ Usage Examples:
         parser.add_argument(
             "--target_ttft",
             type=float,
-            default=2000,
+            default=600000,
             help="Target TTFT (Time to First Token) value for auto assessment"
         )
         parser.add_argument(

@@ -12,7 +12,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--bs', type=int, default=4096, help="Number of dataset")
     parser.add_argument("--inputlen", type=int, default=2048, help="Input token lenth")
-    parser.add_argument("--datasettype", type=str, default='GSM', help="dataset generator type")
+    parser.add_argument("--datasettype", type=str, default='GSM8K', help="dataset generator type")
     parser.add_argument("--datapath", type=str, default='/workspace/benchmark/', help="dataset sample path")
     parser.add_argument("--modelpath", type=str, default="", help="model path")
     return parser.parse_args()
@@ -108,14 +108,15 @@ if __name__ == '__main__':
     tokenizer = AutoTokenizer.from_pretrained(f"{model_path}", trust_remote_code=True)
     print(f"[process_dataset]: 数据集生成基于该权重产生:{model_path}")
     #不同类型的数据集分类执行，函数模块反复调用;Support Dataset Type: GSM,VQA、VID
-    if ( dataset_type == 'GSM' ):
-
-        if os.path.exists(f'{dataset_type}-in{input_len}-bs{batch_size}.jsonl'):
+    if ( dataset_type == 'GSM8K' ):
+        output_file_path = os.path.join(data_path, f'{dataset_type}-in{input_len}-bs{batch_size}.jsonl')
+        if os.path.exists(output_file_path):
             print("[process_dataset]: GSM8K jsonl already exists...")
             exit(0)
 
         dataset = []
-        dataset_path = "./GSM8K.jsonl"
+        # dataset_path = "./GSM8K.jsonl"
+        dataset_path = os.path.join(data_path, 'GSM8K.jsonl')
         with open(dataset_path, 'r', encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
@@ -125,12 +126,12 @@ if __name__ == '__main__':
         dataset_tmp = datatmp_generator(input_len, tokenizer, dataset, batch_size)
         print("=== 生成GSM8K.jsonl文件 ===")
         json_str = json.dumps(dataset_tmp, ensure_ascii=False, indent=4)
-        with open(f'GSM8K-in{input_len}-bs{batch_size}.jsonl', 'w', encoding='utf-8') as f:
+        with open(output_file_path, 'w', encoding='utf-8') as f:
             print("[process_dataset]: start generating")
             for i in range(len(dataset_tmp)):
                 f.write(json.dumps({"question": dataset_tmp[i], "answer": "none"}, ensure_ascii=False))
                 f.write("\n")
-        print(f"[process_dataset]: 已生成文件:GSM8K-in{input_len}-bs{batch_size}.jsonl")
+        print(f"[process_dataset]: 已生成文件:{output_file_path}")
 
 #VQA数据集生成
     elif (dataset_type == 'VQA' ):

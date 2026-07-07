@@ -4,6 +4,8 @@ import os
 import json
 import time
 import yaml
+import copy
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
@@ -298,12 +300,101 @@ def generate_commands(
         )
     elif task_config.get("benchmark").get("benchmark_type") == "vllm_benchmark":
         pass
+    elif task_config.get("benchmark").get("benchmark_type") == "evalscope":
+        from xtask.benchmarks.evalscope.generate_evalscope_script import generate_evalscope_script
+        benchmark_cmd = generate_evalscope_script(
+            task_config=task_config,
+            output_file_path = output_file_path,
+            output_shell_file="run_evalscope_test.sh",
+            python_exec="python"
+            )
     else:
         logging.error("benchmark_type: %s is not supported yet."% 
                       task_config.get("benchmark").get("benchmark_type"))
     
     return startup_cmd, benchmark_cmd
 
+def find_benchmark_rst_directory(directory_path=".", init_entries=list()):   
+    # 日期目录的正则表达式模式 (格式: YYYYMMDD_HHMMSS)
+    date_pattern = re.compile(r'^\d{8}_\d{6}$')
+    
+    # 获取目录下的所有条目
+    try:
+        entries = os.listdir(directory_path)
+    except FileNotFoundError:
+        logging.info(f"错误: 目录 '{directory_path}' 不存在")
+        return False
+    except PermissionError:
+        logging.info(f"错误: 没有权限访问目录 '{directory_path}'")
+        return False
+    
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    # 过滤出符合日期格式的目录
+    date_dirs = []
+    for entry in entries:
+        entry_path = os.path.join(directory_path, entry)
+        if os.path.isdir(entry_path) and date_pattern.match(entry) and entry not in init_entries:  
+            date_dirs.append(path_mapping_in_container(entry_path))
+    
+    # 如果没有找到日期目录
+    if not date_dirs:
+        logging.info("未找到日期格式的目录 (格式: YYYYMMDD_HHMMSS)")
+    
+    return date_dirs
+
+def _build_warmup_command(task_config, output_file_path):
+    """构建预热命令：深拷贝配置并合并 warmup 参数"""
+    warmup_task_config = copy.deepcopy(task_config)
+    warmup_paras = task_config["benchmark"]["perf"].get("warmup_paras", {})
+    warmup_task_config["benchmark"]["perf"].update(warmup_paras)
+
+    from xtask.benchmarks.evalscope.generate_evalscope_script import generate_evalscope_script
+    return generate_evalscope_script(
+        task_config=warmup_task_config,
+        output_file_path=output_file_path,
+        output_shell_file="run_evalscope_warmup.sh",
+        python_exec="python",
+    )
+
+def _execute_warmup(container_manager, container_config, engine_config, warmup_cmd):
+    """执行预热并记录结果"""
+    result = container_manager.exec_in_container(
+        container_config.container_name,
+        warmup_cmd,
+        timeout=engine_config.get("benchmark_timeout", 3600),
+    )
+    if result.success:
+        logging.info("Warmup completed successfully.")
+    else:
+        logging.error(f"Warmup failed with exit code {result.exit_code}")
+
+def _cleanup_warmup_results(container_manager, container_config, output_file_path, init_entries):
+    """清理预热阶段产生的结果目录"""
+    warmup_rst = find_benchmark_rst_directory(output_file_path, init_entries)
+    if not warmup_rst:
+        return
+    
+    clear_cmd = ";".join(f"rm -rf {folder}" for folder in warmup_rst)
+    container_manager.exec_in_container(
+        container_config.container_name, clear_cmd, timeout=30
+    )
+ 
+def _post_process_benchmark_rst(container_manager, container_config, task_config, output_file_path, benchmarkpath):
+  
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    # benchmark结束后处理，在对应日期目录再放一份benchmrk结果和xLLM日志
+    output_location = path_mapping_in_container(output_file_path)
+    benchmark_location = path_mapping_in_container(os.path.join(output_file_path, benchmarkpath))
+    xllmlog_location = os.path.join(benchmark_location, "xllm_log")
+    result_json = os.path.join(output_location, (task_config.get("case_name").lower() + ".json"))
+    xllm_log = os.path.join(output_location, "log")
+
+    process_cmd = f"cp -f {result_json} {benchmark_location};cp -rf {xllm_log} {xllmlog_location}"
+    container_manager.exec_in_container(
+        container_config.container_name, process_cmd, timeout=30
+    )
 
 def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Dict[str, Any]:
     """
@@ -470,12 +561,17 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
             timeout=engine_config.get("startup_timeout", 300)
         )
 
-        down_aisbench_cmd = "bash /workspace/tools/download_ais_bench.sh;"
-        logging.info(f"Starting the compilation task: {down_aisbench_cmd}")
+        # 下载BenchMark工具
+        if task_config.get("benchmark").get("benchmark_type") == "aisbench":
+            down_benchmark_cmd = "bash /workspace/tools/download_ais_bench.sh;"
+        elif task_config.get("benchmark").get("benchmark_type") == "evalscope":
+            down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
+
+        logging.info(f"Starting download the benchmark tool: {down_benchmark_cmd}")
 
         startup_result = container_manager.exec_in_container(
             container_config.container_name,
-            down_aisbench_cmd,
+            down_benchmark_cmd,
             timeout=engine_config.get("startup_timeout", 300)
         )
 
@@ -494,8 +590,9 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
                 logging.error("transformer upgrade to %s failed,stdout:%s,stderr:%s." \
                               % (transformers_version, install_result.stdout, install_result.stderr))
 
-                # GLM5等模型保底安装4.51.0
-                install_transformers_cmd = "pip install transformers==4.51.0 --upgrade"
+                # 模型指定transformer 安装失败时、默认更新transformer到最新版本
+                install_transformers_cmd = f"pip install --upgrade transformers;"
+
                 install_result = container_manager.exec_in_container(
                     container_config.container_name,
                     install_transformers_cmd,
@@ -503,9 +600,9 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
                 )
 
                 if not install_result.success:
-                    logging.error("transformer upgrade to 4.51.0 failed,stdout:%s,stderr:%s." \
+                    logging.error("transformer upgrade failed,stdout:%s,stderr:%s." \
                                  % (install_result.stdout, install_result.stderr))
-                    return result
+                    # return result
         else:
             logging.error("model config file: %s is not exist"% model_config_path)
             return result
@@ -551,6 +648,17 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
             logging.info(f"Executing benchmark command: {benchmark_cmd}")
             
             if benchmark_cmd:
+                perf_cfg = task_config.get("benchmark").get("perf", {})
+                # 17.1 使用evalscope测试时，执行预热命令
+                if "evalscope" == task_config.get("benchmark").get("benchmark_type") and perf_cfg.get("warmup_paras"):
+                    warmup_cmd = _build_warmup_command(task_config, output_file_path)
+                    _execute_warmup(container_manager, container_config, engine_config, warmup_cmd)
+                    _cleanup_warmup_results(container_manager, container_config, output_file_path, init_entries)
+                    time.sleep(10) # 预热后等待10s
+
+                # 正式测试前获取执行结果目录已有列表
+                init_entries = os.listdir(output_file_path)
+
                 benchmark_result = container_manager.exec_in_container(
                     container_config.container_name,
                     benchmark_cmd,
@@ -568,15 +676,20 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
                     if "acc" in task_config.get("metrics"):
                         logging.info("Start to check acc benchmark result.")
                         from xtask.benchmarks.base_benchmark import acc_result_postprocess
-                        result["benchmark_acc_result"] = acc_result_postprocess(task_config, output_file_path, init_entries)
+                        result["benchmark_acc_result"], benchmark_outputdir = acc_result_postprocess(task_config, output_file_path, init_entries)
+
+                        _post_process_benchmark_rst(container_manager, container_config, task_config, output_file_path, benchmark_outputdir)
                     else:
                         logging.warning(f"metrics is {task_config.get('metrics')}，skip accaurcy task.")
                     
                     # 18.2 解析性能执行结果
                     if "perf" in task_config.get("metrics"):
                         from xtask.benchmarks.base_benchmark import result_postprocess
-                        result["benchmark_perf_result"] = result_postprocess(benchmark_result.stdout, task_config, 
+                        result["benchmark_perf_result"], benchmark_outputdir = result_postprocess(benchmark_result.stdout, task_config, 
                                                                             output_file_path, init_entries)
+
+                        _post_process_benchmark_rst(container_manager, container_config, task_config, output_file_path, benchmark_outputdir)
+
                 else:
                     logging.error(f"perf benchmark command failed with exit code {benchmark_result.exit_code}")
             else:

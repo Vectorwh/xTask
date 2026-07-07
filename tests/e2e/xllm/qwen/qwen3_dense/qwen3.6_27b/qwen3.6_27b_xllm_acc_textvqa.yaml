@@ -1,0 +1,62 @@
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    api_type: vllm_api_stream_chat
+    baseline: 84.98
+    batch_size: 6
+    case_type: accuracy
+    dataset_conf: textvqa_gen_base64
+    dataset_path: null
+    dump_eval_details: true
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    input_len: ''
+    max_num_worker: 1
+    max_out_len: ''
+    merge_ds: false
+    num_prompts: 500
+    output_len: 32768
+    pressure: false
+    request_rate: 6
+    threshold: 0.04
+    generation_kwargs:
+      temperature: 0.5
+      ignore_eos: False
+      top_k: 10
+      top_p: 0.95
+      seed: None
+      repetition_penalty: 1.03
+      chat_template_kwargs: dict(enable_thinking=False)
+block_size: 128
+case_name: qwen3.6_27b_xllm_acc_textvqa
+communication_backend: hccl
+dataset_format: json
+dataset_name: textvqa
+dataset_path: ''
+engine_type: xllm
+host_addr: 11.87.191.75
+metrics: acc
+model_path: /export/home/models/Qwen3.6-27B
+num_devices: 2
+start_device_id: 0
+port: 8800
+served_model_name: Qwen3.6-27B
+userid: 1048
+world_size: 2
+serving_wait_time: 60
+serving_extensiable_param:
+  max_memory_utilization: 0.85
+  enable_chunked_prefill: true
+  enable_schedule_overlap: true
+  enable_prefix_cache: true
+  enable_shm: true
+  backend: vlm
+  max_encoder_cache_size: 128
+  enable_intralayer_addnorm: false
+  enable_interlayer_addnorm: false
+  enable_split_rmsnorm_rope: false
+  limit_image_per_prompt: 8
+  enable_graph: false
+  enable_graph_mode_decode_no_padding: false

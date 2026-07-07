@@ -1,5 +1,6 @@
 import os
 import logging
+import shutil
 from dataclasses import dataclass
 
 @dataclass
@@ -27,8 +28,10 @@ class ResultSummary:
     output_token_throughput: float
     ttft_avg: float
     ttft_p90: float
+    ttft_p99: float
     tpot_avg: float
     tpot_p90: float
+    tpot_p99: float
     e2el_avg: float
     e2el_p90: float
 
@@ -39,17 +42,20 @@ def result_postprocess(benchmark_stdout, task_config, output_file_path, init_ent
     if benchmark_type == "aisbench":
         from xtask.benchmarks.aisbench.aisbench_postprocess import aisbench_post_process
 
-        post_processed_result = aisbench_post_process(task_config, output_file_path, init_entries)
+        post_processed_result, benchmark_outputdir = aisbench_post_process(task_config, output_file_path, init_entries)
 
     elif benchmark_type == "vllm_bench":
         from xtask.benchmarks.vllm_bench.vllm_bench_postprocess import vllm_ascend_post_process
 
         post_processed_result = vllm_ascend_post_process(benchmark_type)
+    elif benchmark_type == "evalscope":
+        from xtask.benchmarks.evalscope.evalscope_postprocess import evalscope_perf_post_process
 
+        post_processed_result, benchmark_outputdir  = evalscope_perf_post_process(task_config, output_file_path, init_entries)
     else:
         logging.error("benchmark_type: %s is invalid."% benchmark_type)
-    return post_processed_result
 
+    return post_processed_result, benchmark_outputdir
 
 def acc_result_postprocess(task_config, output_file_path, init_entries):
     post_processed_result = ""
@@ -57,12 +63,16 @@ def acc_result_postprocess(task_config, output_file_path, init_entries):
     if benchmark_type == "aisbench":
         from xtask.benchmarks.aisbench.aisbench_postprocess import aisbench_acc_post_process
 
-        post_processed_result = aisbench_acc_post_process(task_config, output_file_path, init_entries)
+        post_processed_result, benchmark_outputdir = aisbench_acc_post_process(task_config, output_file_path, init_entries)
 
     elif benchmark_type == "vllm_bench":
         from xtask.benchmarks.vllm_bench.vllm_bench_postprocess import vllm_ascend_post_process
 
         post_processed_result = vllm_ascend_post_process(benchmark_type)
+    elif benchmark_type == "evalscope":
+        from xtask.benchmarks.evalscope.evalscope_postprocess import evalscope_acc_post_process
+
+        post_processed_result, benchmark_outputdir = evalscope_acc_post_process(task_config, output_file_path, init_entries)
 
     else:
         logging.error("benchmark_type: %s is invalid."% benchmark_type)
@@ -72,7 +82,7 @@ def acc_result_postprocess(task_config, output_file_path, init_entries):
         pass
     
     logging.info("acc dataset name is: %s, acc result is: %s"% (task_config.get("dataset_name"), post_processed_result))
-    return post_processed_result
+    return post_processed_result, benchmark_outputdir
 
 
 def get_acc_config(benchmark_type):

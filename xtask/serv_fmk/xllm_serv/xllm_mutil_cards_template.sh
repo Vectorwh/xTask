@@ -12,6 +12,7 @@ export LD_LIBRARY_PATH=/usr/local/libtorch_npu/lib:$LD_LIBRARY_PATH
 # Ascend 环境设置
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
+source ${ASCEND_TOOLKIT_HOME}/opp/vendors/custom_xllm_math/bin/set_env.bash
 
 # 日志和性能配置
 export ASDOPS_LOG_TO_STDOUT=1
@@ -64,7 +65,8 @@ do
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$DEVICE.log"
   xllm_command=(
-    xllm \
+  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) xllm \
+#   xllm \
     --model "$MODEL_PATH" \
     --port "$PORT" \
     --devices="npu:$DEVICE" \
