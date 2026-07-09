@@ -315,7 +315,7 @@ class Task:
             
             return TaskConfig.from_dict(data)
         except Exception as e:
-            logging.info(f"Error loading config from YAML: {e}")
+            # logging.info(f"Error loading config from YAML: {e}")
             return None
     
     @staticmethod
