@@ -108,13 +108,15 @@ def gen_task_file_by_casename(case_name: str, task_file_path: str, xtask_config:
         success = Task.check_case_yaml(case_file)
 
         #删除上一次的case_name.json文件
-        try:
-            os.remove(os.path.join(task_file_path, (case_name + ".json")))
-            logging.info("remove last casename.json success.")
-        except FileNotFoundError:
-            logging.info("casename.json is not exist.")
-        except PermissionError:
-            logging.info("no right to remove casename.json.")
+        last_case_json = os.path.join(task_file_path, (case_name + ".json"))
+        if os.path.exists(last_case_json):
+            try:
+                os.remove(last_case_json)
+                logging.info("remove last casename.json success.")
+            except FileNotFoundError:
+                logging.info("casename.json is not exist.")
+            except PermissionError:
+                logging.info("no right to remove casename.json.")
 
         return success, {case_file:task_file_path} if success else {}
     
