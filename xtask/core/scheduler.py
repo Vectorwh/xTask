@@ -445,6 +445,7 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
                 logging.info(f"Overriding host_addr from '{original_addr}' to '{host_addr_override}'")
         
         result["task_config"] = task_config
+        result["output_file_path"] = output_file_path
         
         # 2. 提取框架信息
         engine = TaskConfig.extract_framework(task_config)

@@ -62,7 +62,7 @@ class OpenMeClient:
                             "all_case_num": "0",
                             "fail_case_num": "0",
                             "case_details": [],
-                            "case_framework_log": "[测试框架执行日志](http://xllm-ci-hud.jd.com/case_framework.log)"
+                            "case_framework_log": f"[测试框架执行日志](http://{host}/case_framework.log)"
                         }
 				    },
 				    "forward": {
@@ -94,12 +94,15 @@ class OpenMeClient:
     def AddCaseResult(self, result):
         """case result handle """
         case_name = result["task_config"]["case_name"]
+        host_addr = result["task_config"].get("host_addr", "0.0.0.0")
+        output_file_path = result.get("output_file_path", "")
+        report_path = output_file_path.split("outputs/")[-1]
         case_detail = {
             "case_name": case_name,
             "model": result["task_config"]["served_model_name"],
-            "report": "[Summary](http://xllm-ci-hud.jd.com/" + case_name + "/" + case_name + ".json)",
+            "report": f"[Summary](http://{host_addr}/" + report_path + "/" + case_name + ".json)",
             "case_exec_time": str(int(result['execution_time'])) + "s",
-            "xllm_log": "[NodeLOG](http://xllm-ci-hud.jd.com/" + case_name + "/log/)"
+            "xllm_log": f"[NodeLOG](http://{host_addr}/" + report_path + "/log/)"
         }
 
         self.all_case_num = self.all_case_num + 1
