@@ -52,7 +52,7 @@ serving_extensiable_param:
   max_seqs_per_batch: 84
   num_speculative_tokens: 3
   speculative_algorithm: Eagle3
-serving_wait_time: 90
+serving_wait_time: 10
 start_device_id: 0
 userid: 1048
 world_size: 4

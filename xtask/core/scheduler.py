@@ -369,6 +369,39 @@ def _execute_warmup(container_manager, container_config, engine_config, warmup_c
     else:
         logging.error(f"Warmup failed with exit code {result.exit_code}")
 
+def _execute_benchmark_with_npu_guard(container_manager, container_config,
+                                      task_config, engine_config, benchmark_cmd):
+    """执行 benchmark，并在执行期间守护 NPU 进程状态。
+
+    任一 NPU 进程异常时中断 benchmark 执行，返回带失败原因的结果，供后续错误处理。
+    """
+    from xtask.utils.watchdog import NpuProcessGuard
+
+    start_device = task_config.get("start_device_id", 0)
+    npu_guard = NpuProcessGuard(
+        npu_card_ids=[(start_device + i) for i in range(0, task_config.get("num_devices", 1))],
+        check_interval=engine_config.get("npu_guard_interval", 300.0),
+        startup_grace=engine_config.get("npu_guard_startup_grace", 0.0),
+        container_name=container_config.container_name,
+    )
+    npu_guard.start()
+    try:
+        benchmark_result = container_manager.exec_in_container(
+            container_config.container_name,
+            benchmark_cmd,
+            timeout=engine_config.get("benchmark_timeout", 3600),
+            abort_event=npu_guard.abort_event,
+        )
+    finally:
+        npu_guard.stop()
+
+    if npu_guard.is_aborted():
+        logging.error(f"benchmark 执行被中断：NPU进程状态异常（{npu_guard.aborted_reason}）")
+        if not benchmark_result.stderr:
+            benchmark_result.stderr = f"NPU process abnormal: {npu_guard.aborted_reason}"
+
+    return benchmark_result
+
 def _cleanup_warmup_results(container_manager, container_config, output_file_path, init_entries):
     """清理预热阶段产生的结果目录"""
     warmup_rst = find_benchmark_rst_directory(output_file_path, init_entries)
@@ -380,6 +413,20 @@ def _cleanup_warmup_results(container_manager, container_config, output_file_pat
         container_config.container_name, clear_cmd, timeout=30
     )
  
+def _clear_pre_benchmark_rst(container_manager, container_config, task_config, output_file_path):
+  
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    # 删除上次用例输出目录下的log、用例.json文件
+    output_location = path_mapping_in_container(output_file_path)
+    result_json = os.path.join(output_location, (task_config.get("case_name").lower() + ".json"))
+    xllm_log = os.path.join(output_location, "log")
+
+    process_cmd = f"rm -rf {result_json};rm -rf {xllm_log}"
+    container_manager.exec_in_container(
+        container_config.container_name, process_cmd, timeout=30
+    )
+
 def _post_process_benchmark_rst(container_manager, container_config, task_config, output_file_path, benchmarkpath):
   
     from xtask.utils.container_manager import path_mapping_in_container
@@ -610,6 +657,9 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
 
         # TODO：cleanup 指定npu上的任务
 
+        # 清除上一次的log,json等信息
+        _clear_pre_benchmark_rst(container_manager, container_config, task_config, output_file_path)
+
         # 14. 执行启动命令
         logging.info(f"Executing startup command: {startup_cmd}")
         
@@ -660,11 +710,12 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
                 # 正式测试前获取执行结果目录已有列表
                 init_entries = os.listdir(output_file_path)
 
-                benchmark_result = container_manager.exec_in_container(
-                    container_config.container_name,
-                    benchmark_cmd,
-                    timeout=engine_config.get("benchmark_timeout", 3600)
+                # benchmark 执行期间守护 NPU 进程状态，任一 NPU 进程异常则中断执行
+                benchmark_result = _execute_benchmark_with_npu_guard(
+                    container_manager, container_config,
+                    task_config, engine_config, benchmark_cmd
                 )
+
                 result["benchmark_success"] = benchmark_result.success
                 result["benchmark_exit_code"] = benchmark_result.exit_code
                 result["benchmark_stdout"] = benchmark_result.stdout

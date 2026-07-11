@@ -41,7 +41,7 @@ port: 8800
 served_model_name: GLM-5.2-W8A8-EcoTech
 userid: 1048
 world_size: 16
-serving_wait_time: 220
+serving_wait_time: 10
 serving_extensiable_param:
   max_memory_utilization: 0.85
   max_tokens_per_batch: 2048

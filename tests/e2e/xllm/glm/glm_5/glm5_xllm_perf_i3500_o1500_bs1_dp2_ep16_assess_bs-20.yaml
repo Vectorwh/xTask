@@ -58,7 +58,7 @@ serving_extensiable_param:
   max_seqs_per_batch: 28
   max_tokens_per_batch: 4096
   num_speculative_tokens: 3
-serving_wait_time: 220
+serving_wait_time: 10
 start_device_id: 0
 userid: 1048
 world_size: 16

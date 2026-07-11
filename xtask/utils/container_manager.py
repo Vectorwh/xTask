@@ -77,7 +77,8 @@ class ContainerManager:
 
     
     def run_command(self, cmd: str, capture_output: bool = True, 
-                   timeout: int = 300, **kwargs) -> CommandResult:
+                   timeout: int = 300, abort_event=None, 
+                   abort_poll_interval: float = 300.0, **kwargs) -> CommandResult:
         """
         Run shell command and return result
         
@@ -85,11 +86,22 @@ class ContainerManager:
             cmd: Command to execute
             capture_output: Whether to capture stdout/stderr
             timeout: Command timeout in seconds
-            **kwargs: Additional arguments for subprocess.run
+            abort_event: 可选的中断信号（threading.Event / multiprocessing.Event）。
+                         传入后使用 Popen + 进程组轮询方式执行，一旦该事件被置位，
+                         立即终止命令进程（及其子进程组），命令返回中断结果，主流程可继续。
+            abort_poll_interval: 中断轮询间隔（秒），仅在 abort_event 传入时生效
+            **kwargs: Additional arguments for subprocess.run / Popen
             
         Returns:
             CommandResult object
         """
+        # 若传入了 abort_event，走可中断执行分支
+        if abort_event is not None:
+            return self._run_command_abortable(
+                cmd, capture_output=capture_output, timeout=timeout,
+                abort_event=abort_event, abort_poll_interval=abort_poll_interval, **kwargs
+            )
+
         start_time = time.time()
         
         try:
@@ -144,6 +156,109 @@ class ContainerManager:
                 stderr=str(e),
                 execution_time=execution_time
             )
+
+    def _run_command_abortable(self, cmd: str, capture_output: bool = True,
+                               timeout: int = 300, abort_event=None,
+                               abort_poll_interval: float = 300.0, **kwargs) -> CommandResult:
+        """
+        使用 Popen + 进程组轮询方式执行命令，支持通过 abort_event 外部中断。
+
+        中断/超时时会终止整个进程组（SIGTERM -> 等待 -> SIGKILL），
+        以确保 shell 派生的孙进程（如 docker exec）一并被清理，主流程随后可继续。
+        """
+        start_time = time.time()
+        popen_kwargs = {'shell': True, 'text': True}
+        if capture_output:
+            popen_kwargs.update({'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE})
+        # 独立进程组，便于整组终止（POSIX）
+        if os.name == 'posix':
+            popen_kwargs['start_new_session'] = True
+        popen_kwargs.update(kwargs)
+
+        logging.debug(f"Executing command (abortable): {cmd}")
+
+        try:
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logging.error(f"Command execution failed: {str(e)}")
+            return CommandResult(
+                success=False, exit_code=-1, stdout="", stderr=str(e),
+                execution_time=execution_time
+            )
+
+        aborted = False
+        timed_out = False
+        while True:
+            try:
+                proc.wait(timeout=abort_poll_interval)
+                break  # 进程已退出
+            except subprocess.TimeoutExpired:
+                pass
+
+            # 检查外部中断信号
+            if abort_event is not None and abort_event.is_set():
+                aborted = True
+                logging.warning(f"Received abort signal, terminating command: {cmd}")
+                self._terminate_process_group(proc)
+                break
+
+            # 检查超时
+            if (time.time() - start_time) >= timeout:
+                timed_out = True
+                logging.warning(f"Command timeout after {timeout} seconds: {cmd}")
+                self._terminate_process_group(proc)
+                break
+
+        stdout, stderr = "", ""
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except Exception:
+            try:
+                self._terminate_process_group(proc)
+            except Exception:
+                pass
+        execution_time = time.time() - start_time
+
+        if aborted:
+            return CommandResult(
+                success=False, exit_code=-1,
+                stdout=stdout or "", stderr="Command aborted by monitor (NPU process abnormal)",
+                execution_time=execution_time
+            )
+        if timed_out:
+            return CommandResult(
+                success=False, exit_code=-1,
+                stdout=stdout or "", stderr=f"Command timeout after {timeout} seconds",
+                execution_time=execution_time
+            )
+        return CommandResult(
+            success=proc.returncode == 0, exit_code=proc.returncode if proc.returncode is not None else -1,
+            stdout=stdout if capture_output else "", stderr=stderr if capture_output else "",
+            execution_time=execution_time
+        )
+
+    def _terminate_process_group(self, proc):
+        """终止进程（组）：先 SIGTERM，超时后 SIGKILL。"""
+        try:
+            if os.name == 'posix':
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except Exception as e:
+            logging.debug(f"terminate process group failed: {e}")
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            try:
+                if os.name == 'posix':
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except Exception as e:
+                logging.debug(f"kill process group failed: {e}")
     
     def check_runtime_available(self) -> bool:
         """
@@ -544,7 +659,8 @@ class ContainerManager:
     def exec_in_container(self, container_name: str = None, cmd: str = "", 
                          capture_output: bool = True, timeout: int = 300,
                          workdir: str = None, user: str = None,
-                         environment: Dict[str, str] = None) -> CommandResult:
+                         environment: Dict[str, str] = None,
+                         abort_event=None, abort_poll_interval: float = 300.0) -> CommandResult:
         """
         Execute command in container
         
@@ -556,6 +672,8 @@ class ContainerManager:
             workdir: Working directory inside container
             user: User to run command as
             environment: Environment variables to set
+            abort_event: 可选中断信号，置位后立即终止容器命令执行，主流程继续
+            abort_poll_interval: 中断轮询间隔（秒）
             
         Returns:
             CommandResult object
@@ -627,7 +745,8 @@ class ContainerManager:
         logging.info(f"Executing in container '{container_name}': {cmd}")
         
         # Execute command
-        return self.run_command(exec_cmd, capture_output=capture_output, timeout=timeout)
+        return self.run_command(exec_cmd, capture_output=capture_output, timeout=timeout,
+                                abort_event=abort_event, abort_poll_interval=abort_poll_interval)
     
     def copy_to_container(self, container_name: str = None, src_path: str = "", 
                          dest_path: str = "") -> bool:
