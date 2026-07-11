@@ -51,7 +51,7 @@ serving_extensiable_param:
   enable_schedule_overlap: true
   enable_shm: true
   max_seqs_per_batch: 90
-serving_wait_time: 90
+serving_wait_time: 10
 start_device_id: 0
 userid: 1048
 world_size: 4

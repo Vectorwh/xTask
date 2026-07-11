@@ -42,7 +42,7 @@ port: 8800
 served_model_name: GLM-4.7-W8A8
 userid: 1048
 world_size: 16
-serving_wait_time: 290
+serving_wait_time: 10
 serving_extensiable_param:
   max_seqs_per_batch: 10
   enable_chunked_prefill: true

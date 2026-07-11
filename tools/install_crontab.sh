@@ -8,6 +8,8 @@
 #   STAGES="build test" bash tools/install_crontab.sh   # 先编译后测试
 #   CRON_TIME="30 3 * * *" bash tools/install_crontab.sh            # 自定义时间
 #   MAIN_ARGS="--case_group base_case_group" bash tools/install_crontab.sh   # 指定 main.py 参数
+#   # 定时依次执行多组用例（分号分隔，每组各跑一次 main.py）：
+#   MAIN_ARGS_LIST="--case_name case1 ; --case_name case2" bash tools/install_crontab.sh
 # 卸载：
 #   bash tools/install_crontab.sh --uninstall
 
@@ -22,10 +24,12 @@ CRON_TIME="${CRON_TIME:-0 2 * * *}"
 STAGES="${STAGES:-build test}"
 # 传给 main.py 的参数（test 阶段使用）
 MAIN_ARGS="${MAIN_ARGS:-}"
+# 多组用例参数列表（分号分隔，每组各执行一次 main.py；设置后优先于 MAIN_ARGS）
+MAIN_ARGS_LIST="${MAIN_ARGS_LIST:-}"
 # 用于识别/去重的标记
 TAG="# xllm_daily_build"
-# 把 MAIN_ARGS 作为环境变量前缀写入 cron 行，保证 test 阶段能拿到参数
-CRON_LINE="${CRON_TIME} MAIN_ARGS='${MAIN_ARGS}' /bin/bash ${CRON_SCRIPT} ${STAGES} ${TAG}"
+# 把 MAIN_ARGS / MAIN_ARGS_LIST 作为环境变量前缀写入 cron 行，保证 test 阶段能拿到参数
+CRON_LINE="${CRON_TIME} MAIN_ARGS='${MAIN_ARGS}' MAIN_ARGS_LIST='${MAIN_ARGS_LIST}' /bin/bash ${CRON_SCRIPT} ${STAGES} ${TAG}"
 
 # 检测当前用户是否有 crontab 权限，自动选择 crontab 命令
 # 优先尝试普通 crontab，失败则尝试 sudo crontab -u $USER

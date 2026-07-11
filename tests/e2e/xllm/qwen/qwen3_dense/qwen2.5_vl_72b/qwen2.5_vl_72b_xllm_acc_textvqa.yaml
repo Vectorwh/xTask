@@ -44,7 +44,7 @@ port: 8800
 served_model_name: Qwen2.5-VL-72B-Instruct
 userid: 1048
 world_size: 8
-serving_wait_time: 60
+serving_wait_time: 10
 serving_extensiable_param:
   max_memory_utilization: 0.85
   enable_chunked_prefill: true

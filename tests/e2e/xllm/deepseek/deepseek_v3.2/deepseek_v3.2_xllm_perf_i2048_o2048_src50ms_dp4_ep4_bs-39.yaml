@@ -57,7 +57,7 @@ serving_extensiable_param:
   max_memory_utilization: 0.85
   max_seqs_per_batch: 48
   num_speculative_tokens: 3
-serving_wait_time: 290
+serving_wait_time: 10
 start_device_id: 0
 userid: 1048
 world_size: 16

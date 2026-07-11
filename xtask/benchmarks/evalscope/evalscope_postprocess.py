@@ -323,13 +323,13 @@ def find_evalscope_result_file(directory_path=".", init_entries=list(), evalscop
                 return result_file, target_dir
     
     logging.error("can not match evalscope result dir.")
-    return False, ""
+    return [], os.path.join(directory_path, date_dirs[0])
 
 def evalscope_acc_post_process(task_config, output_path, init_entries):
     evalscope_output_file, benchmark_outputdir = find_evalscope_result_file(output_path, init_entries, evalscope_type="acc", dataset_name=task_config.get("dataset_name").lower())
     if not evalscope_output_file:
         logging.error("evalscope acc的结果文件为空.")
-        return
+        return 0, benchmark_outputdir
     
     if evalscope_output_file[0] and os.path.exists(evalscope_output_file[0]):
         logging.info(f"evalscope acc的结果文件: {evalscope_output_file[0]}")
@@ -362,7 +362,7 @@ def evalscope_perf_post_process(task_config, output_path, init_entries):
     evalscope_output_file, benchmark_outputdir = find_evalscope_result_file(output_path, init_entries, evalscope_type="perf", dataset_name="")
     if not evalscope_output_file:
         logging.error("evalscope perf的结果文件为空.")
-        return None, ""
+        return None, benchmark_outputdir
 
     logging.info(f"evalscope perf的结果文件: {evalscope_output_file[0]}, {evalscope_output_file[1]}")
 

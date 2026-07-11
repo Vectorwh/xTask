@@ -42,7 +42,7 @@ port: 8800
 served_model_name: Qwen3-30B-A3B-Instruct-2507
 userid: 1048
 world_size: 4
-serving_wait_time: 90
+serving_wait_time: 10
 serving_extensiable_param:
   max_seqs_per_batch: 10
   enable_chunked_prefill: false

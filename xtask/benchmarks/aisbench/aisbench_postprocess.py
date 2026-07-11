@@ -486,10 +486,10 @@ def find_aisbench_directory(directory_path=".", init_entries=list(), aisbench_ty
     # 按日期排序（从新到旧）
     def extract_datetime(dir_name):
         try:
-            # 解析目录名中的日期时间
+            # 尝试根据指定的格式解析目录名中的日期时间
             return datetime.strptime(dir_name, "%Y%m%d_%H%M%S")
         except ValueError:
-            # 如果解析失败，返回一个很旧的日期
+            # 如果目录名格式不匹配导致解析失败，则返回一个很旧的日期
             return datetime.min
     
     # 按日期排序，最新的在前
@@ -503,6 +503,8 @@ def find_aisbench_directory(directory_path=".", init_entries=list(), aisbench_ty
             return data_dir
     
     logging.error("can not match aisbech result dir.")
+
+    return date_dirs[0]
 
 
 def get_aisbench_csv(aisbench_output_path, api_type, output_type="performances"):

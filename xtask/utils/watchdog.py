@@ -1,7 +1,9 @@
 # framework/container/container_watchdog.py
 import os
+import re
 import sys
 import time
+import shlex
 import threading
 import subprocess
 from pathlib import Path
@@ -796,13 +798,20 @@ class ContainerManagerWithWatchdog:
 class WatchdogConfig:
     """Watchdog 配置类，统一管理监控参数"""
     log_file: str  # 推理服务日志文件路径
-    success_keywords: List[str]  # 服务启动成功的关键词（任意匹配一个即可）
-    npu_card_id: int  # 要监控的NPU卡ID（如0、1）
-    target_pid: Optional[int] = None  # 要监控的推理服务进程PID（若未指定，从npu-smi解析）
+    success_keywords: List[str]  # 服务启动成��的关键词（任意匹配一个即可）
+    npu_card_ids: List[int]  # 要监控的NPU卡ID列表（如[0]、[0,1,2,3]）
+    target_pids: Optional[List[int]] = None  # 要监控的推理服务进程PID列表（若未指定，从npu-smi解析）
     target_process_name: Optional[str] = None  # 备选：通过进程名匹配（优先级低于PID）
     timeout: int = 300  # 监控超时时间（秒），默认5分钟
     log_check_interval: float = 1.0  # 日志文件检查间隔（秒）
     npu_check_interval: float = 2.0  # NPU进程检查间隔（秒）
+
+    def __post_init__(self):
+        # 兼容单个int传入，自动包装为list
+        if isinstance(self.npu_card_ids, int):
+            self.npu_card_ids = [self.npu_card_ids]
+        if isinstance(self.target_pids, int):
+            self.target_pids = [self.target_pids]
 
 class LogMonitorProcess(Process):
     """进程A：监控日志文件中是否出现启动成功关键词"""
@@ -821,7 +830,8 @@ class LogMonitorProcess(Process):
         if new_lines:
             for line in new_lines:
                 line = line.strip()
-                if line.startswith("E") or "[ERROR]" in line:
+                # if line.startswith("E") or "[ERROR]" in line:
+                if "[ERROR]" in line:
                     logging.error(f"监控到异常日志：\n{line}")
                     self.exit_event.set()
                     return
@@ -881,84 +891,137 @@ class NpuProcessMonitorProcess(Process):
         self.config = config
         self.exit_event = exit_event if exit_event else Event()  # 全局退出信号
 
-    def _get_npu_processes(self) -> List[dict]:
-        """调用npu-smi获取指定NPU卡的进程信息"""
+    def _get_npu_processes(self, card_id: int) -> List[dict]:
+        """调用 npu-smi 获取指定 NPU 卡上的进程信息。
+
+        实际执行命令：
+            npu-smi info -t proc-mem -i <chip_id> -c <core_id>
+        其中 chip_id = card_id // 2（对 2 取商），core_id = card_id % 2（对 2 取余）。
+
+        命令回显有两种形态：
+            1) 存在进程（可能多行）：
+               Process id:1679419 Process name:xllm              Process memory(MB):9229
+            2) 无进程：
+               No process in device
+
+        执行位置：
+            - 固定在 host 上直接执行 npu-smi（本类不做容器适配）。
+
+        Returns:
+            进程信息列表，每个元素包含以下键（与调用方兼容）：
+                - process_id:        进程号（字符串）
+                - process_name:      进程名
+                - process_memory_mb: 进程占用显存(MB)，解析失败时为空字符串
+            无进程或异常时返回空列表 []。
+        """
         try:
-            # npu-smi 命令格式：npu-smi info -t process -i <card_id>
-            # cmd = ["npu-smi", "info", "-t", "process", "-i", str(self.config.npu_card_id)]
-            cmd = ["npu-smi", "info", "|", "grep", f"NPU {str(self.config.npu_card_id)}", 
-                   "|", "grep", "No running processes found in"]
+            safe_card_id = int(card_id)
+            chip_id = safe_card_id // 2   # -i 参数：对 2 取商
+            core_id = safe_card_id % 2    # -c 参数：对 2 取余
+            cmd = self._build_npu_smi_command(chip_id, core_id)
             result = subprocess.run(
                 cmd,
+                shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 encoding="utf-8",
                 timeout=10
             )
             if result.returncode != 0:
-                logging.error(f"执行npu-smi失败：{result.stderr}")
+                logging.error(f"执行npu-smi失败（NPU卡{card_id}）：{result.stderr}")
                 return []
 
-            # 解析npu-smi输出（不同昇腾版本输出格式略有差异，需根据实际适配）
             processes = []
-            # 示例输出格式（需根据实际环境调整解析逻辑）：
-            # NPU ID : 0
-            # Process ID : 12345
-            # Process Name : python
-            # User Name : root
-            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            process_info = {}
-            for line in lines:
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    key = key.strip().lower().replace(" ", "_")
-                    value = value.strip()
-                    process_info[key] = value
-                    if key == "process_id":
-                        # 补全进程名（若后续行有）
-                        if "process_name" in process_info:
-                            processes.append(process_info)
-                            process_info = {}
+            for raw_line in result.stdout.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                # 无进程标志：直接返回空列表
+                if "No process in device" in line:
+                    return []
+                # 仅解析包含进程信息的行
+                if "Process id" not in line:
+                    continue
+                proc = self._parse_proc_mem_line(line)
+                if proc.get("process_id"):
+                    processes.append(proc)
             return processes
 
         except subprocess.TimeoutExpired:
-            logging.error("npu-smi命令执行超时")
+            logging.error(f"npu-smi命令执行超时（NPU卡{card_id}）")
             return []
         except Exception as e:
-            logging.error(f"解析npu-smi输出异常：{str(e)}", exc_info=True)
+            logging.error(f"解析npu-smi输出异常（NPU卡{card_id}）：{str(e)}", exc_info=True)
             return []
 
+    def _build_npu_smi_command(self, chip_id: int, core_id: int) -> str:
+        """构造在 host 上执行的 npu-smi 命令字符串。
+
+        chip_id / core_id 已是 int，直接拼接。
+        """
+        return f"npu-smi info -t proc-mem -i {int(chip_id)} -c {int(core_id)}"
+
+    @staticmethod
+    def _parse_proc_mem_line(line: str) -> dict:
+        """解析一行 proc-mem 回显，形如：
+            Process id:1679419 Process name:xllm              Process memory(MB):9229
+        字段之间以多个空格分隔，字段内部以冒号分隔 key/value。
+        采用正则提取，兼容进程名含空格前后的多余空白。
+        """
+        proc = {"process_id": "", "process_name": "", "process_memory_mb": ""}
+        pid_match = re.search(r"Process\s+id\s*:\s*(\d+)", line)
+        if pid_match:
+            proc["process_id"] = pid_match.group(1)
+        # 进程名：截取到 "Process memory" 之前，去除首尾空白
+        name_match = re.search(r"Process\s+name\s*:\s*(.*?)\s*(?:Process\s+memory|$)", line)
+        if name_match:
+            proc["process_name"] = name_match.group(1).strip()
+        mem_match = re.search(r"Process\s+memory\s*\(MB\)\s*:\s*(\d+)", line)
+        if mem_match:
+            proc["process_memory_mb"] = mem_match.group(1)
+        return proc
+
     def _is_target_process_alive(self) -> bool:
-        """检查目标进程是否存活"""
-        # 1. 优先通过PID检查
-        if self.config.target_pid:
-            try:
-                # 向进程发送0信号，检查是否存在（Unix/Linux）
-                os.kill(self.config.target_pid, 0)
-                return True
-            except OSError:
-                logging.info(f"目标进程PID {self.config.target_pid} 已退出")
-                return False
+        """检查目标进程/NPU卡是否存活。
+        - PID模式：所有target_pids都需存活，任一退出即返回False；
+        - 进程名模式：任一NPU卡找到即存活，所有卡都没找到才返回False；
+        - 默认模式：所有NPU卡都需有进程，任一卡为空即返回False。
+        """
+        # 1. 优先通过PID列表检查：所有PID都需存活
+        if self.config.target_pids:
+            for pid in self.config.target_pids:
+                try:
+                    # 向进程发送0信号，检查是否存在（Unix/Linux）
+                    os.kill(pid, 0)
+                except OSError:
+                    logging.info(f"目标进程PID {pid} 已退出")
+                    return False
+            return True
 
-        # 2. 备选：通过进程名+NPU卡匹配
+        # 2. 备选：通过进程名+NPU卡匹配，任一卡找到即存活，所有卡都没找到才返回False
         if self.config.target_process_name:
-            npu_processes = self._get_npu_processes()
-            for proc in npu_processes:
-                if proc.get("process_name", "").lower() == self.config.target_process_name.lower():
+            for card_id in self.config.npu_card_ids:
+                npu_processes = self._get_npu_processes(card_id)
+                found = any(
+                    proc.get("process_name", "").lower() == self.config.target_process_name.lower()
+                    for proc in npu_processes
+                )
+                if found:
                     return True
-            logging.info(f"NPU卡{self.config.npu_card_id}上未找到进程名 {self.config.target_process_name}")
+            logging.info(f"所有NPU卡{self.config.npu_card_ids}上均未找到进程名 {self.config.target_process_name}")
             return False
 
-        # 3. 未指定PID/进程名，默认检查NPU卡是否有进程（适配任意进程场景）
-        npu_processes = self._get_npu_processes()
-        if not npu_processes:
-            logging.info(f"NPU卡{self.config.npu_card_id}上无运行进程")
-            return False
+        # 3. 未指定PID/进程名，默认检查每张NPU卡是否有进程，任一卡为空即异常
+        for card_id in self.config.npu_card_ids:
+            npu_processes = self._get_npu_processes(card_id)
+            if not npu_processes:
+                logging.info(f"NPU卡{card_id}上无运行进程")
+                return False
         return True
 
     def run(self):
         """进程主逻辑"""
-        logging.info(f"启动NPU进程监控，NPU卡ID：{self.config.npu_card_id}，目标PID：{self.config.target_pid}")
+        logging.info(f"启动NPU进程监控，NPU卡ID列表：{self.config.npu_card_ids}，目标PID列表：{self.config.target_pids}")
         while not self.exit_event.is_set():
             # 检查进程是否存活
             if not self._is_target_process_alive():
@@ -990,11 +1053,11 @@ class WatchdogManager:
         self.log_monitor.start()
 
         # 2. 创建并启动NPU进程监控进程（B）
-        self.npu_monitor = NpuProcessMonitorProcess(
-            config=self.config,
-            exit_event=self.exit_event
-        )
-        self.npu_monitor.start()
+        #self.npu_monitor = NpuProcessMonitorProcess(
+        #    config=self.config,
+        #    exit_event=self.exit_event
+        #)
+        #self.npu_monitor.start()
 
         # 3. 主进程监控超时和退出信号
         logging.info(f"Watchdog启动完成，超时时间：{self.config.timeout}秒")
@@ -1047,3 +1110,202 @@ class WatchdogManager:
         logging.info("手动触发Watchdog退出")
         self.exit_event.set()
         self._join_processes()
+
+
+class NpuProcessGuard:
+    """轻量级 NPU 进程状态守护器（线程实现，仅监控进程状态，不监控日志）。
+
+    典型用法：在执行一条长时间阻塞的容器命令（如 benchmark）期间，
+    后台定时检查 NPU 卡上的进程状态，任一 NPU 进程异常即置位 abort_event，
+    由外部命令执行逻辑感知该事件并中断执行、进入错误处理。
+
+    - 复用 npu-smi 检查逻辑，遍历 npu_card_ids 中所有卡；
+    - 检查语义：任一卡出现异常（无目标进程/无运行进程）即视为异常，触发中断。
+    """
+
+    def __init__(
+        self,
+        npu_card_ids: List[int],
+        abort_event: Optional[threading.Event] = None,
+        target_process_name: Optional[str] = None,
+        check_interval: float = 300.0,
+        startup_grace: float = 0.0,
+        container_name: Optional[str] = None,
+    ):
+        """
+        Args:
+            npu_card_ids: 要监控的 NPU 卡 ID 列表（支持单个 int 自动包装）
+            abort_event: 异常时置位的中断信号（不传则内部创建）
+            target_process_name: 可选，按进程名匹配；不传则只检查卡上是否有进程
+            check_interval: 检查间隔（秒）
+            startup_grace: 启动宽限期（秒），期间不判定异常，避免进程尚未拉起误报
+            container_name: 可选，容器名；传入则 npu-smi 通过
+                `docker exec -i <container_name> sh -c '<npu-smi ...>'` 在容器内执行，
+                不传则在 host 上直接执行。
+        """
+        if isinstance(npu_card_ids, int):
+            npu_card_ids = [npu_card_ids]
+        self.npu_card_ids = npu_card_ids
+        self.abort_event = abort_event if abort_event is not None else threading.Event()
+        self.target_process_name = target_process_name
+        self.check_interval = check_interval
+        self.startup_grace = startup_grace
+        self.container_name = container_name
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.aborted_reason: Optional[str] = None
+
+    def _get_npu_processes(self, card_id: int) -> List[dict]:
+        """调用 npu-smi 获取指定 NPU 卡上的进程信息。
+
+        实际执行命令：
+            npu-smi info -t proc-mem -i <chip_id> -c <core_id>
+        其中 chip_id = card_id // 2（对 2 取商），core_id = card_id % 2（对 2 取余）。
+
+        命令回显有两种形态：
+            1) 存在进程（可能多行）：
+               Process id:1679419 Process name:xllm              Process memory(MB):9229
+            2) 无进程：
+               No process in device
+
+        执行位置：
+            - 固定在 host 上直接执行 npu-smi（本类不做容器适配）。
+
+        Returns:
+            进程信息列表，每个元素包含以下键（与调用方兼容）：
+                - process_id:        进程号（字符串）
+                - process_name:      进程名
+                - process_memory_mb: 进程占用显存(MB)，解析失败时为空字符串
+            无进程或异常时返回空列表 []。
+        """
+        try:
+            safe_card_id = int(card_id)
+            chip_id = safe_card_id // 2   # -i 参数：对 2 取商
+            core_id = safe_card_id % 2    # -c 参数：对 2 取余
+            cmd = self._build_npu_smi_command(chip_id, core_id)
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+                timeout=10
+            )
+            if result.returncode != 0:
+                logging.error(f"执行npu-smi失败（NPU卡{card_id}）：{result.stderr}")
+                return []
+
+            processes = []
+            for raw_line in result.stdout.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                # 无进程标志：直接返回空列表
+                if "No process in device" in line:
+                    return []
+                # 仅解析包含进程信息的行
+                if "Process id" not in line:
+                    continue
+                proc = self._parse_proc_mem_line(line)
+                if proc.get("process_id"):
+                    processes.append(proc)
+            return processes
+
+        except subprocess.TimeoutExpired:
+            logging.error(f"npu-smi命令执行超时（NPU卡{card_id}）")
+            return []
+        except Exception as e:
+            logging.error(f"解析npu-smi输出异常（NPU卡{card_id}）：{str(e)}", exc_info=True)
+            return []
+
+    def _build_npu_smi_command(self, chip_id: int, core_id: int) -> str:
+        """构造最终要执行的 shell 命令字符串。
+
+        - 无 container_name：直接在 host 执行 npu-smi；
+        - 有 container_name：包装成 `docker exec -i <container_name> sh -c '<npu-smi ...>'`
+          在容器内执行。
+
+        chip_id / core_id 已是 int，容器名用 shlex.quote 转义，避免注入。
+        """
+        npu_smi_cmd = (
+            f"npu-smi info -t proc-mem -i {int(chip_id)} -c {int(core_id)}"
+        )
+        if self.container_name:
+            return (
+                f"docker exec -i {shlex.quote(str(self.container_name))} "
+                f"sh -c {shlex.quote(npu_smi_cmd)}"
+            )
+        return npu_smi_cmd
+
+    @staticmethod
+    def _parse_proc_mem_line(line: str) -> dict:
+        """解析一行 proc-mem 回显，形如：
+            Process id:1679419 Process name:xllm              Process memory(MB):9229
+        字段之间以多个空格分隔，字段内部以冒号分隔 key/value。
+        采用正则提取，兼容进程名含空格前后的多余空白。
+        """
+        proc = {"process_id": "", "process_name": "", "process_memory_mb": ""}
+        pid_match = re.search(r"Process\s+id\s*:\s*(\d+)", line)
+        if pid_match:
+            proc["process_id"] = pid_match.group(1)
+        # 进程名：截取到 "Process memory" 之前，去除首尾空白
+        name_match = re.search(r"Process\s+name\s*:\s*(.*?)\s*(?:Process\s+memory|$)", line)
+        if name_match:
+            proc["process_name"] = name_match.group(1).strip()
+        mem_match = re.search(r"Process\s+memory\s*\(MB\)\s*:\s*(\d+)", line)
+        if mem_match:
+            proc["process_memory_mb"] = mem_match.group(1)
+        return proc
+
+    def _check_abnormal_card(self) -> Optional[str]:
+        """检查是否存在异常的 NPU 卡。任一卡异常即返回异常描述，正常返回 None。"""
+        for card_id in self.npu_card_ids:
+            npu_processes = self._get_npu_processes(card_id)
+            if self.target_process_name:
+                found = any(
+                    proc.get("process_name", "").lower() == self.target_process_name.lower()
+                    for proc in npu_processes
+                )
+                if not found:
+                    return f"NPU卡{card_id}未找到目标进程 {self.target_process_name}"
+            else:
+                if not npu_processes:
+                    return f"NPU卡{card_id}上无运行进程"
+        return None
+
+    def _run(self):
+        logging.info(f"启动NPU进程守护，NPU卡ID列表：{self.npu_card_ids}，检查间隔：{self.check_interval}s")
+        if self.startup_grace > 0:
+            self._stop_event.wait(self.startup_grace)
+        while not self._stop_event.is_set() and not self.abort_event.is_set():
+            reason = self._check_abnormal_card()
+            if reason:
+                self.aborted_reason = reason
+                logging.error(f"NPU进程状态异常，触发中断：{reason}")
+                self.abort_event.set()
+                return
+            self._stop_event.wait(self.check_interval)
+
+    def start(self):
+        """启动后台守护线程"""
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, name="NpuProcessGuard", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """停止守护线程"""
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=self.check_interval + 2)
+
+    def is_aborted(self) -> bool:
+        return self.abort_event.is_set()
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()

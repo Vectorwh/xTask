@@ -211,9 +211,9 @@ def wait_xllm_serv_start(task_config, serving_wait_time, output_file_path: str):
     current_pid = os.getpid()
     test_config = WatchdogConfig(
         log_file=os.path.join(output_file_path, f"log/node_{task_config.get('start_device_id')}.log"),  # 推理服务日志路径
-        success_keywords=["is serving on port", "服务启动完成"],  # 启动成功关键词
-        npu_card_id=task_config.get("start_device_id"),  # 监控0号NPU卡
-        target_pid=current_pid,  # 推理服务PID（可从容器启动时获取）
+        success_keywords=["Brpc Server started on port", "服务启动完成"],  # 启动成功关键词
+        npu_card_ids=[task_config.get("start_device_id")],  # 监控的NPU卡列表
+        target_pids=[current_pid],  # 推理服务PID列表（可从容器启动时获取）
         timeout=300,  # 5分钟超时
         log_check_interval=1.0,
         npu_check_interval=2.0
