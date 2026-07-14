@@ -104,10 +104,10 @@ class OpenMeClient:
             "case_exec_time": str(int(result['execution_time'])) + "s",
             "xllm_log": f"[NodeLOG](http://{host_addr}/" + report_path + "/log/)"
         }
-
+        
         self.all_case_num = self.all_case_num + 1
         if result["success"]:
-            case_detail["case_status"] = [
+            case_detail["case_result"] = [
                 {
                     "color": "green",
                     "text": "成功"
@@ -115,7 +115,7 @@ class OpenMeClient:
             ]
         else:
             self.fail_case_num = self.fail_case_num + 1
-            case_detail["case_status"] = [
+            case_detail["case_result"] = [
                 {
                     "color": "red",
                     "text": "失败"
@@ -123,14 +123,14 @@ class OpenMeClient:
             ]
 
         if 'benchmark_success' in result.keys() and result['benchmark_success']:
-            case_detail['case_result'] = [
+            case_detail['case_status'] = [
                 {
                     "color": "green",
                     "text": "成功"
                 }
             ]
         else:
-            case_detail["case_result"] = [
+            case_detail["case_status"] = [
                 {
                     "color": "red",
                     "text": "失败"

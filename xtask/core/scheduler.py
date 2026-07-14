@@ -756,14 +756,15 @@ def run_scheduler(task_yaml_path: str, output_file_path: str, args = None) -> Di
             logs = container_manager.get_container_logs(result["container_id"], tail=100)
             result["logs"] = logs
             
-            # 20. 标记执行成功
-            result["success"] = True
+            # 20. 执行成功标记初始False
+            result["success"] = False
             result["message"] = f"Task scheduled successfully in container {result['container_id']}"
 
             ret = verify_result(result, task_config)
             if not ret:
                 logging.error("verify result failed.")
-                result["success"] = False
+            else:
+                result["success"] = True
         else:
             result["message"] = f"Service health check failed: {health_result.stderr}"
             logging.error(result["message"])

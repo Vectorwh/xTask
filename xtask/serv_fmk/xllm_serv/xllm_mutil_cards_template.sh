@@ -63,13 +63,13 @@ for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
-  LOG_FILE="$LOG_DIR/node_$DEVICE.log"
+  LOG_FILE="$LOG_DIR/node_$i.log"
   xllm_command=(
   nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) xllm \
 #   xllm \
     --model "$MODEL_PATH" \
     --port "$PORT" \
-    --devices="npu:$DEVICE" \
+    --device_id="$DEVICE" \
     --master_node_addr="$MASTER_NODE_ADDR" \
     --nnodes="$NNODES" \
     --node_rank="$i" \
