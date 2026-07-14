@@ -32,11 +32,13 @@ git config --global --add safe.directory '*'
 
 # 编译：安装 pre-commit 后执行 setup.py 构建
 pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple
-python setup.py build --device npu
+# python setup.py build --device npu
+python setup.py bdist_wheel --device npu
 
 # 编译完执行生成件归档
-cp -r /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/ "${WORK_ROOT}/pkg/xllm/"
-cp "${XLLM_DIR}/build/xllm/core/server/xllm" "${WORK_ROOT}/pkg/xllm/"
+cp -rf /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/ "${WORK_ROOT}/pkg/xllm/"
+#cp "${XLLM_DIR}/build/xllm/core/server/xllm" "${WORK_ROOT}/pkg/xllm/"
+cp -f "${XLLM_DIR}"/dist/* "${WORK_ROOT}/pkg/xllm/"
 
 # 由外层 prepare_xllm.sh 通过 -e HOST_UID / -e HOST_GID 传入宿主机启动用户的 uid/gid，
 # 归档后把 pkg/xllm 目录及其子文件所有者改回宿主机用户。

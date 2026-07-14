@@ -60,13 +60,13 @@ MASTER_NODE_ADDR="$LOCAL_IP:$PROGRESS_CONN_PORT"
 # 启动服务节点
 export ASCEBD_RT_VISIBLE_DEVICES=$START_DEVICE
 LOG_DIR="log"
-LOG_FILE="$LOG_DIR/node_$START_DEVICE.log"
+LOG_FILE="$LOG_DIR/node_0.log"
 
 xllm_command=(
   xllm \
   --model "$MODEL_PATH" \
   --port "$START_PORT" \
-  --devices="npu:$START_DEVICE" \
+  --device_id="$START_DEVICE" \
   --master_node_addr="$MASTER_NODE_ADDR" \
   --nnodes="$WORLD_SIZE" \
   --node_rank=0 \
