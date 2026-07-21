@@ -45,7 +45,6 @@ served_model_name: GLM-5-final-w8a8
 serving_extensiable_param:
   block_size: 128
   dp_size: 2
-  draft_devices: npu:$DEVICE
   draft_model: /export/home/models/GLM-5-final-w8a8-MTP
   enable_chunked_prefill: true
   enable_graph: false

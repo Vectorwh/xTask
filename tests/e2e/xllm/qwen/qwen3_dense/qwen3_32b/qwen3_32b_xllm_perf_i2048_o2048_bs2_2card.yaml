@@ -37,7 +37,7 @@ host_addr: 11.87.191.121
 metrics: perf
 model_path: /export/home/models/Qwen3-32B
 num_devices: 4
-start_device_id: 12
+start_device_id: 0
 port: 8100
 hccl_if_port: 43539
 progress_conn_port: 9690

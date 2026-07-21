@@ -66,10 +66,9 @@ xllm_command=(
   xllm \
   --model "$MODEL_PATH" \
   --port "$START_PORT" \
-  --device_id="$START_DEVICE" \
   --master_node_addr="$MASTER_NODE_ADDR" \
   --nnodes="$WORLD_SIZE" \
-  --node_rank=0 \
+  --node_rank="$START_DEVICE" \
   --communication_backend="$COMMUNICATION_BACKEND" \
   $SERVING_EXTENSIABLE_PARAM
 )

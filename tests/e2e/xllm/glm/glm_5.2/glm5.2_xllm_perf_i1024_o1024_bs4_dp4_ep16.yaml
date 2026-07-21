@@ -55,7 +55,6 @@ serving_extensiable_param:
   dp_size: 4
   ep_size: 16
   draft_model: /export/home/models/GLM-5.2-w8a8-mtponly
-  draft_devices: "npu:$DEVICE"
   num_speculative_tokens: 3
   enable_graph: true
   enable_graph_mode_decode_no_padding: true
