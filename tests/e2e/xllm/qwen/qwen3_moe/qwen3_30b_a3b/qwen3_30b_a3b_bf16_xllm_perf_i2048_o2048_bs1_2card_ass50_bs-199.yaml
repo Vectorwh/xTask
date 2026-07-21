@@ -41,7 +41,6 @@ port: 8800
 served_model_name: Qwen3-30B-A3B-Instruct-2507
 serving_extensiable_param:
   block_size: 128
-  draft_devices: npu:$DEVICE
   draft_model: /export/home/models/Qwen3-30B-A3B-Instruct-2507-Eagle3
   enable_chunked_prefill: false
   enable_graph: true

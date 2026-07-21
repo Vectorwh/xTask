@@ -54,7 +54,6 @@ serving_extensiable_param:
   dp_size: 4
   ep_size: 4
   draft_model: /export/home/models/DeepSeek-V3.2-w8a8-mtp
-  draft_devices: "npu:$DEVICE"
   num_speculative_tokens: 3
   enable_graph: false
   enable_graph_mode_decode_no_padding: false

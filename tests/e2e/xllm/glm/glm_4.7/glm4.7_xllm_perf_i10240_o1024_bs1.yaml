@@ -53,7 +53,6 @@ serving_extensiable_param:
   dp_size: 1
   ep_size: 1
   draft_model: /export/home/models/GLM-4.7-MTP
-  draft_devices: "npu:$DEVICE"
   num_speculative_tokens: 3
   enable_graph: true
   enable_graph_mode_decode_no_padding: true

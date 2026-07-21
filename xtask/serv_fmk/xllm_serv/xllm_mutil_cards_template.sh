@@ -69,10 +69,9 @@ do
 #   xllm \
     --model "$MODEL_PATH" \
     --port "$PORT" \
-    --device_id="$DEVICE" \
     --master_node_addr="$MASTER_NODE_ADDR" \
     --nnodes="$NNODES" \
-    --node_rank="$i" \
+    --node_rank="$DEVICE" \
     --communication_backend="$COMMUNICATION_BACKEND" \
     $SERVING_EXTENSIABLE_PARAM
   )

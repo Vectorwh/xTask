@@ -45,7 +45,6 @@ served_model_name: DeepSeek-R1-w8a8
 serving_extensiable_param:
   block_size: 128
   dp_size: 4
-  draft_devices: npu:$DEVICE
   draft_model: /export/home/models/DeepSeek-R1-mtp
   enable_chunked_prefill: false
   enable_graph: false
