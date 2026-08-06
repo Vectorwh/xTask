@@ -1,0 +1,60 @@
+case_name: 06_multihost_aisbench_acc
+engine_type: xllm
+model_path: /export/home/models/DeepSeek-V3.2-w8a8
+served_model_name: DeepSeek-V3.2-w8a8
+metrics: acc
+dataset_name: gsm8k
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: vllm_api_general_chat
+    dataset_conf: gsm8k_gen_0_shot_noncot_chat_prompt
+    acc_dataset_len: 200
+    batch_size: 8
+    output_len: 32768
+    request_rate: 8
+    baseline: 96.0
+    threshold: 0.04
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: false
+
+deployment:
+  sync_workspace: true
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    local_port: 8800
+    serving_extensiable_param: &service_params
+      max_memory_utilization: 0.85
+      max_seqs_per_batch: 10
+      enable_chunked_prefill: true
+      enable_schedule_overlap: false
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      dp_size: 4
+      ep_size: 8
+      enable_graph: false
+      enable_graph_mode_decode_no_padding: false
+  - name: worker-0
+    host: 11.87.191.121
+    role: worker
+    rank_start: 16
+    device_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    local_port: 8800
+    serving_extensiable_param: *service_params

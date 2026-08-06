@@ -1,0 +1,111 @@
+{
+  "version": "1.2",
+  "server_count": "1",
+  "server_list": [
+    {
+      "server_id": "11.87.191.75",
+      "host_ip": "11.87.191.75",
+      "container_ip": "11.87.191.75",
+      "device": [
+        {
+          "device_id": "0",
+          "device_ip": "192.9.2.199",
+          "rank_id": "0",
+          "super_device_id": "37748736"
+        },
+        {
+          "device_id": "1",
+          "device_ip": "192.9.3.198",
+          "rank_id": "1",
+          "super_device_id": "37814273"
+        },
+        {
+          "device_id": "2",
+          "device_ip": "192.9.2.197",
+          "rank_id": "2",
+          "super_device_id": "38010882"
+        },
+        {
+          "device_id": "3",
+          "device_ip": "192.9.3.196",
+          "rank_id": "3",
+          "super_device_id": "38076419"
+        },
+        {
+          "device_id": "4",
+          "device_ip": "192.9.2.195",
+          "rank_id": "4",
+          "super_device_id": "38273028"
+        },
+        {
+          "device_id": "5",
+          "device_ip": "192.9.3.194",
+          "rank_id": "5",
+          "super_device_id": "38338565"
+        },
+        {
+          "device_id": "6",
+          "device_ip": "192.9.2.193",
+          "rank_id": "6",
+          "super_device_id": "38535174"
+        },
+        {
+          "device_id": "7",
+          "device_ip": "192.9.3.192",
+          "rank_id": "7",
+          "super_device_id": "38600711"
+        },
+        {
+          "device_id": "8",
+          "device_ip": "192.9.2.191",
+          "rank_id": "8",
+          "super_device_id": "38797320"
+        },
+        {
+          "device_id": "9",
+          "device_ip": "192.9.3.190",
+          "rank_id": "9",
+          "super_device_id": "38862857"
+        },
+        {
+          "device_id": "10",
+          "device_ip": "192.9.2.189",
+          "rank_id": "10",
+          "super_device_id": "39059466"
+        },
+        {
+          "device_id": "11",
+          "device_ip": "192.9.3.188",
+          "rank_id": "11",
+          "super_device_id": "39125003"
+        },
+        {
+          "device_id": "12",
+          "device_ip": "192.9.2.187",
+          "rank_id": "12",
+          "super_device_id": "39321612"
+        },
+        {
+          "device_id": "13",
+          "device_ip": "192.9.3.186",
+          "rank_id": "13",
+          "super_device_id": "39387149"
+        },
+        {
+          "device_id": "14",
+          "device_ip": "192.9.2.185",
+          "rank_id": "14",
+          "super_device_id": "39583758"
+        },
+        {
+          "device_id": "15",
+          "device_ip": "192.9.3.184",
+          "rank_id": "15",
+          "super_device_id": "39649295"
+        }
+      ],
+      "host_nic_ip": "reserve"
+    }
+  ],
+  "status": "completed"
+}

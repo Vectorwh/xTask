@@ -1,0 +1,59 @@
+case_name: 04_single_evalscope_acc
+engine_type: xllm
+model_path: /export/home/models/Qwen3-VL-8B-Instruct
+served_model_name: Qwen3-VL-8B-Instruct
+metrics: acc
+dataset_name: mmmu
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+benchmark:
+  benchmark_type: evalscope
+  acc:
+    case_type: accuracy
+    acc_dataset_len: 30
+    batch_size: 4
+    timeout: 3600
+    endpoint: /v1
+    baseline: 0.30
+    threshold: 0.05
+    generation_config:
+      temperature: 1
+      top_p: 0.95
+      top_k: 20
+      max_tokens: 30000
+      retries: 5
+    dataset_args:
+      mmmu:
+        dataset_id: /xllm_test_060/datasets/mmmu
+        subset_list: [Music]
+        split: validation
+
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_seqs_per_batch: 10
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: true
+      enable_shm: true
+      block_size: 128
+      backend: vlm
+      max_encoder_cache_size: 128
+      limit_image_per_prompt: 8
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true

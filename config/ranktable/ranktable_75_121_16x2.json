@@ -1,0 +1,68 @@
+{
+    "version": "1.2",
+    "server_count": "2",
+    "server_list": [
+        {
+            "server_id": "11.87.191.75",
+            "host_ip": "11.87.191.75",
+            "container_ip":"11.87.191.75",
+            "device": [
+                { "device_id": "0", "device_ip": "192.9.2.199", "rank_id": "0", "super_device_id": "37748736"},
+                { "device_id": "1", "device_ip": "192.9.3.198", "rank_id": "1", "super_device_id": "37814273"},
+                { "device_id": "2", "device_ip": "192.9.2.197", "rank_id": "2", "super_device_id": "38010882"},
+                { "device_id": "3", "device_ip": "192.9.3.196", "rank_id": "3", "super_device_id": "38076419"},
+                { "device_id": "4", "device_ip": "192.9.2.195", "rank_id": "4", "super_device_id": "38273028"},
+                { "device_id": "5", "device_ip": "192.9.3.194", "rank_id": "5", "super_device_id": "38338565"},
+                { "device_id": "6", "device_ip": "192.9.2.193", "rank_id": "6", "super_device_id": "38535174"},
+                { "device_id": "7", "device_ip": "192.9.3.192", "rank_id": "7", "super_device_id": "38600711"},
+                { "device_id": "8", "device_ip": "192.9.2.191", "rank_id": "8", "super_device_id": "38797320"},
+                { "device_id": "9", "device_ip": "192.9.3.190", "rank_id": "9", "super_device_id": "38862857"},
+                { "device_id": "10", "device_ip": "192.9.2.189", "rank_id": "10", "super_device_id": "39059466"},
+                { "device_id": "11", "device_ip": "192.9.3.188", "rank_id": "11", "super_device_id": "39125003"},
+                { "device_id": "12", "device_ip": "192.9.2.187", "rank_id": "12", "super_device_id": "39321612"},
+                { "device_id": "13", "device_ip": "192.9.3.186", "rank_id": "13", "super_device_id": "39387149"},
+                { "device_id": "14", "device_ip": "192.9.2.185", "rank_id": "14", "super_device_id": "39583758"},
+                { "device_id": "15", "device_ip": "192.9.3.184", "rank_id": "15", "super_device_id": "39649295"}
+            ],
+            "host_nic_ip": "reserve"
+        },
+        {
+            "server_id": "11.87.191.121",
+            "host_ip": "11.87.191.121",
+            "container_ip":"11.87.191.121",
+            "device": [
+                { "device_id": "0", "device_ip": "192.47.2.199", "rank_id": "16", "super_device_id": "197132288"},
+                { "device_id": "1", "device_ip": "192.47.3.198", "rank_id": "17", "super_device_id": "197197825"},
+                { "device_id": "2", "device_ip": "192.47.2.197", "rank_id": "18", "super_device_id": "197394434"},
+                { "device_id": "3", "device_ip": "192.47.3.196", "rank_id": "19", "super_device_id": "197459971"},
+                { "device_id": "4", "device_ip": "192.47.2.195", "rank_id": "20", "super_device_id": "197656580"},
+                { "device_id": "5", "device_ip": "192.47.3.194", "rank_id": "21", "super_device_id": "197722117"},
+                { "device_id": "6", "device_ip": "192.47.2.193", "rank_id": "22", "super_device_id": "197918726"},
+                { "device_id": "7", "device_ip": "192.47.3.192", "rank_id": "23", "super_device_id": "197984263"},
+                { "device_id": "8", "device_ip": "192.47.2.191", "rank_id": "24", "super_device_id": "198180872"},
+                { "device_id": "9", "device_ip": "192.47.3.190", "rank_id": "25", "super_device_id": "198246409"},
+                { "device_id": "10", "device_ip": "192.47.2.189", "rank_id": "26", "super_device_id": "198443018"},
+                { "device_id": "11", "device_ip": "192.47.3.188", "rank_id": "27", "super_device_id": "198508555"},
+                { "device_id": "12", "device_ip": "192.47.2.187", "rank_id": "28", "super_device_id": "198705164"},
+                { "device_id": "13", "device_ip": "192.47.3.186", "rank_id": "29", "super_device_id": "198770701"},
+                { "device_id": "14", "device_ip": "192.47.2.185", "rank_id": "30", "super_device_id": "198967310"},
+                { "device_id": "15", "device_ip": "192.47.3.184", "rank_id": "31", "super_device_id": "199032847"}
+            ],
+            "host_nic_ip": "reserve"
+        }
+    ],
+    "super_pod_list": [
+        {
+            "super_pod_id": "2",
+            "server_list": [
+                {
+                    "server_id": "11.87.191.75"
+                },
+                {
+                    "server_id": "11.87.191.121"
+                }
+            ]
+        }
+    ],
+    "status": "completed"
+}

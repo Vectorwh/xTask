@@ -30,6 +30,20 @@ class AisbenchResult:
         """计算结果摘要"""
         if not self.parameters:
             raise ValueError("没有可用的性能参数数据")
+
+        json_data = self.metadata.get('json_data') or {}
+
+        def get_json_metric(name, default=0):
+            value = json_data.get(name, default)
+            if isinstance(value, dict):
+                value = value.get('total', default)
+            if isinstance(value, (int, float)):
+                return value
+            if isinstance(value, str):
+                match = re.search(r'[-]?\d*\.?\d+', value)
+                if match:
+                    return float(match.group())
+            return default
         
         # 获取total阶段的指标
         total_params = {}
@@ -48,12 +62,15 @@ class AisbenchResult:
         # 创建摘要
         self.summary = ResultSummary(
             total_requests=int(e2el.n if hasattr(e2el, 'n') else 0),
-            concurrency=1,  # 需要从其他地方获取
-            max_concurrency=1,  # 需要从其他地方获取
-            request_throughput=float(e2el.n / (e2el.average / 1000)) if e2el.average > 0 else 0.0,
+            failed_requests=int(get_json_metric('Failed Requests')),
+            concurrency=int(get_json_metric('Concurrency', 1)),
+            max_concurrency=int(get_json_metric('Max Concurrency', 1)),
+            request_throughput=float(get_json_metric('Request Throughput')),
             input_tokens_avg=input_tokens.average,
             output_tokens_avg=output_tokens.average,
-            output_token_throughput=output_throughput.average,
+            output_tps_avg=output_throughput.average,
+            output_tps_total=float(get_json_metric('Output Token Throughput')),
+            summary_tps_total=float(get_json_metric('Total Token Throughput')),
             ttft_avg=ttft.average,
             ttft_p90=ttft.p90,
             ttft_p99=ttft.p99,
@@ -91,12 +108,15 @@ class AisbenchResult:
         if self.summary:
             result['summary'] = {
                 'total_requests': self.summary.total_requests,
+                'failed_requests': self.summary.failed_requests,
                 'concurrency': self.summary.concurrency,
                 'max_concurrency': self.summary.max_concurrency,
                 'request_throughput': self.summary.request_throughput,
                 'input_tokens_avg': self.summary.input_tokens_avg,
                 'output_tokens_avg': self.summary.output_tokens_avg,
-                'output_token_throughput': self.summary.output_token_throughput,
+                'output_tps_avg': self.summary.output_tps_avg,
+                'output_tps_total': self.summary.output_tps_total,
+                'summary_tps_total': self.summary.summary_tps_total,
                 'ttft_avg': self.summary.ttft_avg,
                 'ttft_p90': self.summary.ttft_p90,
                 'tpot_avg': self.summary.tpot_avg,
@@ -132,10 +152,15 @@ class AisbenchResult:
         logging.info(f"{'Metric':<30} {'Value':<20} {'Unit':<10}")
         logging.info("-" * 80)
         logging.info(f"{'Total Requests':<30} {self.summary.total_requests:<20} {'count'}")
+        logging.info(f"{'Failed Requests':<30} {self.summary.failed_requests:<20} {'count'}")
+        logging.info(f"{'Concurrency':<30} {self.summary.concurrency:<20} {'count'}")
+        logging.info(f"{'Max Concurrency':<30} {self.summary.max_concurrency:<20} {'count'}")
         logging.info(f"{'Request Throughput':<30} {self.summary.request_throughput:.2f} {'req/s'}")
         logging.info(f"{'Avg Input Tokens':<30} {self.summary.input_tokens_avg:.2f} {'tokens'}")
         logging.info(f"{'Avg Output Tokens':<30} {self.summary.output_tokens_avg:.2f} {'tokens'}")
-        logging.info(f"{'Output Token Throughput':<30} {self.summary.output_token_throughput:.2f} {'tokens/s'}")
+        logging.info(f"{'Output Token Throughput':<30} {self.summary.output_tps_avg:.2f} {'tokens/s'}")
+        logging.info(f"{'Output Token Throughput Total':<30} {self.summary.output_tps_total:.2f} {'tokens/s'}")
+        logging.info(f"{'Summary Token Throughput Total':<30} {self.summary.summary_tps_total:.2f} {'tokens/s'}")
         logging.info(f"{'TTFT (Average)':<30} {self.summary.ttft_avg:.2f} {'ms'}")
         logging.info(f"{'TTFT (P90)':<30} {self.summary.ttft_p90:.2f} {'ms'}")
         logging.info(f"{'TPOT (Average)':<30} {self.summary.tpot_avg:.2f} {'ms'}")
@@ -162,26 +187,33 @@ class AisbenchResultParser:
     """Aisbench结果解析器"""
     
     @staticmethod
-    def parse_csv(filepath: str) -> AisbenchResult:
+    def parse_csv_and_json(csv_filepath: str, json_filepath: str) -> AisbenchResult:
         """
         从CSV文件解析结果
         
         Args:
-            filepath: CSV文件路径
+            csv_filepath: CSV文件路径
+            json_filepath: JSON文件路径
             
         Returns:
             AisbenchResult对象
         """
         # 读取CSV文件
-        df = pd.read_csv(filepath)
+        df = pd.read_csv(csv_filepath)
+        # 读取JSON文件
+        json_data = None
+        if json_filepath:
+            with open(json_filepath, 'r') as f:
+                json_data = json.load(f)
         
         # 创建结果对象
         result = AisbenchResult()
         result.raw_data = df
         result.metadata = {
-            'source_file': filepath,
+            'source_file': csv_filepath,
             'parse_time': datetime.now().isoformat(),
-            'total_rows': len(df)
+            'total_rows': len(df),
+            'json_data': json_data
         }
         
         # 解析每一行
@@ -237,7 +269,7 @@ class AisbenchResultParser:
             if filename.endswith('.csv'):
                 filepath = os.path.join(directory_path, filename)
                 try:
-                    result = AisbenchResultParser.parse_csv(filepath)
+                    result = AisbenchResultParser.parse_csv_and_json(filepath, "")
                     results[filename] = result
                 except Exception as e:
                     logging.info(f"解析文件 {filename} 时出错: {e}")
@@ -337,16 +369,16 @@ def aisbench_post_process(task_config, output_path, init_entries):
     aisbench_output_dir = find_aisbench_directory(output_path, init_entries)
     logging.info(f"aisbench perf的结果目录: {aisbench_output_dir}")
     if aisbench_output_dir and os.path.exists(os.path.join(output_path, aisbench_output_dir)):
-        aisbench_csv = get_aisbench_csv(os.path.join(output_path, aisbench_output_dir), 
+        aisbench_csv, aisbench_json = get_aisbench_csv_and_json(os.path.join(output_path, aisbench_output_dir), 
                                         task_config.get("benchmark").get("perf").get("api_type").replace("_", "-"))
     else:
         logging.error("get aisbench output path failed.")
         return None, ""
     
     # 解析结果
-    if aisbench_csv and os.path.exists(aisbench_csv):
+    if aisbench_csv and aisbench_json and os.path.exists(aisbench_csv) and os.path.exists(aisbench_json):
         parser = AisbenchResultParser()
-        result = parser.parse_csv(aisbench_csv)
+        result = parser.parse_csv_and_json(aisbench_csv, aisbench_json)
         
         # 生成摘要报告
         logging.info("  📄  生成测试报告...")
@@ -416,7 +448,7 @@ def aisbench_acc_post_process(task_config, output_path, init_entries):
     logging.info(f"aisbench acc的结果目录: {aisbench_output_dir}")
     api_type= task_config.get("benchmark").get("acc").get("api_type").replace("_", "-")
     if aisbench_output_dir and os.path.exists(os.path.join(output_path, aisbench_output_dir)):
-        aisbench_csv = get_aisbench_csv(os.path.join(output_path, aisbench_output_dir), api_type, output_type="accaurcy")
+        aisbench_csv, aisbench_json = get_aisbench_csv_and_json(os.path.join(output_path, aisbench_output_dir), api_type, output_type="accaurcy")
     else:
         logging.error("get aisbench output path failed.")
         return
@@ -507,26 +539,36 @@ def find_aisbench_directory(directory_path=".", init_entries=list(), aisbench_ty
     return date_dirs[0]
 
 
-def get_aisbench_csv(aisbench_output_path, api_type, output_type="performances"):
+def get_aisbench_csv_and_json(aisbench_output_path, api_type, output_type="performances"):
     if output_type == "performances":
-        csv_path = os.path.join(aisbench_output_path, output_type, api_type.replace("_", "-"))
+        result_dir = os.path.join(aisbench_output_path, output_type, api_type.replace("_", "-"))
     elif output_type == "accaurcy":
-        csv_path = os.path.join(aisbench_output_path, "summary")
+        result_dir = os.path.join(aisbench_output_path, "summary")
     else:
         logging.error(f"output_type: {output_type} is not supported.")
         return
     
-    if os.path.exists(aisbench_output_path) and os.path.exists(csv_path):
-        entries = os.listdir(csv_path)
+    csv_path = ""
+    json_path = ""
+
+    if os.path.isdir(result_dir):
+        entries = os.listdir(result_dir)
         for entry in entries:
-            entry_path = os.path.join(csv_path, entry)
+            entry_path = os.path.join(result_dir, entry)
             if entry_path.endswith(".csv"):
-                return entry_path
+                csv_path = entry_path
+            if entry_path.endswith(".json"):
+                json_path = entry_path
+    
+    if output_type == "performances" and (not csv_path or not json_path):
+        logging.error(f"Can't find aisbench csv or json output. {output_type} run failed.")
+        return "", ""
+    
+    if output_type == "accaurcy" and not csv_path:
         logging.error(f"Can't find aisbench csv output. {output_type} run failed.")
-        return
-    else:
-        logging.error(f"aisbench output path: {csv_path} is not exist.")
-        return
+        return "", ""
+    
+    return csv_path, json_path
 
 
 def get_column_values(csv_rows, target_column):

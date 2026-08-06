@@ -1,0 +1,60 @@
+case_name: 02_single_evalscope_perf
+engine_type: xllm
+model_path: /export/home/models/Qwen3-VL-8B-Instruct
+served_model_name: Qwen3-VL-8B-Instruct
+metrics: perf
+dataset_name: random_vl
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+benchmark:
+  benchmark_type: evalscope
+  perf:
+    case_type: performance
+    batch_size: 1
+    request_rate: 1
+    num_prompts: 6
+    min_prompt_length: 760
+    max_prompt_length: 760
+    output_len: 1024
+    max_out_len: 1024
+    image_width: 512
+    image_height: 512
+    image_format: RGB
+    image_num: 1
+    seed: 42
+    baseline: 106.1046
+    threshold: 0.10
+    warmup_paras:
+      request_rate: 10
+      batch_size: 10
+      num_prompts: 20
+
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_seqs_per_batch: 10
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: true
+      enable_shm: true
+      block_size: 128
+      backend: vlm
+      max_encoder_cache_size: 128
+      limit_image_per_prompt: 8
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true

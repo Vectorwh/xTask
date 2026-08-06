@@ -1,0 +1,801 @@
+# xLLM YAML 用例写作指导
+
+写一个用例时，按下面四步拼起来即可：
+
+1. 先写模型和数据集。
+2. 再选一个 benchmark：AISBench 或 EvalScope。
+3. 再选一种测试：性能 `perf` 或精度 `acc`。
+4. 最后选部署：单机、普通多机，或者 PD 分离；需要搜索时再加搜索段。
+
+## 1. 可参考示例
+
+可直接参考的独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
+
+| 目的 | 示例 |
+| --- | --- |
+| 单机 AISBench 性能 | `01_single_aisbench_perf.yaml` |
+| 单机 EvalScope 性能 | `02_single_evalscope_perf.yaml` |
+| 单机 AISBench 精度 | `03_single_aisbench_acc.yaml` |
+| 单机 EvalScope 精度 | `04_single_evalscope_acc.yaml` |
+| 普通多机混部性能/精度 | `05_multihost_aisbench_perf.yaml`、`06_multihost_aisbench_acc.yaml` |
+| PD 分离性能/精度 | `07_pd_aisbench_perf.yaml`、`08_pd_aisbench_acc.yaml` |
+| 单机并发摸高 | `09_single_auto_assess.yaml` |
+| 单机 exhaustive 搜参 | `10_single_para_set_exhaustive.yaml` |
+| 单机 TPE 搜参 | `11_single_para_set_tpe.yaml` |
+| 多机并发摸高 | `12_multihost_auto_assess.yaml` |
+| 多机普通搜参 | `13_multihost_para_set.yaml` |
+| 多机 PD 拓扑搜参 | `14_pd_topology_para_set.yaml` |
+| PD 并发摸高 | `15_pd_auto_assess.yaml` |
+
+这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
+
+## 2. 顶层公共字段
+
+```yaml
+case_name: qwen3_8b_xllm_perf_i1024_o1024_bs1
+engine_type: xllm
+model_path: /export/home/models/Qwen3-8B
+served_model_name: Qwen3-8B
+metrics: perf                 # perf=性能，acc=精度
+dataset_name: gsm8k
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+benchmark: {}
+deployment: {}
+```
+
+先看这些字段的完整含义。表里的“必填”是指新写用例时应当明确填写，并不表示代码对每个字段都做了强制校验。
+
+| 字段 | 新用例是否填写 | 通俗解释 | 当前行为和注意事项 |
+| --- | --- | --- | --- |
+| `case_name` | 是 | 用例的唯一名字 | 建议与 YAML 文件名相同，只使用字母、数字、下划线和短横线。搜参生成的子用例会在它后面追加 `_sg1`、`_sg2`。 |
+| `engine_type` | 是 | 要启动哪个推理引擎 | 本文只讲 `xllm`。写成其他值会走其他引擎流程。 |
+| `model_path` | 是 | 模型权重在宿主机上的目录 | 所有参与启动 xLLM 的服务器都要有这个目录。工程不会自动同步整个模型目录；容器内会通过路径映射访问它。 |
+| `served_model_name` | 是 | 请求接口里传给 `model` 的名字 | AISBench 和 EvalScope 都会使用它。它可以与目录名不同，但必须是当前 xLLM 服务接受的模型名。 |
+| `metrics` | 是 | 选择性能还是精度 | `perf` 表示性能，`acc` 表示精度。真正决定执行分支的是这个字段，不是 `case_type`。当前用例建议一次只写一种。 |
+| `dataset_name` | 是 | benchmark 使用的数据集或数据生成器名称 | AISBench 性能常用 `gsm8k`、`syn`；EvalScope 精度直接把它传给 `--datasets`，性能传给 `--dataset`。 |
+| `dataset_path` | 按数据集需要 | 顶层数据集路径 | 当前不同 benchmark 对它的依赖不完全一致。AISBench 的具体任务还可以在 `benchmark.perf/acc.dataset_path` 中填写；EvalScope 精度更常在 `dataset_args` 中指定。 |
+| `dataset_format` | 建议 | 数据文件格式说明 | 常写 `json`。它主要作为任务元数据保留，具体解析方式仍由 benchmark 和数据集配置决定。 |
+| `communication_backend` | 多卡建议 | 多卡通信后端 | NPU 多卡通常写 `hccl`。 |
+| `hccl_if_port` | 端口冲突时填写 | HCCL 通信使用的基础端口 | xLLM 启动模板会导出为 `HCCL_IF_BASE_PORT`，默认 43439。同一服务器并行跑多套服务时可改成不冲突端口。 |
+| `progress_conn_port` | 端口冲突时填写 | xLLM 多进程主节点协调端口 | 启动模板用它组成 `MASTER_NODE_ADDR`，默认 9590。多任务共机运行时要避免冲突。 |
+| `userid` | 建议 | 结果文件归属用户的历史配置 | 常沿用环境中的 UID，例如 `1048`。部分当前流程直接取实际运行用户 UID，因此不要把它当作容器权限问题的唯一控制项。 |
+| `serving_wait_time` | 建议 | 服务启动命令发出后额外等待多少秒 | 它不是完整的服务启动超时。多机还会做实例 readiness 和统一 endpoint 健康检查。 |
+| `benchmark` | 是 | benchmark 类型及性能/精度参数 | 详见第 3 节。 |
+| `deployment` | 是 | xLLM 用哪些服务器、卡和端口启动 | 详见第 4 节。 |
+| `assess_test_param` | 仅搜参 | 哪些字段需要搜索，以及每个字段有哪些候选值 | 只在 `--assess_test_type para_set` 下使用。 |
+| `assess_search` | 搜参建议 | 选择 exhaustive 或 TPE，并配置目标与约束 | 不写时，`para_set` 默认按 exhaustive 全量组合执行。 |
+| `assess_topologies` | 仅 PD 拓扑搜索 | 预先定义多个完整、合法的 PD 拓扑 | 不能用于普通 `deployment.instances`。 |
+
+### `--host_addr` 到底会改什么
+
+命令行的 `--host_addr` 不是“把 YAML 中所有 IP 全部替换掉”：
+
+- 单实例部署时，它会覆盖顶层 `host_addr`、`deployment.master_host` 和这个唯一实例的 `host`，适合把单机用例临时换到另一台服务器。
+- 普通多机或 PD 多节点部署时，它不会重写整套拓扑。各实例、各 node 的 `host` 仍以 YAML 为准。
+- 多机用例应直接把正确 IP 写进 `deployment`，不要依赖 `--host_addr` 搬迁整套拓扑。
+
+### 历史兼容字段
+
+旧用例顶层可能还有 `block_size`、`additional_config`、`host_addr`、`port`、`num_devices`、`start_device_id`、`world_size` 和顶层 `serving_extensiable_param`。调度器仍保留部分兼容逻辑，但新用例应以 `deployment.instances` 或 `deployment.pd_instances` 为准：
+
+- xLLM 启动参数写到实例的 `serving_extensiable_param`。
+- 卡号写 `device_ids`。
+- 服务端口写 `local_port`。
+- 不要同时维护两套含义相同的顶层和实例字段。
+
+## 3. Benchmark 部分
+
+`benchmark.benchmark_type` 决定使用哪个测试工具，目前本文覆盖 `aisbench` 和 `evalscope`。`metrics: perf` 时必须提供 `benchmark.perf`，`metrics: acc` 时必须提供 `benchmark.acc`。
+
+`benchmark.perf/acc.case_type` 建议分别写成 `performance`、`accuracy`，便于阅读和结果归类；但切换执行流程的仍是顶层 `metrics`。
+
+### AISBench 性能
+
+```yaml
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    case_type: performance
+    api_type: vllm_api_general_stream
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    input_len: 1024
+    output_len: 1024
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 1
+    num_prompts: 6
+    num_warmups: 20
+    baseline: 110.6873
+    threshold: 0.10
+    generation_kwargs: {temperature: 0, ignore_eos: true}
+```
+
+AISBench 性能字段如下：
+
+| 字段 | 建议填写 | 通俗解释 | 当前实际行为 |
+| --- | --- | --- | --- |
+| `case_type` | 是 | 标记这是性能测试 | 建议固定写 `performance`；执行分支仍由顶层 `metrics: perf` 决定。 |
+| `api_type` | 是 | AISBench 使用哪种 OpenAI/VLLM 接口配置 | 常用流式性能配置 `vllm_api_general_stream`；当前允许 `vllm_api_general_chat`、`vllm_api_general_stream`、`vllm_api_stream_chat`。 |
+| `dataset_conf` | 建议 | AISBench 数据集配置名 | 对 `dataset_name: gsm8k` 的性能流程，框架最终使用生成后的 `gsm8k_gen_0_shot_cot_str_perf`。 |
+| `dataset_path` | 按需 | benchmark 块内的数据路径 | 当前 AISBench 生成器会读取它，但现有命令没有直接使用它；新用例不要只靠此字段决定数据来源。 |
+| `input_len` | 是 | 每个请求的输入 token 长度 | `dataset_name: gsm8k` 时，框架在容器内把 GSM8K 问题截断或重复到这个固定长度。 |
+| `output_len` | 是 | 希望生成的最大 token 数 | 当前会写入 AISBench 后端的 `max_out_len`，因此它才是实际控制输出上限的字段。 |
+| `max_out_len` | 兼容 | 历史上的最大输出长度 | 当前 AISBench 生成器不独立使用它；即使同时配置，也由 `output_len` 覆盖后端 `max_out_len`。新用例保持二者相同最直观。 |
+| `batch_size` | 是 | AISBench 一批同时处理多少请求 | 也是 `auto_assess` 摸高的目标字段。它与总请求数不是同一回事。 |
+| `request_rate` | 是 | 发请求速率 | 会写入 AISBench API 配置。`0` 通常表示不主动限速，具体含义以所装 AISBench 版本为准。 |
+| `num_prompts` | 是 | 正式测试总请求/样本数 | `dataset_name: gsm8k` 时还决定固定长度数据集生成多少条。搜 `benchmark.perf.batch_size` 且未同时搜索 `num_prompts` 时，框架会自动令 `num_prompts = batch_size * 4`。 |
+| `num_warmups` | 建议 | AISBench 正式统计前预热多少条 | 传给 `ais_bench --num-warmups`；与 EvalScope 的 `warmup_paras` 不是一套机制。 |
+| `temperature`、`top_k`、`top_p`、`seed`、`repetition_penalty`、`ignore_eos` | 按需 | 常见生成参数 | 会先分别写入后端配置。布尔值应写 YAML 布尔值 `true/false`。 |
+| `generation_kwargs` | 建议 | 一次性覆盖后端的完整生成参数块 | 只要非空，框架会重写 AISBench 配置中的 `generation_kwargs`，因此它的内容最终优先于上面分散填写的同名生成字段。建议统一把生成参数写在这里。 |
+| `baseline` | 按验证目的 | 预期性能基线 | 当前拿解析结果中的 `output_tps_avg` 与它比较。设为 `null` 或不写时，不做基线比较，性能结果存在即可通过这一步。 |
+| `threshold` | 配 baseline 时是 | 基线上下允许浮动的比例 | `0.10` 表示结果必须在 `baseline * 0.9` 到 `baseline * 1.1` 之间，不是 10 个绝对单位。取值应在 0 到 1。 |
+
+例如 `batch_size: 8`、`num_prompts: 32` 的意思是“最多按 8 的批量/并发档位跑，总共统计 32 个请求”，不是只发 8 个请求。
+
+### AISBench 精度
+
+把 `metrics` 改成 `acc`，并改为 `benchmark.acc`：
+
+```yaml
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: vllm_api_general_chat
+    dataset_conf: gsm8k_gen_0_shot_noncot_chat_prompt
+    acc_dataset_len: 200
+    batch_size: 8
+    output_len: 32768
+    request_rate: 8
+    baseline: 96.0
+    threshold: 0.04
+    generation_kwargs: {temperature: 0, ignore_eos: false}
+```
+
+AISBench 精度字段如下：
+
+| 字段 | 建议填写 | 通俗解释 | 当前实际行为 |
+| --- | --- | --- | --- |
+| `case_type` | 是 | 标记这是精度测试 | 建议固定写 `accuracy`；真正执行精度分支的是顶层 `metrics: acc`。 |
+| `api_type` | 是 | 请求服务使用的 AISBench 接口配置 | 对话类精度常用 `vllm_api_general_chat`。 |
+| `dataset_conf` | 是 | AISBench 精度数据集配置名 | 当前代码只有在它非空时才真正生成精度执行命令；缺少它会直接跳过精度测试。 |
+| `dataset_path` | 按需 | benchmark 块内的数据路径 | 数据下载/准备仍按 `dataset_name` 和对应数据集逻辑处理，不要假设这个字段能覆盖所有数据来源。 |
+| `acc_dataset_len` | 按需 | 最多测多少条样本 | 适合缩短调试时间。AISBench 的 GSM8K 数据准备会按它截断；`0`/空值的语义取决于数据准备逻辑，正式用例应明确设置。 |
+| `batch_size` | 是 | 精度推理批大小 | 写入 AISBench API 配置。不要把它理解成样本总数。 |
+| `output_len` | 是 | 单条答案最多生成多少 token | 当前写入 AISBench 后端的 `max_out_len`。 |
+| `request_rate` | 按需 | 精度请求发送速率 | 写入 AISBench API 配置。 |
+| `num_prompts` | 否 | 限制 AISBench 执行的 prompt 数量 | 只有值为整数时才生成 `--num-prompts` 参数。通常使用 `acc_dataset_len` 更容易理解。 |
+| `temperature`、`top_k`、`top_p`、`seed`、`repetition_penalty` | 按需 | 生成采样参数 | 会先写入后端配置。 |
+| `generation_kwargs` | 建议 | 最终采用的生成参数块 | 非空时重写 AISBench 的 `generation_kwargs`。精度复现通常建议 `temperature: 0`，并明确 `ignore_eos`。 |
+| `baseline` | 是 | 预期精度值 | 当前精度结果必须有有效正数 baseline 才可能判定通过；未配置 baseline 不会自动放行。注意不同数据集的精度可能用百分数或 0 到 1 小数，必须与结果解析器的量纲一致。 |
+| `threshold` | 是 | 基线上下允许浮动比例 | 同样按 `baseline * (1 ± threshold)` 校验。 |
+
+`dump_eval_details` 有一个容易踩坑的当前限制：AISBench 脚本生成器从 YAML 顶层读取它，即应写成顶层 `dump_eval_details: true`；写在 `benchmark.acc` 里目前不会生效。
+
+### EvalScope 性能
+
+```yaml
+benchmark:
+  benchmark_type: evalscope
+  perf:
+    case_type: performance
+    batch_size: 1
+    request_rate: 1
+    num_prompts: 6
+    min_prompt_length: 760
+    max_prompt_length: 760
+    output_len: 1024
+    max_out_len: 1024
+    image_width: 512
+    image_height: 512
+    image_format: RGB
+    image_num: 1
+    seed: 42
+    baseline: 106.1046
+    threshold: 0.10
+    warmup_paras: {request_rate: 10, batch_size: 10, num_prompts: 20}
+```
+
+EvalScope 性能字段与实际命令参数是一一映射的：
+
+| YAML 字段 | EvalScope 命令 | 通俗解释 |
+| --- | --- | --- |
+| `case_type` | 无独立命令参数 | 建议写 `performance`，执行分支由 `metrics: perf` 决定。 |
+| `request_rate` | `--rate` | 每秒发送多少请求；具体不限速写法以当前 EvalScope 版本为准。 |
+| `num_prompts` | `--number` | 本次正式测试总共发送多少个请求。 |
+| `batch_size` | `--parallel` | 同时在途的最大请求数，也就是性能测试并发。 |
+| `min_prompt_length` | `--min-prompt-length` | 随机输入的最小 token 长度。 |
+| `max_prompt_length` | `--max-prompt-length` | 随机输入的最大 token 长度。要固定输入长度就与最小值写相同。 |
+| `output_len` | `--min-tokens` | 最少生成 token 数。 |
+| `max_out_len` | `--max-tokens` | 最多生成 token 数。要固定输出长度就与 `output_len` 写相同。 |
+| `image_width`、`image_height` | 同名 `--image-*` 参数 | 随机视觉输入的图片宽、高。文本模型可以删掉，生成器缺省为 512。 |
+| `image_format` | `--image-format` | 随机图片格式，例如 `RGB`。 |
+| `image_num` | `--image-num` | 每个请求携带几张图片。 |
+| `seed` | `--seed` | 随机数据/请求的种子，固定后更容易复现。 |
+| `warmup_paras` | 单独生成一轮预热命令 | 先复制正式配置，再用这里的字段覆盖，例如单独设置预热的 `request_rate`、`batch_size`、`num_prompts`。预热结果会清理，不进入正式统计。 |
+| `baseline`、`threshold` | xTask 后处理 | 仍使用 `output_tps_avg` 并按 `baseline * (1 ± threshold)` 校验。 |
+
+文本模型可以删除图像字段；视觉模型保留它们。当前生成器固定向 EvalScope 性能命令传入 `--extra-args '{"ignore_eos": true}'`，所以在 `benchmark.perf` 里另写 `ignore_eos` 目前不能覆盖它。
+
+### EvalScope 精度
+
+```yaml
+benchmark:
+  benchmark_type: evalscope
+  acc:
+    case_type: accuracy
+    acc_dataset_len: 30
+    batch_size: 4
+    timeout: 3600
+    endpoint: /v1
+    baseline: 0.30
+    threshold: 0.05
+    generation_config:
+      temperature: 1
+      top_p: 0.95
+      top_k: 20
+      max_tokens: 30000
+      retries: 5
+    dataset_args:
+      mmmu:
+        dataset_id: /xllm_test_060/datasets/mmmu
+        subset_list: [Music]
+        split: validation
+```
+
+EvalScope 精度字段如下：
+
+| 字段 | 建议填写 | 通俗解释 | 当前实际行为 |
+| --- | --- | --- | --- |
+| `case_type` | 是 | 标记这是精度测试 | 建议固定写 `accuracy`。 |
+| `acc_dataset_len` | 按需 | 最多评测多少条 | 非空时映射到 `--limit`；不写则不追加 limit。 |
+| `batch_size` | 是 | 一次并行评测多少条 | 映射到 `--eval-batch-size`，默认 1。 |
+| `timeout` | 建议 | 单次 EvalScope API 请求/评测超时 | 映射到 `--timeout`，当前代码默认 36000 秒。 |
+| `endpoint` | 建议 | OpenAI API 基础路径 | 与服务地址、端口拼成 `http://<host>:<port><endpoint>`，默认 `/v1`。 |
+| `generation_config` | 按数据集需要 | 传给模型的生成配置 | 整体传给 `--generation-config`。常见键包括 `temperature`、`top_p`、`top_k`、`max_tokens`、`retries`，具体支持范围由 EvalScope 版本决定。 |
+| `dataset_args` | 按数据集需要 | 每个数据集自己的位置、子集和 split | 整体传给 `--dataset-args`。键名通常与顶层 `dataset_name` 对应。 |
+| `baseline`、`threshold` | 是 | 精度基线和容许波动 | 量纲必须与 EvalScope 解析出的精度一致，例如解析值为 `0.30` 时不要把 baseline 写成 `30`。 |
+
+顶层 `dataset_name` 会映射到 `evalscope eval --datasets`。`dataset_args` 常见子字段包括：
+
+| 子字段 | 作用 |
+| --- | --- |
+| `dataset_id` | 数据集在容器内可访问的路径或 EvalScope 可识别的数据集 ID。 |
+| `subset_list` | 只评测指定子集，例如 `[Music]`。 |
+| `split` | 选择 `validation`、`test` 等数据切分。 |
+
+路径以 `/xllm_test_060` 开头时，多机资源同步会按需检查和补齐相应关键资源。`generation_config`、`dataset_args` 由当前代码转换成命令行字典字符串；值中含复杂引号时应先用小用例验证生成的 `run_evalscope_test.sh`。
+
+### Benchmark 基线校验规则
+
+- 性能：比较 `benchmark_perf_result.summary.output_tps_avg`。不配置有效 `baseline` 时，只要性能结果成功解析，基线步骤直接通过。
+- 精度：比较解析出的 `benchmark_acc_result`。缺少有效 `baseline` 时，当前代码不会把精度用例判定为通过。
+- `threshold` 是比例。`baseline: 100`、`threshold: 0.05` 的合法范围是 95 到 105。
+- 因此，不同 benchmark 或数据集之间复制精度 baseline 前，先确认结果量纲是“百分数”还是“0 到 1”。
+
+## 4. deployment 部分
+
+### 单机
+
+只保留一个 `instances` 元素：
+
+```yaml
+deployment:
+  master_host: 11.87.191.75
+  benchmark: {runner_instance: master-0, health_path: /health}
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_seqs_per_batch: 10
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+```
+
+单机也使用 `deployment.instances`，只是列表中只有一个元素。这样单机、多机共用同一套调度逻辑。
+
+### 普通实例字段字典
+
+以下字段同时适用于单机和普通多机混部：
+
+| 字段 | 新用例是否填写 | 通俗解释 | 当前行为和注意事项 |
+| --- | --- | --- | --- |
+| `deployment.master_host` | 是 | 这个普通 xLLM 服务的主节点 IP | benchmark endpoint 会取该 IP，并在相同 host 的实例中选择 `master`/`standalone` 的 `local_port`。它必须能匹配一个实例。 |
+| `deployment.sync_workspace` | 多机建议 | 执行前是否把当前 xTask 工程同步到远端节点 | 默认 `true`。这是工程代码同步，不是模型目录同步。单机无需关心。 |
+| `deployment.benchmark.runner_instance` | 建议 | 在哪个实例的容器里执行 benchmark | 值必须对应某个 `instances[].name`。不写时优先选 `master`、`standalone`、`prefill`，再退回第一个实例。 |
+| `deployment.benchmark.health_path` | 建议 | 统一服务的健康检查路径 | 默认 `/health`，与推导出的 endpoint 拼接。不要在这里写完整 URL。 |
+| `instances[].name` | 是 | 物理启动实例的唯一名字 | 用于输出目录、脚本名、容器名、benchmark runner 选择；同一用例内不能重复。它不是模型名。 |
+| `instances[].host` | 是 | 这个实例在哪台服务器启动 | 多机通过 SSH 连接非本机 host。相关 SSH 配置由工程的 HostExecutor/SSH 配置读取。 |
+| `instances[].role` | 是 | 这个节点在普通多机服务中的身份 | 普通部署建议主节点写 `master`，其余写 `worker`；单机写 `master` 或 `standalone`。PD 角色另见后文。 |
+| `instances[].rank_start` | 多机是 | 这个节点第一张卡的全局 rank | 普通多机的所有实例属于同一个 rank 组，后一节点要接着前面节点的卡数累计，例如 16 卡节点依次写 0、16、32。 |
+| `instances[].device_ids` | 是 | 这个节点实际占用哪些 NPU | 可写不连续卡号，例如 `[0, 2, 4, 6]`。框架按列表长度计算本节点卡数。 |
+| `instances[].num_devices` + `start_device_id` | 仅兼容 | 用“起始卡号 + 连续卡数”代替 `device_ids` | 只有未写 `device_ids` 时使用。新用例优先写清楚 `device_ids`，不要两种方式混用。 |
+| `instances[].local_port` | 是 | 该实例的 xLLM 本地监听端口 | 普通服务的 benchmark endpoint 使用主节点实例的此端口。默认回退为顶层 `port`，再回退到 8800，但新用例应显式写。 |
+| `instances[].service.port` | 仅兼容 | `local_port` 的旧写法 | 只在未配置 `local_port` 时使用。 |
+| `instances[].serving_extensiable_param` | 按模型需要 | 传给这个 xLLM 实例的启动参数 | 详见“xLLM 启动参数”小节。实例级字段优先于兼容的顶层同名块。 |
+| `instances[].readiness` | 按需 | 自定义如何判断该实例已经启动 | 不写时 xTask 根据角色检查日志关键字或进程；可改成命令或 HTTP 检查。 |
+
+`readiness` 支持三种常见写法：
+
+```yaml
+# 1. 自定义命令，退出码为 0 就算就绪
+readiness:
+  type: command
+  command: pgrep -f '[x]llm'
+
+# 2. HTTP 返回 200 就算就绪
+readiness:
+  type: http
+  url: http://127.0.0.1:8800/health
+
+# 3. 继续使用日志检查，但自定义任一成功关键字
+readiness:
+  success_keywords: [Brpc Server started on port, 服务启动完成]
+```
+
+`success_keywords` 是“匹配到任意一个即成功”。远端检查默认等待时长可由兼容字段 `serving_ready_timeout` 控制，默认约 320 秒。
+
+### 普通多机混部
+
+在单机 YAML 上增加 worker；两台机器仍然是一个 xLLM 服务：
+
+```yaml
+deployment:
+  master_host: 11.87.191.75
+  sync_workspace: true
+  benchmark: {runner_instance: master-0, health_path: /health}
+  instances:
+  - {name: master-0, host: 11.87.191.75, role: master, rank_start: 0,
+     device_ids: [0,1,2,3], local_port: 8800,
+     serving_extensiable_param: {max_seqs_per_batch: 10}}
+  - {name: worker-0, host: 11.87.191.121, role: worker, rank_start: 4,
+     device_ids: [0,1,2,3], local_port: 8800,
+     serving_extensiable_param: {max_seqs_per_batch: 10}}
+```
+
+`rank_start` 是全局卡编号的起点；后一个节点要接着前一个节点累计。多机默认会从主节点同步工程；`xllm_test_060` 只按需检查关键资源，不会无条件整目录复制。模型目录仍需提前放到每台机器。
+
+普通多机的 ranktable 规则是：所有 `deployment.instances` 组成同一个 `default` 组；实例数大于 1 时，框架在各服务器获取本机卡信息，生成各节点 ranktable，合并后再注入每个实例。只有一个实例时不自动生成 ranktable。
+
+### 工程与测试资源同步
+
+普通多机和 PD 多机共用下面的前置处理：
+
+```yaml
+deployment:
+  sync_workspace: true
+  resource_sync:
+    enabled: true
+    source: /export/home/models/xllm_test_060
+    target: /export/home/models/xllm_test_060
+    max_workers: 4
+    timeout: 3600
+```
+
+| 字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `sync_workspace` | `true` | 把主节点当前 xTask 工程及当次输出所需目录同步到用例涉及的远端 host。设为 `false` 时，远端必须已经有同路径、同版本工程。 |
+| `resource_sync` | 启用 | 负责 `/export/home/models/xllm_test_060` 中 benchmark 运行所需资源的快速检查与增量补齐。也可以整体写 `false` 关闭。 |
+| `resource_sync.enabled` | `true` | 是否启用测试资源检查。 |
+| `resource_sync.source` | `/export/home/models/xllm_test_060` | 主节点资源根目录。 |
+| `resource_sync.target` | 与 `source` 相同 | 远端服务器上的资源根目录，通常保持同路径，便于容器挂载到 `/xllm_test_060`。 |
+| `resource_sync.max_workers` | `4` | 最多并行检查/同步多少台远端主机。 |
+| `resource_sync.timeout` | `3600` | 单台主机资源同步操作允许的最长秒数。 |
+
+这里的“增量补齐”不是比较整个大目录：框架先根据 benchmark 和 YAML 中出现的 `/xllm_test_060/...` 路径推导本次真正需要的组件，再检查少量稳定关键文件。关键文件都在就跳过；缺少时只同步对应组件。
+
+### xLLM 启动参数 `serving_extensiable_param`
+
+这个字段名保留了工程的历史拼写：`serving_extensiable_param`。框架不会维护一份完整的 xLLM 参数白名单，而是把其中每一项转换为 `--key=value` 传给当前安装的 xLLM。因此“YAML 能解析”不等于“当前 xLLM 版本一定支持”，最终以生成的 `start_xllm_serv_*.sh` 和 xLLM 启动日志为准。
+
+常用字段如下：
+
+| 字段 | 通俗作用 | 使用提醒 |
+| --- | --- | --- |
+| `max_memory_utilization` | 限制 xLLM 最多使用多大比例的设备内存 | 常写 0 到 1 的小数，例如 `0.85`。 |
+| `max_seqs_per_batch` | 单批最多容纳多少条序列 | 常见搜参项；不等于 benchmark 总请求数。 |
+| `max_tokens_per_batch` | 单批最多容纳多少 token | 需要与输入/输出长度、显存容量一起考虑。 |
+| `enable_chunked_prefill` | 是否把较长 Prefill 拆块执行 | 布尔值写 `true/false`。 |
+| `enable_schedule_overlap` | 是否开启调度重叠优化 | 是否有收益与模型、版本和部署模式有关。 |
+| `enable_prefix_cache` | 是否开启前缀缓存 | 输入无公共前缀时未必有收益。 |
+| `enable_shm` | 是否启用共享内存相关路径 | 多进程配置通常沿用已验证用例。 |
+| `block_size` | KV cache block 大小 | 改动可能影响显存和调度效率。 |
+| `dp_size` | 数据并行规模 | 必须与实际卡数、模型并行配置匹配。 |
+| `ep_size` | 专家并行规模 | MoE 模型常用，必须与模型及总卡数匹配。 |
+| `enable_graph` | 是否开启图模式 | 不支持的模型/形状应关闭。 |
+| `enable_graph_mode_decode_no_padding` | Decode 图模式是否使用 no-padding | 一般与 `enable_graph` 配套，并以已验证模型配置为准。 |
+| `draft_model` | 投机推理 draft/MTP 模型路径 | 该路径同样要在使用它的每台服务器上存在。 |
+| `num_speculative_tokens` | 每轮投机生成 token 数 | 需要与 `draft_model` 和当前 xLLM 版本匹配。 |
+| `speculative_algorithm` | 选择投机推理算法 | 例如旧用例中的 `Eagle3`；必须与 draft 模型和当前 xLLM 版本匹配。 |
+| `max_concurrent_requests` | xLLM 服务端允许同时处理的请求上限 | 与 benchmark 的并发不是同一层：前者限制服务，后者决定测试端施加多少并发。 |
+| `backend: vlm` | 告诉 xLLM 使用视觉模型后端 | 视觉模型常见配置。 |
+| `max_encoder_cache_size` | 视觉/编码器缓存容量 | 需结合图片数量和设备内存调整。 |
+| `limit_image_per_prompt` | 单请求最多允许多少张图片 | 应不小于 benchmark 的 `image_num`。 |
+| `enable_intralayer_addnorm` | 层内 addnorm 优化开关 | 属于版本/模型相关优化，优先从已验证同模型用例复制。 |
+| `enable_interlayer_addnorm` | 层间 addnorm 优化开关 | 同上。 |
+| `enable_split_rmsnorm_rope` | 拆分 RMSNorm/RoPE 优化开关 | 同上。 |
+| `rank_tablefile` | 手工指定 ranktable 文件 | 如果一个 rank 组的实例都已配置手工路径，框架跳过自动生成；对未手工配置的实例，自动流程会注入合并后的路径。 |
+
+YAML 布尔值建议写小写 `true/false`，列表按 YAML 列表写。不要把复杂 Python 表达式当作值传入。
+
+### PD 分离
+
+PD 可以简单理解为：Prefill 负责“读输入”，Decode 负责“生成输出”，两者组成一个服务。一个逻辑 P/D 实例下面可以再放多个服务器节点：
+
+```yaml
+deployment:
+  mode: pd_disaggregated
+  master_host: 11.87.191.75
+  pd_control:
+    host: 11.87.191.75
+    etcd_client_port: 3389
+    http_server_port: 38888
+    rpc_server_port: 38889
+  benchmark: {runner_instance: prefill-0-node-0, health_path: /health}
+  pd_instances:
+  - name: prefill-0
+    role: prefill
+    group_master_host: 11.87.191.75
+    nodes: [{name: prefill-0-node-0, host: 11.87.191.75,
+             device_ids: [0,1], local_port: 48000}]
+  - name: decode-0
+    role: decode
+    group_master_host: 11.87.191.121
+    nodes: [{name: decode-0-node-0, host: 11.87.191.121,
+             device_ids: [0,1], local_port: 48000}]
+```
+
+`pd_control.host` 是 etcd 和统一 HTTP 服务所在节点，必须对应一个实际 node。`pd_instances[].name` 只标识逻辑 P/D 实例，`role` 只表示它是 P 还是 D；不要再写 `pd_group`。同一个逻辑实例有两个及以上 node 时，才为这一组生成和合并 ranktable；不同 P/D 组互不合并。
+
+### PD 顶层和控制面字段
+
+| 字段 | 新用例是否填写 | 通俗解释 | 当前行为和注意事项 |
+| --- | --- | --- | --- |
+| `deployment.mode` | 是 | 声明这是 PD 分离服务 | 固定写 `pd_disaggregated`。PD YAML 只允许层级 `pd_instances` 写法，不能再用扁平 `instances` 写 P/D。 |
+| `deployment.master_host` | 是 | 整个任务的主控 host | 一般与 `pd_control.host` 一致，并应是实际 node 之一。 |
+| `pd_control.host` | 是 | etcd 和 `xllm_master_serving` 在哪台服务器的服务容器内启动 | 必须能在展开后的某个 node host 中找到对应 runtime。统一 benchmark endpoint 也使用这个 IP。 |
+| `pd_control.etcd_client_port` | 建议 | P/D 实例注册和查询 etcd 的端口 | 默认 3389，并传给 xLLM 的 `--etcd_addr`。 |
+| `pd_control.etcd_peer_port` | 建议 | etcd 自身 peer 监听端口 | 默认 3390。单节点 etcd 也需要该监听端口不冲突。 |
+| `pd_control.http_server_port` | 是 | 对外统一 xLLM 服务端口 | benchmark 最终请求 `http://<pd_control.host>:<http_server_port>`，默认 38888。它不是 node 的 `local_port`。 |
+| `pd_control.rpc_server_port` | 建议 | `xllm_master_serving` 内部 RPC 端口 | 默认 38889，确保控制节点端口未占用。 |
+| `pd_control.startup_attempts` | 否 | 控制面启动失败最多重试几次 | 默认 2；每次重试前会清理旧的 etcd 和 `xllm_master_serving` 进程。 |
+| `pd_control.startup_wait_seconds` | 否 | 每次启动控制面后先等多少秒再检查 | 默认 3。它不是全部 P/D 实例注册完成的超时。 |
+| `pd_control.transfer_port_base` | 否 | 每个 P/D xLLM 进程的数据传输监听端口起点 | 默认 26000；多卡启动脚本按卡序号在此基础上递增。多实例/多任务并行时要避免冲突。 |
+| `pd_control.no_proxy_hosts` | 否 | 额外加入 `NO_PROXY` 的 host 列表 | localhost、控制面和所有实例 host 会自动加入；这里只需补充环境中特殊地址。 |
+| `deployment.benchmark.runner_instance` | 建议 | 在哪个物理 node 的容器里跑 benchmark | 层级 PD YAML 中应填写一个实际的 `nodes[].name`，例如 `prefill-0-node-0`，不是逻辑实例名 `prefill-0`。不写时框架会自动选择；写了却不匹配任何 node 时会退回首个 runtime，但配置含义会变得不明确。 |
+| `deployment.benchmark.health_path` | 建议 | 统一服务健康检查路径 | 默认 `/health`，拼在 `pd_control` 的 HTTP endpoint 后。 |
+
+注意：`deployment.benchmark.endpoint` 即使手工填写，当前服务组逻辑也不会把它作为权威地址；普通部署从 `master_host + local_port` 推导，PD 从 `pd_control.host + http_server_port` 推导。
+
+### `pd_instances` 和 `nodes` 字段
+
+| 字段 | 新用例是否填写 | 通俗解释 | 当前行为和注意事项 |
+| --- | --- | --- | --- |
+| `pd_instances[].name` | 是 | 一个逻辑 P 或 D 实例的唯一名字 | 例如 `prefill-0`、`decode-1`。框架自动用它生成内部 `pd_group`；禁止手工写 `pd_group` 或 `group`。 |
+| `pd_instances[].role` | 是 | 这个逻辑实例负责 P 还是 D | 只能是 `prefill` 或 `decode`。`name` 负责区分第几个实例，`role` 负责说明功能，两者不重复。 |
+| `pd_instances[].group_master_host` | 多 node 建议 | 这个逻辑 P/D 实例内谁是主节点 | 默认取 `nodes` 的第一个 host。组内 world size、启动主从关系和 readiness 都使用它；它必须对应本组实际 node。 |
+| `pd_instances[].serving_extensiable_param` | 是 | 本逻辑实例所有 node 默认共用的 xLLM 参数 | P 和 D 可以写不同参数块。 |
+| `pd_instances[].nodes` | 是 | 组成这个逻辑实例的物理服务器节点列表 | 至少一个 node。同一逻辑实例有多个 node 时，各 node 的 host 必须不同。 |
+| `nodes[].name` | 建议 | 物理启动节点的唯一名字 | 不写时自动生成 `<逻辑实例名>-node-<序号>`。所有 P/D node 名全局不能重复。它会成为实际脚本、容器和输出目录名。 |
+| `nodes[].host` | 是 | 物理服务器 IP | 必须可 SSH 访问，并具备模型、NPU 和容器环境。 |
+| `nodes[].device_ids` | 是 | 该 node 使用的卡号 | 同一 P/D 组的 world size 等于组内所有 node 的卡数之和。 |
+| `nodes[].rank_start` | 可省 | 该 node 在本 P/D 组内的起始 rank | 省略时框架按 node 顺序从 0 累计。注意 P 组、D 组分别从各自的 0 开始，不跨组累计。 |
+| `nodes[].local_port` | 是 | 该物理 node 的 xLLM 本地端口 | 它用于 node 自身启动，不是对外统一 endpoint。不同服务器可以使用同一端口；同一服务器上多个 node 必须避免端口冲突。 |
+| `nodes[].serving_extensiable_param` | 按需 | 只覆盖这个 node 的 xLLM 参数 | 先继承逻辑实例参数，再用 node 内同名键覆盖。只把确实需要差异化的键放在 node 层。 |
+| `nodes[].readiness` | 按需 | 自定义该 node 的启动判断 | 与普通实例的 `readiness` 格式相同。 |
+
+一个 xLLM PD 用例始终只有一个对外 endpoint，但可以有多个 Prefill 实例、多个 Decode 实例，每个 P/D 实例又可以由一个或多个 node 组成：
+
+```text
+一个 endpoint
+├── prefill-0
+│   ├── node-0
+│   └── node-1
+├── prefill-1
+│   └── node-0
+└── decode-0
+    ├── node-0
+    └── node-1
+```
+
+ranktable 以逻辑实例为组分别处理。上例只给 `prefill-0` 和 `decode-0` 自动生成并合并 ranktable；单 node 的 `prefill-1` 跳过自动生成。P/D 各组之间不合并。
+
+`startup_policy` 虽然在部分历史 YAML 中出现，但当前调度代码始终并行启动所有实例，它暂时不能真正切换串行/并行策略。新用例不需要依赖这个字段。
+
+## 5. 搜索写法
+
+### auto_assess：只摸高 batch_size
+
+```yaml
+benchmark:
+  perf:
+    batch_size: 40
+    bs_assess: {low_thrld: 8, high_thrld: 72}
+```
+
+```bash
+python main.py --case_group <case> --assess_test_type auto_assess \
+  --target_ttft 1000 --target_tpot 50
+```
+
+字段和命令行参数含义：
+
+| 配置 | 通俗解释 | 默认/当前行为 |
+| --- | --- | --- |
+| `benchmark.perf.batch_size` | 第一次真实测试从哪个 batch size 开始 | 必须位于合理的上下界内。后续值由算法自动生成。 |
+| `benchmark.perf.bs_assess.low_thrld` | 摸高区间下界 | 不写时默认 0。它是搜索边界，不一定会作为一个测试点执行。 |
+| `benchmark.perf.bs_assess.high_thrld` | 摸高区间上界 | 不写时默认初始 `batch_size * 2`。同样不保证直接执行该值。 |
+| CLI `--target_ttft` | 允许的 P90 首 token 时延上限，单位 ms | 默认值很大，建议真实摸高时明确填写。 |
+| CLI `--target_tpot` | 允许的 P90 每输出 token 时延上限，单位 ms | 默认 100 ms。 |
+
+每轮读取 `ttft_p90` 和 `tpot_p90`：两项都优于目标时提高下界；任一项不满足时降低上界；然后取新上下界的整数中点继续，直到区间收敛。`tpot_p90` 与目标相差不超过 1 ms 时也会提前停止。
+
+它只适用于性能测试，并且只改变 benchmark 的 `batch_size`。同一基础用例的一轮 `auto_assess` 会复用已经启动的容器、xLLM 进程、普通多机/PD 控制面和服务拓扑；每轮只重新生成并执行 benchmark。因此：
+
+- 单机、普通多机、PD 都能使用同一套摸高逻辑。
+- 摸高期间不能改变模型、卡、xLLM 启动参数、P/D 数量或 node 数量。
+- scheduler session 发生异常后会停止整轮摸高，最后统一清理服务。
+
+### para_set exhaustive：所有组合都跑
+
+```yaml
+assess_test_param:
+  benchmark.perf.batch_size: [1, 2, 4]
+  deployment.instances[*].serving_extensiable_param.max_seqs_per_batch: [8, 16]
+assess_search:
+  strategy: exhaustive
+  objective: {metric: output_tps_total, direction: maximize}
+```
+
+上例会运行 `3 × 2 = 6` 组。每组都会重新启动服务；结果目录使用 `_sg1`、`_sg2`，并保存本组实际参数。
+
+`exhaustive` 就是笛卡尔积全量测试。三个参数的候选数量分别为 2、3、4 时，总组合数为 `2 × 3 × 4 = 24`。没有配置 `assess_search` 时，`para_set` 也默认采用 `exhaustive`。
+
+| `assess_search` 字段 | exhaustive 下是否需要 | 作用 |
+| --- | --- | --- |
+| `strategy` | 可省 | 明确写 `exhaustive` 最易读。 |
+| `objective.metric` | 可省 | 指定用哪个性能结果排最佳组合，默认是 `output_tps_total`。也可以显式指定其他 summary 指标。 |
+| `objective.direction` | 可省 | `maximize` 表示越大越好，`minimize` 表示越小越好，默认 `maximize`。 |
+| `constraints` | 按需 | 先判断一组结果是否满足上下限；不满足的组合会标为 `constraint_failed`，不会成为可行最优组合。 |
+
+每组参数会独立走正常调度生命周期，即准备、启动、benchmark、清理；它不像 `auto_assess` 那样复用 xLLM session，因为 `para_set` 允许搜索 xLLM 启动参数和拓扑。
+
+### para_set TPE：最多跑指定组数
+
+```yaml
+assess_test_param:
+  benchmark.perf.batch_size: [1, 2, 4, 8, 16]
+  deployment.instances[*].serving_extensiable_param.max_seqs_per_batch: [8, 16, 32]
+assess_search:
+  strategy: tpe
+  max_trials: 6
+  startup_trials: 2
+  seed: 42
+  objective: {metric: output_tps_total, direction: maximize}
+  constraints:
+    ttft_p90: {max: 1000}
+    tpot_p90: {max: 50}
+```
+
+TPE 不是凭空生成任意数字，它仍从 `assess_test_param` 提供的离散候选中选择组合，只是不一定把笛卡尔积全部跑完。
+
+TPE 会把目标指标纳入持久化 study 名称；例如默认目标切换为 `output_tps_total` 后，不会继续复用旧的 `output_tps_avg` 搜索 trial。
+
+| `assess_search` 字段 | 默认值 | 通俗解释 |
+| --- | --- | --- |
+| `strategy` | `exhaustive` | 使用 TPE 时必须写 `tpe`。 |
+| `max_trials` | 20 | 最多实际测试多少种不重复参数组合。最终次数不会超过笛卡尔积的总组合数。 |
+| `startup_trials` | `min(5, max_trials)` | 开始的多少轮先做探索，不依赖已完成结果建立的 TPE 判断。必须是非负整数且不能大于 `max_trials`。 |
+| `seed` | 42 | TPE 采样随机种子。固定配置和种子有助于复现选择顺序，但真实性能波动仍可能改变后续选择。 |
+| `objective.metric` | `output_tps_total` | TPE 学习和挑选参数的目标指标。 |
+| `objective.direction` | `maximize` | `maximize` 找最大值，`minimize` 找最小值。吞吐通常 maximize，时延通常 minimize。 |
+| `constraints` | 空 | 对一个或多个结果指标设置 `min`、`max`。违反约束的 trial 会被重罚并标记为不可行。 |
+
+例如“TTFT P90 不超过 1000 ms、TPOT P90 不超过 50 ms，在满足条件的组合里最大化输出吞吐”就是：
+
+```yaml
+assess_search:
+  strategy: tpe
+  max_trials: 20
+  startup_trials: 5
+  seed: 42
+  objective:
+    metric: output_tps_total
+    direction: maximize
+  constraints:
+    ttft_p90: {max: 1000}
+    tpot_p90: {max: 50}
+```
+
+`objective.metric` 与 `direction` 的关联很直接：框架先从每组 benchmark 的 summary 中按 `metric` 取数，再根据 `direction` 比较大小。约束不满足时，这个 objective 数值仍会记录，但该组不算可行最优组合。
+
+### `assess_test_param` 路径怎么写
+
+推荐总是写完整路径，框架会严格检查路径已经存在；拼错字段不会静默生成一组未修改的 YAML。
+
+| 写法 | 选择范围 | 示例 |
+| --- | --- | --- |
+| 普通点路径 | 普通字典中的一个现有字段 | `benchmark.perf.batch_size` |
+| `instances[*]` | 普通部署的全部实例 | `deployment.instances[*].serving_extensiable_param.max_seqs_per_batch` |
+| `instances[0]` | 普通部署列表中下标为 0 的实例 | `deployment.instances[0].device_ids` |
+| `instances[name=...]` | 普通部署中指定名字的实例 | `deployment.instances[name=worker-0].serving_extensiable_param.enable_graph` |
+| `instances[role=...]` | 普通部署中指定角色的所有实例 | `deployment.instances[role=worker].serving_extensiable_param.max_seqs_per_batch` |
+| `pd_instances[*]` | 全部逻辑 P/D 实例 | `deployment.pd_instances[*].serving_extensiable_param.max_seqs_per_batch` |
+| `pd_instances[0]` | 下标为 0 的逻辑 P/D 实例 | `deployment.pd_instances[0].serving_extensiable_param.enable_graph` |
+| `pd_instances[name=...]` | 指定逻辑 P/D 实例 | `deployment.pd_instances[name=prefill-0].serving_extensiable_param.max_seqs_per_batch` |
+| `pd_instances[role=...]` | 所有 Prefill 或所有 Decode 实例 | `deployment.pd_instances[role=decode].serving_extensiable_param.max_seqs_per_batch` |
+
+候选值必须是非空列表。字段本身是列表时，要把“每个完整列表”作为一个候选：
+
+```yaml
+assess_test_param:
+  # 搜索 master-0 整体使用 2 卡还是 4 卡
+  deployment.instances[name=master-0].device_ids:
+  - [0, 1]
+  - [0, 1, 2, 3]
+```
+
+这就是“支持整体搜索 `device_ids`，不支持 `device_ids[0]`”的含义：框架可以把整个列表从 `[0, 1]` 换成 `[0, 1, 2, 3]`，但通用路径解析器不能只修改卡号列表里的第一个元素。同理，不支持 `deployment.pd_instances[0].nodes[0].device_ids[0]` 这种任意深度列表索引。
+
+还需注意：
+
+- 选择器只专门支持 `deployment.instances[...]` 和 `deployment.pd_instances[...]` 这两层；`nodes[0]` 不是通用选择器。
+- 目标字段必须已经出现在基础 YAML 中。不能用搜参路径临时发明一个新的 xLLM 参数。
+- 旧式裸字段名如 `batch_size`、`max_seqs_per_batch` 仍兼容，但存在“同时修改多个匹配实例”的隐式行为，新用例不要依赖它。
+- 搜 `benchmark.perf.batch_size` 时，如果没有显式同时搜索 `benchmark.perf.num_prompts`，每个候选自动设置 `num_prompts = batch_size * 4`；显式搜索 `num_prompts` 时，以显式候选为准。
+- 也可以把点路径改写成层级字典，但完整点路径更容易复制、检查和记录。
+
+层级写法示例：
+
+```yaml
+assess_test_param:
+  deployment:
+    pd_instances[name=prefill-0]:
+      serving_extensiable_param:
+        max_seqs_per_batch: [8, 16]
+```
+
+### PD 拓扑搜索
+
+用 `assess_topologies` 预先列出完整合法拓扑，再把名字放进 `assess_test_param.deployment_topology`：
+
+```yaml
+assess_topologies:
+  topo_1p1d: {pd_instances: [...]}
+  topo_2p1d_d2n: {pd_instances: [...]}
+assess_test_param:
+  deployment_topology: [topo_1p1d, topo_2p1d_d2n]
+  benchmark.perf.batch_size: [1, 2]
+  deployment.pd_instances[role=prefill].serving_extensiable_param.max_seqs_per_batch: [8, 16]
+assess_search: {strategy: exhaustive, objective: {metric: output_tps_total, direction: maximize}}
+```
+
+拓扑候选必须各自能独立运行；不要分别笛卡尔搜索 P 数量、D 数量和 node 数量，否则很容易组合出没有 IP、端口冲突或 rank 不合法的配置。
+
+拓扑搜索的完整规则：
+
+- `assess_topologies` 只用于层级 PD YAML，并且基础部署不能再写扁平 P/D `deployment.instances`。
+- 每个拓扑名字下面目前只允许一个字段：`pd_instances`。`pd_control`、`master_host`、资源同步、benchmark runner 等公共配置仍放在基础 `deployment` 中。
+- `assess_test_param.deployment_topology` 的每个值必须正好匹配一个 `assess_topologies` 名字。
+- 每个候选拓扑都要写完整的 P/D 实例、node、host、卡和端口，且必须单独合法。
+- 框架先替换本轮完整拓扑，再应用同一轮的普通搜索参数。因此与拓扑联合搜索的路径必须在每个候选拓扑里都能匹配。
+- `deployment.pd_instances[role=prefill]...` 会修改该拓扑里的所有 Prefill 逻辑实例；如果 2P 拓扑需要两个 P 使用不同值，应改用 `[name=prefill-0]`、`[name=prefill-1]`，并确保所有拓扑都有对应名字，或者把差异直接写进各拓扑。
+
+P/D 实例个数、每个实例的 node 数、每个 node 的卡数可以搜索，但稳妥方式是把它们作为一个完整 `deployment_topology` 候选一起切换。这样 IP、端口、rank 和 xLLM 并行参数能作为一套合法配置管理。
+
+### 搜索目标和约束可用指标
+
+`objective.metric` 和 `constraints` 的键必须来自 benchmark 性能结果的 `ResultSummary`。当前可用字段为：
+
+| 指标 | 含义 |
+| --- | --- |
+| `total_requests` | 成功解析到的总请求数 |
+| `failed_requests` | 失败请求数 |
+| `concurrency` | 结果记录的并发值 |
+| `max_concurrency` | 结果记录的最大并发值 |
+| `request_throughput` | 每秒完成请求数 |
+| `input_tokens_avg` | 平均输入 token 数 |
+| `output_tokens_avg` | 平均输出 token 数 |
+| `output_tps_total` | 汇总输出 token 吞吐，`para_set` 默认最大化该指标 |
+| `output_tps_avg` | 平均输出 token 吞吐，可显式作为其他搜索目标 |
+| `summary_tps_total` | 汇总总 token 吞吐 |
+| `ttft_avg`、`ttft_p90`、`ttft_p99` | 首 token 时延的平均值/P90/P99 |
+| `tpot_avg`、`tpot_p90`、`tpot_p99` | 每输出 token 时延的平均值/P90/P99 |
+| `e2el_avg`、`e2el_p90` | 端到端时延的平均值/P90 |
+
+不要使用 Excel 为方便展示而产生的列名或旧别名，例如 `output_token_throughput`；搜索器按上表中的内部字段精确取值。
+
+### 搜索输出怎么看
+
+每个参数组合使用短名字 `<基础用例名>_sg1`、`_sg2`，不会把所有参数和值拼进目录名。每个 `_sgN` 目录下的 `assess_test_param.yaml` 保存：
+
+- `current_combination`：本轮实际选择的参数。
+- `assess_test_param`：基础用例中的完整搜索空间，只包含搜索相关内容。
+- `resolved_topology`：使用拓扑搜索时，本轮最终采用的完整 PD 拓扑。
+
+汇总文件：
+
+- `search_summary.yaml`：策略、目标、约束、执行数量、可行数量、最佳组合和全部 trial 摘要。
+- `search_trials.csv`：一行一个实际执行组合，便于排序和二次分析。
+- TPE 还会保存 `search_state.db`，用于记录 Optuna study 状态。
+
+常见计数字段含义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `planned_trials` | exhaustive 事先计划的组合数；auto_assess 是初始队列计划数，不代表最终动态轮数。 |
+| `executed_trials` | 已经真正执行过的 trial 数。 |
+| `completed_trials` | 没有调度/结果缺失错误的 trial 数；它可能包含违反约束的 trial。 |
+| `failed_trials` | 启动、benchmark 或结果解析等原因导致失败的 trial 数。 |
+| `constraint_failed_trials` | 测试执行完成，但一个或多个 `constraints` 不满足的 trial 数。 |
+| `feasible_trials` | 执行成功并满足全部约束、可参与最佳组合选择的 trial 数。 |
+
+## 6. 保留字段和当前限制
+
+下面这些字段在历史配置或代码接口中仍有保留，但当前 YAML 用例不依赖它们，新用例无需填写，本文不再展开：
+
+- AISBench 性能：`mode`、`summarizer`、`concurrency`、`total_requests`、`timeout`、`warmup_requests`。
+- AISBench 通用模板：`dump_extract_rate`、`enable_debug`、`merge_ds`、`max_num_worker`、`pressure`。
+- 历史顶层字段：`additional_config`，以及与实例配置重复的顶层 `block_size`、`port`、`num_devices`、`start_device_id`、`world_size`。
+- 部署兼容字段：`deployment.startup_policy`、`deployment.benchmark.endpoint`、`instances[].service.port`。
+
+现有 YAML 中仍能看到、但写新用例时需要注意的限制只有以下几项：
+
+- AISBench 性能输出上限实际取 `perf.output_len`；保留的 `perf.max_out_len` 建议与它写成相同值。
+- AISBench 精度输出上限实际取 `acc.output_len`；`acc.input_len`、`acc.max_out_len` 仅保留。
+- AISBench 精度的 `ignore_eos`、思考模式等生成参数应放在 `generation_kwargs`，不要依赖 `acc` 下的同名直接字段。
+- `benchmark.perf/acc.dump_eval_details` 仅保留；当前 AISBench 精度如需明细，应使用顶层 `dump_eval_details: true`。
+- EvalScope 性能当前固定 `ignore_eos: true`。
+- 多实例当前始终并行启动，服务 endpoint 始终由部署拓扑自动推导。
+
+搜参不支持 `nodes[0]`、`device_ids[0]` 等任意深度列表路径，这属于搜索路径规则，详见第 5 节。
+
+## 7. 常用执行命令
+
+普通单用例：
+
+```bash
+python main.py --case_name 01_single_aisbench_perf --host_addr 11.87.191.75
+```
+
+多机普通用例的 IP 已经写在 YAML 中，不要用 `--host_addr` 试图整体替换多机拓扑：
+
+```bash
+python main.py --case_name 05_multihost_aisbench_perf
+```
+
+并发摸高和 exhaustive/TPE 搜参建议使用 `--case_group`。当 `tests/case_group/<名字>` 不存在时，框架会把这个名字当成单个基础 YAML：
+
+```bash
+python main.py --case_group 09_single_auto_assess \
+  --assess_test_type auto_assess --target_ttft 1000 --target_tpot 50
+
+python main.py --case_group 10_single_para_set_exhaustive \
+  --assess_test_type para_set
+
+python main.py --case_group 11_single_para_set_tpe \
+  --assess_test_type para_set
+```
+
+搜索完成后，重点查看 `outputs/<case_group>/search/<基础用例名>/search_summary.yaml` 和 `search_trials.csv`。前者汇总最佳组合和成功/失败数量，后者一行记录一次实际测试。
+
+## 8. 写完后的检查清单
+
+- 先确认 `metrics`、`benchmark_type` 和对应的 `perf/acc` 块一致。
+- 确认模型路径在所有服务节点存在，数据资源路径在 benchmark runner 可见。
+- 单机只有一个 instance；普通多机用 `instances`；PD 只用 `pd_instances`。
+- 多机每个 host 的 SSH、容器运行环境、NPU 卡号和端口都可用。
+- 非 PD 多机的 `rank_start` 要按全局卡数累计；PD 可按逻辑实例分别累计或省略让框架计算。
+- 搜索路径必须指向 YAML 中已经存在的字段；不要使用 `nodes[0]`、`device_ids[0]` 这种通用列表路径。
+- `para_set` 的 case group 内不要混用 exhaustive 和 TPE；每个组合的完整配置会保存在输出目录，旧用例不会被改写。

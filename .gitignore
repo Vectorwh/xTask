@@ -4,3 +4,24 @@ build
 cmake-build-debug
 venv
 .VSCodeCounter
+config/ssh_hosts.json
+.env
+.xtask.env
+
+# Python/test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Runtime outputs
+outputs/
+benchmark/
+my-etcd-1.etcd/
+_generated_ranktable_*.json
+_tmp_ranktable_*.json
+
+# Locally downloaded or unpacked build dependencies
+pkg/xllm/vendors/
+pkg/xllm/*.whl
+*.rpm

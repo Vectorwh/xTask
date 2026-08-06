@@ -20,12 +20,15 @@ class PerformanceMetrics:
 class ResultSummary:
     """结果摘要数据类"""
     total_requests: int
+    failed_requests: int
     concurrency: int
     max_concurrency: int
     request_throughput: float
     input_tokens_avg: float
     output_tokens_avg: float
-    output_token_throughput: float
+    output_tps_avg: float
+    output_tps_total: float
+    summary_tps_total: float
     ttft_avg: float
     ttft_p90: float
     ttft_p99: float

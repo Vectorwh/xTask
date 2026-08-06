@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, asdict
+from types import SimpleNamespace
 from multiprocessing import Process, Event, Queue
 import json
 import psutil
@@ -1121,6 +1122,7 @@ class NpuProcessGuard:
 
     - 复用 npu-smi 检查逻辑，遍历 npu_card_ids 中所有卡；
     - 检查语义：任一卡出现异常（无目标进程/无运行进程）即视为异常，触发中断。
+    - 支持通过 command_executor 在指定执行上下文中运行 npu-smi，例如远程节点容器。
     """
 
     def __init__(
@@ -1131,6 +1133,7 @@ class NpuProcessGuard:
         check_interval: float = 300.0,
         startup_grace: float = 0.0,
         container_name: Optional[str] = None,
+        command_executor: Optional[Callable[[str], Any]] = None,
     ):
         """
         Args:
@@ -1142,6 +1145,9 @@ class NpuProcessGuard:
             container_name: 可选，容器名；传入则 npu-smi 通过
                 `docker exec -i <container_name> sh -c '<npu-smi ...>'` 在容器内执行，
                 不传则在 host 上直接执行。
+            command_executor: 可选，外部命令执行器；传入后 npu-smi 命令由该执行器执行，
+                返回对象需包含 exit_code / stdout / stderr（如 CommandResult）。
+                用于在指定 host 或容器中执行 npu-smi，实现多机节点监控。
         """
         if isinstance(npu_card_ids, int):
             npu_card_ids = [npu_card_ids]
@@ -1151,9 +1157,31 @@ class NpuProcessGuard:
         self.check_interval = check_interval
         self.startup_grace = startup_grace
         self.container_name = container_name
+        self.command_executor = command_executor
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.aborted_reason: Optional[str] = None
+
+    def _run_command(self, cmd: str):
+        """执行 npu-smi 命令：本地 subprocess 或外部 command_executor。"""
+        if self.command_executor is not None:
+            result = self.command_executor(cmd)
+            exit_code = getattr(result, "exit_code", None)
+            if exit_code is None:
+                exit_code = 0 if getattr(result, "success", True) else 1
+            return SimpleNamespace(
+                returncode=exit_code,
+                stdout=getattr(result, "stdout", "") or "",
+                stderr=getattr(result, "stderr", "") or "",
+            )
+        return subprocess.run(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            timeout=10,
+        )
 
     def _get_npu_processes(self, card_id: int) -> List[dict]:
         """调用 npu-smi 获取指定 NPU 卡上的进程信息。
@@ -1169,7 +1197,9 @@ class NpuProcessGuard:
                No process in device
 
         执行位置：
-            - 固定在 host 上直接执行 npu-smi（本类不做容器适配）。
+            - 无 command_executor 且 container_name 为空时，在 host 上直接执行 npu-smi；
+            - 无 command_executor 且 container_name 非空时，通过 docker exec 在容器内执行；
+            - 传入 command_executor 时，由调用方决定具体 host 或容器执行位置。
 
         Returns:
             进程信息列表，每个元素包含以下键（与调用方兼容）：
@@ -1183,14 +1213,7 @@ class NpuProcessGuard:
             chip_id = safe_card_id // 2   # -i 参数：对 2 取商
             core_id = safe_card_id % 2    # -c 参数：对 2 取余
             cmd = self._build_npu_smi_command(chip_id, core_id)
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding="utf-8",
-                timeout=10
-            )
+            result = self._run_command(cmd)
             if result.returncode != 0:
                 logging.error(f"执行npu-smi失败（NPU卡{card_id}）：{result.stderr}")
                 return []
@@ -1221,15 +1244,17 @@ class NpuProcessGuard:
     def _build_npu_smi_command(self, chip_id: int, core_id: int) -> str:
         """构造最终要执行的 shell 命令字符串。
 
-        - 无 container_name：直接在 host 执行 npu-smi；
-        - 有 container_name：包装成 `docker exec -i <container_name> sh -c '<npu-smi ...>'`
-          在容器内执行。
+        - 无 command_executor 且 无 container_name：直接在 host 执行 npu-smi；
+        - 无 command_executor 且 有 container_name：包装成 docker exec 在容器内执行；
+        - 有 command_executor：由执行器执行，这里只返回裸 npu-smi 命令。
 
         chip_id / core_id 已是 int，容器名用 shlex.quote 转义，避免注入。
         """
         npu_smi_cmd = (
             f"npu-smi info -t proc-mem -i {int(chip_id)} -c {int(core_id)}"
         )
+        if self.command_executor is not None:
+            return npu_smi_cmd
         if self.container_name:
             return (
                 f"docker exec -i {shlex.quote(str(self.container_name))} "

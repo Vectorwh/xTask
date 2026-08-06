@@ -14,7 +14,7 @@ class OpenMeClient:
             "AppId": "lw5xdL5HsIHbXdssEMaV",  # 算法CICD应用ID
             "ERP": "kongshuaikang1",          # 消息发送人
             "TenantId": "CN.JD.GROUP",        # 租户，国内
-            "GroupId": "10224622479",         # 发送京me群ID
+            "GroupId": "00000000",         # 发送京me群ID
             "RobotId": "00_df87bfb3cfd340ec",   # 机器人ID
             "TemplateCardId": "YWYOs4nghsVy1VWPHngjS",  # 卡片ID
             "TemplateCardVersion": "0.0.5"              # 卡片版本
@@ -102,7 +102,7 @@ class OpenMeClient:
             "model": result["task_config"]["served_model_name"],
             "report": f"[Summary](http://{host_addr}/" + report_path + "/" + case_name + ".json)",
             "case_exec_time": str(int(result['execution_time'])) + "s",
-            "xllm_log": f"[NodeLOG](http://{host_addr}/" + report_path + "/log/)"
+            "xllm_log": f"[NodeLOG](http://{host_addr}/" + report_path + "/xllm_log/)"
         }
         
         self.all_case_num = self.all_case_num + 1

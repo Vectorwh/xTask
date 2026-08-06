@@ -8,8 +8,12 @@ setup(
     install_requires=[
         "pyyaml>=6.0.0",
         "psutil>=7.0.0",
+        "openpyxl>=3.1.0",
         # ... 其他依赖
     ],
+    extras_require={
+        "search": ["optuna>=4.0,<5.0"],
+    },
     entry_points={
         'console_scripts': [
             'xtask=xtask.main:main',  # 创建命令行命令

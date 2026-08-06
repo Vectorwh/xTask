@@ -4,10 +4,11 @@
 # 环境变量设置
 export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
 export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
-export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/
+#export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/
 export PYTORCH_INSTALL_PATH="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
 export LIBTORCH_ROOT="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
-export LD_LIBRARY_PATH=/usr/local/libtorch_npu/lib:$LD_LIBRARY_PATH
+export TRITON_BINARY_PATH="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(next(iter(importlib.util.find_spec("xllm").submodule_search_locations))) / "triton_npu" / "binary")')"
+#export LD_LIBRARY_PATH=/usr/local/libtorch_npu/lib:$LD_LIBRARY_PATH
 
 # Ascend 环境设置
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -42,6 +43,7 @@ PROGRESS_CONN_PORT={PROGRESS_CONN_PORT}
 MODEL_PATH={MODEL_PATH}
 START_PORT={START_PORT}
 START_DEVICE={START_DEVICE}
+VISIBLE_DEVICES={VISIBLE_DEVICES}
 NNODES={NNODES}
 WORLD_SIZE={WORLD_SIZE}
 LOG_DIR={LOG_DIR}
@@ -49,6 +51,10 @@ COMMUNICATION_BACKEND={COMMUNICATION_BACKEND}
 USERID={USERID}
 SERVING_EXTENSIABLE_PARAM={SERVING_EXTENSIABLE_PARAM}
 mkdir -p $LOG_DIR
+if [ "{PD_ENABLED}" = "true" ]; then
+  export no_proxy="{PD_NO_PROXY}"
+  export NO_PROXY="$no_proxy"
+fi
 # ========================================
 
 # HCCL 端口配置
@@ -58,7 +64,7 @@ export HCCL_IF_BASE_PORT={HCCL_IF_PORT}
 MASTER_NODE_ADDR="$LOCAL_IP:$PROGRESS_CONN_PORT"
 
 # 启动服务节点
-export ASCEBD_RT_VISIBLE_DEVICES=$START_DEVICE
+export ASCEND_RT_VISIBLE_DEVICES={VISIBLE_DEVICES}
 LOG_DIR="log"
 LOG_FILE="$LOG_DIR/node_0.log"
 
@@ -68,7 +74,7 @@ xllm_command=(
   --port "$START_PORT" \
   --master_node_addr="$MASTER_NODE_ADDR" \
   --nnodes="$WORLD_SIZE" \
-  --node_rank="$START_DEVICE" \
+  --node_rank=0 \
   --communication_backend="$COMMUNICATION_BACKEND" \
   $SERVING_EXTENSIABLE_PARAM
 )
@@ -77,6 +83,6 @@ echo "服务启动命令: ${xllm_command[*]}"
 
 "${xllm_command[@]}" > "$LOG_FILE" 2>&1 &
 
-echo "启动设备 npu:$DEVICE，端口 $PORT，日志: $LOG_FILE"
+echo "启动设备 npu:$ASCEND_RT_VISIBLE_DEVICES，端口 $START_PORT，日志: $LOG_FILE"
 
 chown -R $USERID:$USERID $LOG_DIR

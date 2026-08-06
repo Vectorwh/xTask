@@ -11,7 +11,7 @@ benchmark:
     seed: 1024
     threshold: 0.05
     timeout: 3600
-    endpoint: "/v1"
+    endpoint: /v1
     generation_config:
       temperature: 1
       top_p: 0.95
@@ -20,9 +20,10 @@ benchmark:
       retries: 5
     dataset_args:
       mmmu:
-        dataset_id: "/xllm_test_060/datasets/mmmu"
-        subset_list: ["Music"]
-        split: "validation"
+        dataset_id: /xllm_test_060/datasets/mmmu
+        subset_list:
+        - Music
+        split: validation
 block_size: 128
 case_name: qwen3_vl_8b_xllm_acc_mmmu
 communication_backend: hccl
@@ -30,27 +31,34 @@ dataset_format: json
 dataset_name: mmmu
 dataset_path: ''
 engine_type: xllm
-host_addr: 11.87.191.75
 metrics: acc
 model_path: /export/home/models/Qwen3-VL-8B-Instruct
-num_devices: 2
-start_device_id: 0
-port: 8800
 served_model_name: Qwen3-VL-8B-Instruct
 userid: 1048
-world_size: 2
 serving_wait_time: 10
-serving_extensiable_param:
-  max_memory_utilization: 0.85
-  enable_chunked_prefill: true
-  enable_schedule_overlap: true
-  enable_prefix_cache: true
-  enable_shm: true
-  backend: vlm
-  max_encoder_cache_size: 128
-  enable_intralayer_addnorm: true
-  enable_interlayer_addnorm: true
-  enable_split_rmsnorm_rope: true
-  limit_image_per_prompt: 8
-  enable_graph: true
-  enable_graph_mode_decode_no_padding: true
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: true
+      enable_shm: true
+      backend: vlm
+      max_encoder_cache_size: 128
+      enable_intralayer_addnorm: true
+      enable_interlayer_addnorm: true
+      enable_split_rmsnorm_rope: true
+      limit_image_per_prompt: 8
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true

@@ -1,4 +1,6 @@
 pyyaml
 psutil
 pandas
+openpyxl>=3.1.0
 transformers
+optuna>=4.0,<5.0

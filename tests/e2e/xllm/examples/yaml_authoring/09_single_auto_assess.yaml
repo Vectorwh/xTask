@@ -1,0 +1,56 @@
+case_name: 09_single_auto_assess
+engine_type: xllm
+model_path: /export/home/models/Qwen3-8B
+served_model_name: Qwen3-8B
+metrics: perf
+dataset_name: gsm8k
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    case_type: performance
+    api_type: vllm_api_general_stream
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    input_len: 1024
+    output_len: 1024
+    max_out_len: 1024
+    batch_size: 3
+    bs_assess:
+      low_thrld: 1
+      high_thrld: 8
+    request_rate: 3
+    num_prompts: 12
+    num_warmups: 10
+    baseline: 110.6873
+    threshold: 0.10
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: true
+
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_seqs_per_batch: 16
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true
