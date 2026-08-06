@@ -23,7 +23,7 @@ benchmark:
     threshold: 0.04
     generation_kwargs:
       temperature: 0.5
-      ignore_eos: False
+      ignore_eos: false
       top_k: 10
       top_p: 0.95
       seed: None
@@ -35,25 +35,32 @@ dataset_format: json
 dataset_name: textvqa
 dataset_path: ''
 engine_type: xllm
-host_addr: 11.87.191.75
 metrics: acc
 model_path: /export/home/models/Qwen2.5-VL-7B-Instruct
-num_devices: 2
-start_device_id: 0
-port: 8800
 served_model_name: Qwen2.5-VL-7B-Instruct
 userid: 1048
-world_size: 2
 serving_wait_time: 10
-serving_extensiable_param:
-  max_memory_utilization: 0.85
-  enable_chunked_prefill: true
-  enable_schedule_overlap: true
-  enable_prefix_cache: true
-  enable_shm: true
-  backend: vlm
-  max_encoder_cache_size: 128
-  enable_intralayer_addnorm: false
-  enable_interlayer_addnorm: false
-  enable_split_rmsnorm_rope: false
-  limit_image_per_prompt: 8
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: true
+      enable_shm: true
+      backend: vlm
+      max_encoder_cache_size: 128
+      enable_intralayer_addnorm: false
+      enable_interlayer_addnorm: false
+      enable_split_rmsnorm_rope: false
+      limit_image_per_prompt: 8

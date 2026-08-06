@@ -25,7 +25,7 @@ benchmark:
     num_warmups: 20
     generation_kwargs:
       temperature: 0
-      ignore_eos: True
+      ignore_eos: true
 block_size: 128
 case_name: qwen3_8b_xllm_perf_i10240_o7168_bs1
 communication_backend: hccl
@@ -33,22 +33,29 @@ dataset_format: json
 dataset_name: gsm8k
 dataset_path: ''
 engine_type: xllm
-host_addr: 11.87.191.101
 metrics: perf
 model_path: /export/home/models/Qwen3-8B
-num_devices: 2
-start_device_id: 0
-port: 8800
 served_model_name: Qwen3-8B
 userid: 1048
-world_size: 2
 serving_wait_time: 10
-serving_extensiable_param:
-  max_seqs_per_batch: 10
-  enable_chunked_prefill: true
-  enable_schedule_overlap: true
-  enable_prefix_cache: false
-  enable_shm: true
-  block_size: 128
-  enable_graph: true
-  enable_graph_mode_decode_no_padding: true
+deployment:
+  master_host: 11.87.191.101
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.101
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_seqs_per_batch: 10
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true

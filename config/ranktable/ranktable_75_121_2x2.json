@@ -1,0 +1,60 @@
+{
+  "version": "1.2",
+  "server_count": "2",
+  "server_list": [
+    {
+      "server_id": "11.87.191.75",
+      "host_ip": "11.87.191.75",
+      "container_ip": "11.87.191.75",
+      "device": [
+        {
+          "device_id": "0",
+          "device_ip": "192.9.2.199",
+          "rank_id": "0",
+          "super_device_id": "37748736"
+        },
+        {
+          "device_id": "1",
+          "device_ip": "192.9.3.198",
+          "rank_id": "1",
+          "super_device_id": "37814273"
+        }
+      ],
+      "host_nic_ip": "reserve"
+    },
+    {
+      "server_id": "11.87.191.121",
+      "host_ip": "11.87.191.121",
+      "container_ip": "11.87.191.121",
+      "device": [
+        {
+          "device_id": "0",
+          "device_ip": "192.47.2.199",
+          "rank_id": "2",
+          "super_device_id": "197132288"
+        },
+        {
+          "device_id": "1",
+          "device_ip": "192.47.3.198",
+          "rank_id": "3",
+          "super_device_id": "197197825"
+        }
+      ],
+      "host_nic_ip": "reserve"
+    }
+  ],
+  "super_pod_list": [
+    {
+      "super_pod_id": "2",
+      "server_list": [
+        {
+          "server_id": "11.87.191.75"
+        },
+        {
+          "server_id": "11.87.191.121"
+        }
+      ]
+    }
+  ],
+  "status": "completed"
+}

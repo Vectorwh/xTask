@@ -87,7 +87,12 @@ Usage Examples:
         input_group.add_argument(
             "--case_group", "-g",
             type=str,
-            help="Test cases groups, corresponding to YAML file in config/cases/"
+            help=(
+                "Test cases group name. If tests/case_group/<name> exists, it is used as a "
+                "group file (one case name per line). Otherwise <name> is treated as a single "
+                "case name (the initial YAML), so --assess_test_type auto_assess/para_set can "
+                "run without creating a separate group file."
+            )
         )
         input_group.add_argument(
             "--model_name", "-m",
@@ -505,7 +510,7 @@ Usage Examples:
     def _validate_case_name(self, case_file: str) -> bool:
         """Validate if test case exists"""
         from pathlib import Path
-        return Path(case_file).exists()
+        return case_file is not None and Path(case_file).exists()
     
     def _validate_direct_args(self, args: argparse.Namespace) -> bool:
         """Validate direct argument mode parameters"""

@@ -4,7 +4,7 @@ benchmark:
   acc:
     acc_dataset_len: 200
     api_type: vllm_api_general_chat
-    baseline: 96.00
+    baseline: 96.0
     batch_size: 8
     case_type: accuracy
     dataset_conf: gsm8k_gen_0_shot_noncot_chat_prompt
@@ -24,7 +24,7 @@ benchmark:
     threshold: 0.04
     generation_kwargs:
       temperature: 0
-      ignore_eos: False
+      ignore_eos: false
 block_size: 128
 case_name: deepseek_v3.2_xllm_acc_gsm8k_dp1_ep1
 communication_backend: hccl
@@ -32,26 +32,33 @@ dataset_format: json
 dataset_name: gsm8k
 dataset_path: ''
 engine_type: xllm
-host_addr: 11.87.191.101
 metrics: acc
 model_path: /export/home/models/DeepSeek-V3.2-w8a8
-num_devices: 16
-start_device_id: 0
-port: 8800
 served_model_name: DeepSeek-V3.2-w8a8
 userid: 1048
-world_size: 16
 serving_wait_time: 10
-serving_extensiable_param:
-  max_seqs_per_batch: 16
-  enable_chunked_prefill: true
-  enable_schedule_overlap: true
-  enable_prefix_cache: false
-  enable_shm: true
-  block_size: 128
-  dp_size: 1
-  ep_size: 1
-  draft_model: /export/home/models/DeepSeek-V3.2-w8a8-mtp
-  num_speculative_tokens: 3
-  enable_graph: true
-  enable_graph_mode_decode_no_padding: true
+deployment:
+  master_host: 11.87.191.101
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.101
+    role: master
+    rank_start: 0
+    device_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    local_port: 8800
+    serving_extensiable_param:
+      max_seqs_per_batch: 16
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      dp_size: 1
+      ep_size: 1
+      draft_model: /export/home/models/DeepSeek-V3.2-w8a8-mtp
+      num_speculative_tokens: 3
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true

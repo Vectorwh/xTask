@@ -16,6 +16,8 @@ if [[ -z "${WORK_ROOT:-}" ]]; then
 fi
 
 XLLM_DIR="${WORK_ROOT}/xllm"
+XLLM_PKG_DIR="${WORK_ROOT}/pkg/xllm"
+RUNTIME_LIB_DIR="${XLLM_PKG_DIR}/runtime_libs"
 
 if [[ ! -f "${XLLM_DIR}/setup.py" ]]; then
   echo "ERROR: '${XLLM_DIR}/setup.py' not found. Is the xLLM source prepared?" >&2
@@ -36,15 +38,42 @@ pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple
 python setup.py bdist_wheel --device npu
 
 # 编译完执行生成件归档
-cp -rf /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/ "${WORK_ROOT}/pkg/xllm/"
+mkdir -p "${XLLM_PKG_DIR}"
+cp -rf /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/ "${XLLM_PKG_DIR}/"
 #cp "${XLLM_DIR}/build/xllm/core/server/xllm" "${WORK_ROOT}/pkg/xllm/"
-cp -f "${XLLM_DIR}"/dist/* "${WORK_ROOT}/pkg/xllm/"
+cp -f "${XLLM_DIR}"/dist/* "${XLLM_PKG_DIR}/"
+
+# 收集编译环境中 xLLM 启动所需、但尚未打入 wheel 的动态库。
+# libxxhash.so.0 通常是版本化文件的软链接，解引用后归档，避免测试容器拿到断链。
+XXHASH_SONAME_PATH="/usr/lib64/libxxhash.so.0"
+if [[ ! -e "${XXHASH_SONAME_PATH}" ]]; then
+  echo "ERROR: '${XXHASH_SONAME_PATH}' not found after xLLM build." >&2
+  exit 1
+fi
+XXHASH_REAL_PATH="$(readlink -f "${XXHASH_SONAME_PATH}")"
+if [[ -z "${XXHASH_REAL_PATH}" || ! -f "${XXHASH_REAL_PATH}" ]]; then
+  echo "ERROR: failed to resolve '${XXHASH_SONAME_PATH}'." >&2
+  exit 1
+fi
+
+ASIO_SO_PATH="$(find "${XLLM_DIR}/build" -type f -path '*/mooncake-common/libasio.so' -print -quit)"
+if [[ -z "${ASIO_SO_PATH}" || ! -f "${ASIO_SO_PATH}" ]]; then
+  echo "ERROR: libasio.so not found under '${XLLM_DIR}/build'." >&2
+  exit 1
+fi
+
+rm -rf "${RUNTIME_LIB_DIR}"
+mkdir -p "${RUNTIME_LIB_DIR}"
+install -m 0755 "${XXHASH_REAL_PATH}" "${RUNTIME_LIB_DIR}/libxxhash.so.0"
+install -m 0755 "${ASIO_SO_PATH}" "${RUNTIME_LIB_DIR}/libasio.so"
+echo "Collected runtime libraries in '${RUNTIME_LIB_DIR}':"
+ls -l "${RUNTIME_LIB_DIR}/libxxhash.so.0" "${RUNTIME_LIB_DIR}/libasio.so"
 
 # 由外层 prepare_xllm.sh 通过 -e HOST_UID / -e HOST_GID 传入宿主机启动用户的 uid/gid，
 # 归档后把 pkg/xllm 目录及其子文件所有者改回宿主机用户。
 if [[ -n "${HOST_UID:-}" && -n "${HOST_GID:-}" ]]; then
-  echo "chown ${WORK_ROOT}/pkg/xllm to host user ${HOST_UID}:${HOST_GID}"
-  chown -R "${HOST_UID}:${HOST_GID}" "${WORK_ROOT}/pkg/xllm/"
+  echo "chown ${XLLM_PKG_DIR} to host user ${HOST_UID}:${HOST_GID}"
+  chown -R "${HOST_UID}:${HOST_GID}" "${XLLM_PKG_DIR}/"
 else
   echo "WARN: HOST_UID/HOST_GID not set, skip chown; files may be owned by root on host."
 fi

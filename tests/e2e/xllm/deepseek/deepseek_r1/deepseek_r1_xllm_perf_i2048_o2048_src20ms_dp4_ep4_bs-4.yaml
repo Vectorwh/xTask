@@ -25,7 +25,7 @@ benchmark:
     threshold: 0.1
     generation_kwargs:
       temperature: 0
-      ignore_eos: True
+      ignore_eos: true
 block_size: 128
 case_name: deepseek_r1_xllm_perf_i2048_o2048_src20ms_dp4_ep4_bs-4
 communication_backend: hccl
@@ -33,27 +33,34 @@ dataset_format: json
 dataset_name: gsm8k
 dataset_path: ''
 engine_type: xllm
-host_addr: 11.87.191.82
 metrics: perf
 model_path: /export/home/models/DeepSeek-R1-w8a8
-num_devices: 16
-port: 8800
 served_model_name: DeepSeek-R1-w8a8
-serving_extensiable_param:
-  block_size: 128
-  dp_size: 4
-  draft_model: /export/home/models/DeepSeek-R1-mtp
-  enable_chunked_prefill: false
-  enable_graph: false
-  enable_graph_mode_decode_no_padding: true
-  enable_prefix_cache: false
-  enable_schedule_overlap: true
-  enable_shm: true
-  ep_size: 4
-  max_seqs_per_batch: 12
-  max_tokens_per_batch: 35840
-  num_speculative_tokens: 2
 serving_wait_time: 10
-start_device_id: 0
 userid: 1048
-world_size: 16
+deployment:
+  master_host: 11.87.191.82
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.82
+    role: master
+    rank_start: 0
+    device_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    local_port: 8800
+    serving_extensiable_param:
+      block_size: 128
+      dp_size: 4
+      draft_model: /export/home/models/DeepSeek-R1-mtp
+      enable_chunked_prefill: false
+      enable_graph: false
+      enable_graph_mode_decode_no_padding: true
+      enable_prefix_cache: false
+      enable_schedule_overlap: true
+      enable_shm: true
+      ep_size: 4
+      max_seqs_per_batch: 12
+      max_tokens_per_batch: 35840
+      num_speculative_tokens: 2

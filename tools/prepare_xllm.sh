@@ -22,8 +22,8 @@ git config --global http.version HTTP/1.1
 git config --global http.postBuffer 524288000
 
 # 网络操作重试参数：最大尝试次数与每次失败后的等待秒数（可通过环境变量覆盖）
-GIT_MAX_RETRIES="${GIT_MAX_RETRIES:-10}"
-GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-10}"
+GIT_MAX_RETRIES="${GIT_MAX_RETRIES:-100}"
+GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-100}"
 
 # 通用重试封装：弱网/代理下 git clone/pull/submodule 易随机失败，重试可显著提高成功率
 # 用法：retry <描述> <命令...>

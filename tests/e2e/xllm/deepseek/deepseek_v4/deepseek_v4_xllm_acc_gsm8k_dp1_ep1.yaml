@@ -24,7 +24,7 @@ benchmark:
     threshold: 0.05
     generation_kwargs:
       temperature: 0
-      ignore_eos: False
+      ignore_eos: false
 block_size: 128
 case_name: deepseek_v4_xllm_acc_gsm8k_dp1_ep1
 communication_backend: hccl
@@ -32,24 +32,31 @@ dataset_format: json
 dataset_name: gsm8k
 dataset_path: ''
 engine_type: xllm
-host_addr: 11.87.48.243
 metrics: acc
 model_path: /export/home/models/DeepSeek-V4-Flash-w8a8-mtp
-num_devices: 8
-start_device_id: 0
-port: 8900
 served_model_name: DeepSeek-V4-Flash-w8a8-mtp
 userid: 1048
-world_size: 8
 serving_wait_time: 10
-serving_extensiable_param:
-  max_memory_utilization: 0.85
-  max_tokens_per_batch: 5120
-  max_seqs_per_batch: 16
-  enable_chunked_prefill: false
-  enable_schedule_overlap: true
-  enable_prefix_cache: false
-  enable_shm: true
-  block_size: 128
-  enable_graph: false
-  enable_graph_mode_decode_no_padding: false
+deployment:
+  master_host: 11.87.48.243
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.48.243
+    role: master
+    rank_start: 0
+    device_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+    local_port: 8900
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_tokens_per_batch: 5120
+      max_seqs_per_batch: 16
+      enable_chunked_prefill: false
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      enable_graph: false
+      enable_graph_mode_decode_no_padding: false

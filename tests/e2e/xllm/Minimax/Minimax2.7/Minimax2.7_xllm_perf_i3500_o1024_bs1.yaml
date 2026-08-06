@@ -25,7 +25,7 @@ benchmark:
     num_warmups: 20
     generation_kwargs:
       temperature: 0
-      ignore_eos: True
+      ignore_eos: true
 block_size: 128
 case_name: Minimax2.7_xllm_perf_i3500_o1024_bs1
 communication_backend: hccl
@@ -33,26 +33,33 @@ dataset_format: json
 dataset_name: gsm8k
 dataset_path: ''
 engine_type: xllm
-host_addr: 11.87.191.121
 metrics: perf
 model_path: /export/home/models/Minimax2.7-BF16-xLLM
-num_devices: 16
-start_device_id: 0
-port: 8800
 served_model_name: Minimax2.7-BF16-xLLM
 userid: 1048
-world_size: 16
 serving_wait_time: 10
-serving_extensiable_param:
-  max_memory_utilization: 0.85
-  max_tokens_per_batch: 8192
-  max_seqs_per_batch: 10
-  enable_chunked_prefill: false
-  enable_schedule_overlap: false
-  enable_prefix_cache: false
-  enable_shm: true
-  block_size: 128
-  dp_size: 1
-  ep_size: 1
-  enable_graph: false
-  enable_graph_mode_decode_no_padding: false
+deployment:
+  master_host: 11.87.191.121
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.121
+    role: master
+    rank_start: 0
+    device_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_tokens_per_batch: 8192
+      max_seqs_per_batch: 10
+      enable_chunked_prefill: false
+      enable_schedule_overlap: false
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      dp_size: 1
+      ep_size: 1
+      enable_graph: false
+      enable_graph_mode_decode_no_padding: false

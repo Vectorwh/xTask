@@ -9,11 +9,13 @@ description = "xTask - 任务调度和执行框架"
 requires-python = ">=3.8"
 dependencies = [
     "numpy>=1.21.0",
+    "openpyxl>=3.1.0",
     "torch>=1.9.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "black", "flake8"]
+search = ["optuna>=4.0,<5.0"]
 
 [project.scripts]
 xtask-cli = "xtask.main:main"  # 安装后的命令行命令

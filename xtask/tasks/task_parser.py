@@ -1,7 +1,15 @@
 import os
 import inspect
 import logging
+import copy
+import re
 from xtask.tasks.base_task import Task, get_case_name_by_args
+from xtask.tasks.topology_search import (
+    ASSESS_TOPOLOGY_PARAMETER,
+    apply_assess_topology,
+    normalize_assess_topologies,
+    resolved_topology_metadata,
+)
 
 def init_task_path(args):
     if args.template:
@@ -20,6 +28,13 @@ def init_task_path(args):
     return task_file_path
 
 def get_case_list_from_group(case_group):
+    """Resolve case group members.
+
+    If ``tests/case_group/<case_group>`` exists, treat it as a group file and
+    return the list of case names inside. Otherwise, fall back to treating
+    ``case_group`` as a single case name (the initial YAML), so users can run
+    ``auto_assess`` / ``para_set`` without creating a separate group file.
+    """
     case_name_list = list()
     case_group_file = os.path.join(os.getcwd(), f"tests/case_group/{case_group}")
     if os.path.exists(case_group_file):
@@ -28,8 +43,27 @@ def get_case_list_from_group(case_group):
             for line in lines:
                 if len(line.strip()):
                     case_name_list.append(line.strip('\n').strip())
-    else:
-        logging.error(f"case group file: {case_group_file} is not exist.")
+        return case_name_list
+
+    # Fallback: case_group is the initial case name (without .yaml extension).
+    case_dir = os.path.join(os.getcwd(), "tests")
+    try:
+        case_file = find_case_file(case_group, case_dir)
+    except Exception:
+        case_file = None
+    if case_file:
+        logging.info(
+            "Case group file not found; treating '%s' as a single-case group (case file: %s)",
+            case_group,
+            case_file,
+        )
+        return [case_group]
+
+    logging.error(
+        "case group file: %s is not exist and no case YAML found for '%s'.",
+        case_group_file,
+        case_group,
+    )
     return case_name_list
 
 
@@ -54,8 +88,11 @@ def find_case_file(case_name, case_dir):
     if not os.path.isdir(case_dir):
         raise NotADirectoryError(f"case_dir: {case_dir} is not dir.")
     
-    # 要查找的文件名
-    target_filename = f"{case_name}.yaml"
+    # case_name may include a directory prefix used to disambiguate cases.
+    # Match the basename while requiring the normalized suffix path to match.
+    normalized_case_name = os.path.normpath(case_name).lstrip(os.sep)
+    target_filename = f"{os.path.basename(normalized_case_name)}.yaml"
+    target_suffix = f"{normalized_case_name}.yaml"
     found_files = []
     
     # 递归遍历目录
@@ -66,7 +103,9 @@ def find_case_file(case_name, case_dir):
         # 在当前目录查找目标文件
         if target_filename in files:
             file_path = os.path.join(root, target_filename)
-            found_files.append(file_path)
+            relative_path = os.path.relpath(file_path, case_dir)
+            if os.sep not in normalized_case_name or relative_path.endswith(target_suffix):
+                found_files.append(file_path)
     
     # 根据查找结果处理
     if len(found_files) == 0:
@@ -150,37 +189,318 @@ def dynamic_loops_from_dict(data_dict, key_patterns=None):
         return
         yield  # 空生成器
 
+    # 集合没有稳定顺序，参数组合生成必须确定性排序。
+    stable_ranges = [
+        sorted(values, key=lambda item: repr(item)) if isinstance(values, set) else values
+        for values in ranges
+    ]
+
     # 动态生成组合
-    for combo in itertools.product(*ranges):
+    for combo in itertools.product(*stable_ranges):
         yield dict(zip(keys, combo))
 
 import yaml
 import logging
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Any, Dict, List, Tuple
 from pathlib import Path
 
+_EXTENSION_PARAM_KEYS = (
+    "serving_extensiable_param",
+    "serving_extensible_param",
+)
+_DEPLOYMENT_SELECTOR = re.compile(
+    r"^(?P<collection>instances|pd_instances)"
+    r"\[(?P<selector>\*|\d+|(?:name|role)=[^\]]+)\]$"
+)
+def _set_existing_mapping_path(mapping: Dict[str, Any], parts, value, key_path: str):
+    """Set an existing mapping path and reject misspelled parameters."""
+    if not parts:
+        raise ValueError(f"Empty parameter path: {key_path}")
+
+    current = mapping
+    normalized_parts = list(parts)
+    if (
+        normalized_parts[0] == "serving_extensible_param"
+        and "serving_extensible_param" not in current
+        and "serving_extensiable_param" in current
+    ):
+        normalized_parts[0] = "serving_extensiable_param"
+
+    for part in normalized_parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            raise KeyError(f"Unsupported parameter path: {key_path}")
+        current = current[part]
+
+    final = normalized_parts[-1]
+    if not isinstance(current, dict) or final not in current:
+        raise KeyError(f"Unsupported parameter path: {key_path}")
+    current[final] = value
+
+
+def _select_deployment_items(
+    config: Dict[str, Any], collection: str, selector: str, key_path: str
+):
+    deployment = config.get("deployment") or {}
+    items = deployment.get(collection) or []
+    if not items:
+        raise KeyError(
+            f"Parameter path requires deployment.{collection}: {key_path}"
+        )
+
+    if selector == "*":
+        selected = list(items)
+    elif selector.isdigit():
+        index = int(selector)
+        if index >= len(items):
+            raise IndexError(f"Deployment item index out of range: {key_path}")
+        selected = [items[index]]
+    else:
+        field, expected = selector.split("=", 1)
+        selected = [
+            item
+            for item in items
+            if str(item.get(field)) == expected
+        ]
+        if not selected:
+            raise KeyError(
+                f"No deployment.{collection} item matches {selector}: {key_path}"
+            )
+    return selected
+
+
+def _update_explicit_parameter_path(
+    config: Dict[str, Any], key_path: str, value: Any
+) -> list:
+    """Update an explicit dotted path, including instance selectors."""
+    parts = key_path.split(".")
+    if len(parts) < 2:
+        raise KeyError(f"Unsupported parameter path: {key_path}")
+
+    if parts[0] == "deployment" and len(parts) >= 3:
+        selector_match = _DEPLOYMENT_SELECTOR.match(parts[1])
+        if selector_match:
+            collection = selector_match.group("collection")
+            selector = selector_match.group("selector")
+            items = _select_deployment_items(
+                config, collection, selector, key_path
+            )
+            target_parts = parts[2:]
+            changed = []
+            for item in items:
+                _set_existing_mapping_path(item, target_parts, value, key_path)
+                changed.append(key_path)
+            return changed
+
+    _set_existing_mapping_path(config, parts, value, key_path)
+    return [key_path]
+
+
+def _apply_batch_size_defaults(config: Dict[str, Any], value: Any) -> None:
+    """Keep the historical batch_size -> num_prompts coupling."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError("batch_size must be numeric")
+    benchmark = config.get("benchmark") or {}
+    perf = benchmark.get("perf")
+    if isinstance(perf, dict):
+        perf["num_prompts"] = value * 4
+
+
 def _update_config_by_path(
-        config: Dict[str, Any],
-        key_path: str,
-        value: Any
-) -> None:
+    config: Dict[str, Any],
+    key_path: str,
+    value: Any,
+    apply_derived: bool = True,
+) -> list:
+    """Update one assess parameter in ordinary or hierarchical deployments.
+
+    Supported explicit forms include::
+
+        benchmark.perf.batch_size
+        serving_extensiable_param.max_seqs_per_batch
+        deployment.instances[*].serving_extensiable_param.max_seqs_per_batch
+        deployment.pd_instances[name=prefill-0].serving_extensiable_param.max_seqs_per_batch
+
+    A bare name keeps the historical lookup order and updates matching
+    instance-level serving parameters for backward compatibility.
     """
-    根据键路径更新配置字典
+    if not isinstance(key_path, str) or not key_path.strip():
+        raise ValueError("assess_test_param keys must be non-empty strings")
+    key_path = key_path.strip()
 
+    # Explicit dotted paths are strict: a typo must not silently generate an
+    # unchanged candidate YAML.
+    if "." in key_path or "instances[" in key_path:
+        changed = _update_explicit_parameter_path(config, key_path, value)
+        if (
+            apply_derived
+            and key_path == "benchmark.perf.batch_size"
+        ):
+            _apply_batch_size_defaults(config, value)
+        return changed
+
+    changed = []
+    benchmark = config.get("benchmark") or {}
+    perf = benchmark.get("perf")
+    acc = benchmark.get("acc")
+
+    # Preserve the old precedence: perf, then acc, then top-level serving
+    # extension. Instance-level matching is intentionally applied afterward.
+    if isinstance(perf, dict) and key_path in perf:
+        perf[key_path] = value
+        changed.append(f"benchmark.perf.{key_path}")
+        if apply_derived and key_path == "batch_size":
+            _apply_batch_size_defaults(config, value)
+    elif isinstance(acc, dict) and key_path in acc:
+        acc[key_path] = value
+        changed.append(f"benchmark.acc.{key_path}")
+    else:
+        top_extension = None
+        for extension_key in _EXTENSION_PARAM_KEYS:
+            extension = config.get(extension_key)
+            if isinstance(extension, dict) and key_path in extension:
+                top_extension = extension
+                break
+        if top_extension is not None:
+            top_extension[key_path] = value
+            changed.append(f"{extension_key}.{key_path}")
+
+    # A bare serving parameter applies to every flat non-PD instance or
+    # hierarchical logical PD instance that already declares the key.
+    deployment = config.get("deployment") or {}
+    for collection in ("instances", "pd_instances"):
+        for item in deployment.get(collection) or []:
+            for extension_key in _EXTENSION_PARAM_KEYS:
+                extension = item.get(extension_key)
+                if isinstance(extension, dict) and key_path in extension:
+                    extension[key_path] = value
+                    changed.append(
+                        f"deployment.{collection}[*].{extension_key}.{key_path}"
+                    )
+                    break
+
+    if not changed:
+        raise KeyError(f"Unsupported assess_test_param: {key_path}")
+    return changed
+
+
+def _normalize_assess_parameters(assess_test: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize and validate ``assess_test_param`` for ``para_set``.
+
+    The original format is a flat mapping whose values are lists, for
+    example ``{"batch_size": [1, 2]}``.  Nested mappings are also accepted
+    and flattened into dotted paths, which makes a multi-host configuration
+    readable without weakening path validation::
+
+        assess_test_param:
+          deployment:
+            pd_instances[name=prefill-0]:
+              serving_extensiable_param:
+                max_seqs_per_batch: [8, 16]
+
+    Scalar leaves are rejected deliberately.  A scalar in this section is
+    almost always a misplaced normal configuration value; silently ignoring
+    it would produce fewer candidates than the user requested.
     """
-    if config.get("benchmark").get("perf") is not None and key_path in config.get("benchmark").get("perf"):
-        config["benchmark"]["perf"].update({key_path: value})
+    if assess_test is None:
+        return {}
+    if not isinstance(assess_test, dict):
+        raise TypeError("assess_test_param must be a mapping")
 
-        # 修改bs关联配置
-        if key_path == "batch_size":
-            config["benchmark"]["perf"].update({"num_prompts": (value * 4)})
-            # config["benchmark"]["perf"].update({"request_rate": value})
+    normalized: Dict[str, Any] = {}
 
-    elif config.get("benchmark").get("acc") is not None and key_path in config.get("benchmark").get("acc"):
-        config["benchmark"]["acc"].update({key_path: value})
+    def visit(mapping: Dict[str, Any], prefix: str = "") -> None:
+        for raw_key, raw_value in mapping.items():
+            if not isinstance(raw_key, str) or not raw_key.strip():
+                raise ValueError("assess_test_param keys must be non-empty strings")
 
-    elif config.get("serving_extensiable_param") is not None and key_path in config.get("serving_extensiable_param"):
-        config["serving_extensiable_param"].update({key_path: value})
+            key = raw_key.strip()
+            path = f"{prefix}.{key}" if prefix else key
+            if isinstance(raw_value, dict):
+                if not raw_value:
+                    raise ValueError(f"Empty assess_test_param mapping: {path}")
+                visit(raw_value, path)
+                continue
+
+            if not isinstance(raw_value, (list, tuple, set)):
+                raise TypeError(
+                    f"Values for assess_test_param '{path}' must be a list, tuple, or set"
+                )
+
+            values = list(raw_value)
+            if not values:
+                raise ValueError(f"Parameter value list is empty: {path}")
+            if isinstance(raw_value, set):
+                # Keep the generated YAMLs and directory names deterministic.
+                values = sorted(values, key=lambda item: repr(item))
+
+            if path in normalized:
+                raise ValueError(f"Duplicate assess_test_param path: {path}")
+            normalized[path] = values
+
+    visit(assess_test)
+    return normalized
+
+
+def _safe_parameter_value(value: Any) -> str:
+    """Return a deterministic, filesystem-safe representation of a value."""
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    elif value is None:
+        text = "none"
+    elif isinstance(value, (list, tuple, set)):
+        values = list(value)
+        if isinstance(value, set):
+            values = sorted(values, key=lambda item: repr(item))
+        text = "-".join(_safe_parameter_value(item) for item in values) or "empty"
+    elif isinstance(value, dict):
+        # Dict-valued candidates are unusual, but representing them via a
+        # sorted repr keeps the helper total and avoids memory-address based
+        # names from arbitrary object reprs in the common case.
+        text = repr(sorted(value.items(), key=lambda item: str(item[0])))
+    else:
+        text = str(value)
+
+    if text.startswith("-"):
+        text = f"neg-{text[1:]}"
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", text)
+    text = re.sub(r"-+", "-", text)
+    return text.strip("-_.").lower() or "value"
+
+
+def _parameter_label(parameter_name: str) -> str:
+    """Build a readable label without putting path punctuation in a name."""
+    # Keep the historical short name for the original flat syntax.  In
+    # particular, ``batch_size`` continues to generate ``bs-<value>``.
+    if "." not in parameter_name and "[" not in parameter_name:
+        return get_specific_letters(parameter_name).lower()
+
+    label = parameter_name
+    label = label.replace("deployment.instances[*]", "all_instances")
+    label = label.replace("deployment.pd_instances[*]", "all_pd_instances")
+    label = re.sub(
+        r"deployment\.instances\[(?:role|name)=([^\]]+)\]",
+        r"instance_\1",
+        label,
+    )
+    label = re.sub(
+        r"deployment\.pd_instances\[(?:role|name)=([^\]]+)\]",
+        r"pd_instance_\1",
+        label,
+    )
+    label = re.sub(r"deployment\.instances\[(\d+)\]", r"instance_\1", label)
+    label = re.sub(
+        r"deployment\.pd_instances\[(\d+)\]", r"pd_instance_\1", label
+    )
+    label = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_").lower()
+    return label or "param"
+
+
+def _build_parameter_labels(param_dict: Dict[str, Any]) -> List[str]:
+    """Build safe, deterministic ``key-value`` labels for one combination."""
+    return [
+        f"{_parameter_label(parameter_name)}-{_safe_parameter_value(parameter_value)}"
+        for parameter_name, parameter_value in param_dict.items()
+    ]
 
 def get_specific_letters(para_name: str):
     # 使用 split('_') 按下划线分割字符串
@@ -201,55 +521,156 @@ def gen_group_paraset_task(
         task_file_path: str,
         tasks: Dict[str, str]
 ) -> bool:
-    """处理评估测试用例"""
+    """Expand one case into a deterministic set of parameter combinations.
+
+    This function only creates candidate YAML files.  Every candidate is
+    later handed to the existing scheduler, so ordinary single-host,
+    multi-host, and PD-disaggregated execution paths remain unchanged.
+    """
     try:
         # 查找并加载基础配置文件
         basecase_dir = Path.cwd() / "tests"
         basecase_file = find_case_file(case_name, str(basecase_dir))
 
+        if basecase_file is None:
+            raise FileNotFoundError(f"case file not found: {case_name}")
+
         with open(basecase_file, 'r', encoding='utf-8') as f:
             base_config = yaml.safe_load(f)
 
-        if base_config is None:
+        if not isinstance(base_config, dict):
             logging.error(f"基础配置文件为空: {basecase_file}")
             return False
 
-        # 获取评估测试配置
-        assess_test = base_config.get("assess_test_param", {})
+        from xtask.core.service_group import validate_pd_deployment_authoring
+
+        validate_pd_deployment_authoring(base_config)
+
+        # 获取评估测试配置。原始配置单独保留，用于写入每个参数组合的
+        # 说明文件；生成组合时使用规范化后的路径映射。
+        raw_assess_test = base_config.get("assess_test_param", {})
+        assess_test = _normalize_assess_parameters(raw_assess_test)
         if not assess_test:
             logging.warning(f"用例 {case_name} 没有评估测试配置")
             return False
+        assess_topologies = normalize_assess_topologies(base_config, assess_test)
 
-        # 生成动态参数组合
+        # 先完整构造候选，确保未知路径、重复 case_name 等问题在写盘
+        # 前暴露，避免只生成半组 YAML。
+        generated_candidates = []
         for param_dict in dynamic_loops_from_dict(assess_test):
-            config_copy = base_config.copy()
-            param_parts = []
+            # 每个组合都必须从原始配置深拷贝，避免上一个组合的实例级
+            # 参数、benchmark 联动字段污染下一个组合。
+            config_copy = copy.deepcopy(base_config)
+            changed_paths = []
+            changed_paths_by_param = {}
+
+            topology_name = param_dict.get(ASSESS_TOPOLOGY_PARAMETER)
+            if topology_name is not None:
+                changed_for_topology = apply_assess_topology(
+                    config_copy, topology_name, assess_topologies
+                )
+                changed_paths.extend(changed_for_topology)
+                changed_paths_by_param[ASSESS_TOPOLOGY_PARAMETER] = (
+                    changed_for_topology
+                )
 
             for param_name, param_value in param_dict.items():
-                # 更新配置
-                _update_config_by_path(config_copy, param_name, param_value)
-                spec_letters = get_specific_letters(param_name)
-                param_parts.append(f"{spec_letters}-{param_value}")
-                #param_parts.append(f"{param_name}-{param_value}")
+                if param_name == ASSESS_TOPOLOGY_PARAMETER:
+                    continue
+                changed_for_param = _update_config_by_path(
+                    config_copy,
+                    param_name,
+                    param_value,
+                    apply_derived=False,
+                )
+                changed_paths.extend(changed_for_param)
+                changed_paths_by_param[param_name] = changed_for_param
 
-            # 生成新用例名称
-            param_suffix = "_".join(param_parts)
-            new_case_name = (f"{case_name}_{param_suffix}").lower()
+            # Preserve the historical batch_size -> num_prompts coupling, but
+            # do it only after all explicit parameters have been applied.  An
+            # explicit num_prompts in the same combination always wins.
+            if "benchmark.perf.batch_size" in changed_paths:
+                has_explicit_num_prompts = "benchmark.perf.num_prompts" in changed_paths
+                batch_values = [
+                    param_dict[param_name]
+                    for param_name, changed_for_param in changed_paths_by_param.items()
+                    if "benchmark.perf.batch_size" in changed_for_param
+                ]
+                if not has_explicit_num_prompts:
+                    if len(batch_values) != 1:
+                        raise ValueError(
+                            "benchmark.perf.batch_size must be specified at most once"
+                        )
+                    _apply_batch_size_defaults(config_copy, batch_values[0])
+
+            if topology_name is not None:
+                from xtask.core.service_group import normalize_pd_deployment
+
+                normalize_pd_deployment(copy.deepcopy(config_copy))
+
+            # 参数组合使用短序号命名，避免把全部参数路径和值拼进目录名
+            # 导致路径过长。序号从 1 开始，且与下面的说明文件一一对应。
+            group_index = len(generated_candidates) + 1
+            new_case_name = f"{case_name}_sg{group_index}".lower()
             config_copy.update({"case_name": new_case_name})
+            generated_candidates.append(
+                (
+                    new_case_name,
+                    config_copy,
+                    copy.deepcopy(param_dict),
+                )
+            )
+
+        generated_names = [name for name, _, _ in generated_candidates]
+        if len(generated_names) != len(set(generated_names)):
+            raise ValueError(
+                f"Duplicate generated case_name(s) for {case_name}: {generated_names}"
+            )
+
+        existing_case_names = {
+            Path(task_key).stem.lower() for task_key in tasks
+        }
+        conflicting_names = {
+            name for name in generated_names if name in existing_case_names
+        }
+        if conflicting_names:
+            raise ValueError(
+                f"Generated case_name already exists in task list: {sorted(conflicting_names)}"
+            )
+
+        for new_case_name, config_copy, current_combination in generated_candidates:
             task_new_file_path = os.path.join(task_file_path, new_case_name)
             os.makedirs(task_new_file_path, exist_ok=True)
-
             new_case_dir = Path(task_new_file_path) / f"{new_case_name}.yaml"
-            #task_file_path = os.path.join(task_file_path, new_case_name.lower())
-            #case_path = Path(task_file_path) / new_case_name
 
-            # 保存配置文件
             with open(new_case_dir, 'w', encoding='utf-8') as f:
                 yaml.dump(config_copy, f, default_flow_style=False, allow_unicode=True)
 
+            # 只保存参数搜索相关信息，不把基础用例的模型、部署等配置
+            # 复制进来。current_combination 与 sg 序号一一对应。
+            assess_param_file = Path(task_new_file_path) / "assess_test_param.yaml"
+            assess_param_data = {
+                "current_combination": current_combination,
+                "assess_test_param": copy.deepcopy(raw_assess_test),
+            }
+            resolved_topology = resolved_topology_metadata(
+                current_combination, assess_topologies, config_copy
+            )
+            if resolved_topology is not None:
+                assess_param_data["resolved_topology"] = resolved_topology
+            with open(assess_param_file, 'w', encoding='utf-8') as f:
+                yaml.safe_dump(
+                    assess_param_data,
+                    f,
+                    default_flow_style=False,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+
             tasks[str(new_case_dir)] = task_new_file_path
 
-            #删除上一次的case_name.json文件
+            # 删除上一次的 case_name.json 文件（保留原有行为）。
             try:
                 os.remove(os.path.join(str(task_new_file_path), (str(new_case_name) + ".json")))
                 logging.info("remove last casename.json success.")
@@ -495,5 +916,10 @@ def get_tasks(args, xtask_config, config_para: Dict):
     ret, tasks = gen_task_file(args, task_output_path, xtask_config, config_para)
     if not ret:
         logging.error("gen task file failed.")
+    elif getattr(args, "assess_test_type", None) == "para_set" and not tasks:
+        logging.warning(
+            "para_set produced no tasks; check that each case defines a non-empty "
+            "assess_test_param mapping."
+        )
 
     return tasks

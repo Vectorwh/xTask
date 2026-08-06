@@ -46,12 +46,16 @@ class EvalscopeResult:
         # 创建摘要
         self.summary = ResultSummary(
             total_requests=int(e2el.n if hasattr(e2el, 'n') else 0),
-            concurrency=self.metadata.get('max_concurrency', 1),  # evalscope 当前无实际并发数统计
-            max_concurrency=self.metadata.get('max_concurrency', 1),
-            request_throughput=float(e2el.n / (e2el.average / 1000)) if e2el.average > 0 else 0.0,
+            failed_requests=self.metadata.get('Failed requests', 0),
+            concurrency=self.metadata.get('Number of concurrency', 1),  # evalscope 当前无实际并发数统计
+            max_concurrency=self.metadata.get('Number of concurrency', 1),
+            #request_throughput=float(e2el.n / (e2el.average / 1000)) if e2el.average > 0 else 0.0,
+            request_throughput=self.metadata.get('Request throughput (req/s)', 0),
             input_tokens_avg=input_tokens.average,
             output_tokens_avg=output_tokens.average,
-            output_token_throughput=output_throughput.average,
+            output_tps_avg=output_throughput.average,
+            output_tps_total=output_throughput.average,
+            summary_tps_total=self.metadata.get('Total token throughput (tok/s)', 1),
             ttft_avg=ttft.average,
             ttft_p90=ttft.p90,
             ttft_p99=ttft.p99,
@@ -89,12 +93,15 @@ class EvalscopeResult:
         if self.summary:
             result['summary'] = {
                 'total_requests': self.summary.total_requests,
+                'failed_requests': self.summary.failed_requests,
                 'concurrency': self.summary.concurrency,
                 'max_concurrency': self.summary.max_concurrency,
                 'request_throughput': self.summary.request_throughput,
                 'input_tokens_avg': self.summary.input_tokens_avg,
                 'output_tokens_avg': self.summary.output_tokens_avg,
-                'output_token_throughput': self.summary.output_token_throughput,
+                'output_tps_avg': self.summary.output_tps_avg,
+                'output_tps_total': self.summary.output_tps_total,
+                'summary_tps_total': self.summary.summary_tps_total,
                 'ttft_avg': self.summary.ttft_avg,
                 'ttft_p90': self.summary.ttft_p90,
                 'tpot_avg': self.summary.tpot_avg,
@@ -130,10 +137,15 @@ class EvalscopeResult:
         logging.info(f"{'Metric':<30} {'Value':<20} {'Unit':<10}")
         logging.info("-" * 80)
         logging.info(f"{'Total Requests':<30} {self.summary.total_requests:<20} {'count'}")
+        logging.info(f"{'Failed Requests':<30} {self.summary.failed_requests:<20} {'count'}")
+        logging.info(f"{'Concurrency':<30} {self.summary.concurrency:<20} {'count'}")
+        logging.info(f"{'Max Concurrency':<30} {self.summary.max_concurrency:<20} {'count'}")
         logging.info(f"{'Request Throughput':<30} {self.summary.request_throughput:.2f} {'req/s'}")
         logging.info(f"{'Avg Input Tokens':<30} {self.summary.input_tokens_avg:.2f} {'tokens'}")
         logging.info(f"{'Avg Output Tokens':<30} {self.summary.output_tokens_avg:.2f} {'tokens'}")
-        logging.info(f"{'Output Token Throughput':<30} {self.summary.output_token_throughput:.2f} {'tokens/s'}")
+        logging.info(f"{'Output Token Throughput':<30} {self.summary.output_tps_avg:.2f} {'tokens/s'}")
+        logging.info(f"{'Output Token Throughput Total':<30} {self.summary.output_tps_total:.2f} {'tokens/s'}")
+        logging.info(f"{'Summary Token Throughput Total':<30} {self.summary.summary_tps_total:.2f} {'tokens/s'}")
         logging.info(f"{'TTFT (Average)':<30} {self.summary.ttft_avg:.2f} {'ms'}")
         logging.info(f"{'TTFT (P90)':<30} {self.summary.ttft_p90:.2f} {'ms'}")
         logging.info(f"{'TPOT (Average)':<30} {self.summary.tpot_avg:.2f} {'ms'}")
@@ -199,7 +211,7 @@ class EvalscopeResultParser:
             TIME_MS = 1000
             # n_bs = float(summary_metrics.get('Number of concurrency', 1))
             # div_bs = float(1 / n_bs) if n_bs > 0.0 else 0.0
-            n_count = summary_metrics.get('Succeed requests', 1)
+            n_count = summary_metrics.get('Total requests', 1)
             rawdata_fields = {
                 'E2EL': [('Latency (s)', TIME_MS), ('Average latency (s)', TIME_MS)],
                 'TTFT': [('TTFT (s)', TIME_MS), ('Average time to first token (s)', TIME_MS)], 
@@ -230,7 +242,7 @@ class EvalscopeResultParser:
                 # 添加到结果
                 result.add_parameter(param_name, stage, metrics)
             
-            result.metadata = {'max_concurrency': summary_metrics.get('Number of concurrency', 1)}
+            result.metadata = dict(summary_metrics)
             
         # 计算摘要
         result.calculate_summary()

@@ -62,18 +62,24 @@ class CommandResult:
 class ContainerManager:
     """Manager for Docker/nerdctl container operations"""
     
-    def __init__(self, config: ContainerConfig = None, logger=None):
+    def __init__(self, config: ContainerConfig = None, logger=None, executor=None):
         """
         Initialize container manager
         
         Args:
             config: Container configuration
             logger: Logger instance for logging
+            executor: Optional HostExecutor; defaults to local subprocess execution
         """
         self.config = config
         self.logger = logger
         self.container_id = None
         self._stop_event = threading.Event()
+        if executor is None:
+            from xtask.utils.host_executor import LocalHostExecutor
+
+            executor = LocalHostExecutor()
+        self.executor = executor
 
     
     def run_command(self, cmd: str, capture_output: bool = True, 
@@ -95,67 +101,23 @@ class ContainerManager:
         Returns:
             CommandResult object
         """
-        # 若传入了 abort_event，走可中断执行分支
-        if abort_event is not None:
+        from xtask.utils.host_executor import LocalHostExecutor
+
+        # Local abortable path keeps existing ContainerManager behavior.
+        if abort_event is not None and isinstance(self.executor, LocalHostExecutor):
             return self._run_command_abortable(
                 cmd, capture_output=capture_output, timeout=timeout,
                 abort_event=abort_event, abort_poll_interval=abort_poll_interval, **kwargs
             )
 
-        start_time = time.time()
-        
-        try:
-            # Prepare subprocess arguments
-            process_kwargs = {
-                'shell': True,
-                'text': True,
-                'timeout': timeout,
-            }
-            
-            if capture_output:
-                process_kwargs.update({
-                    'stdout': subprocess.PIPE,
-                    'stderr': subprocess.PIPE,
-                })
-            
-            process_kwargs.update(kwargs)
-            
-            logging.debug(f"Executing command: {cmd}")
-            
-            # Execute command
-            result = subprocess.run(cmd, **process_kwargs)
-            
-            execution_time = time.time() - start_time
-            
-            return CommandResult(
-                success=result.returncode == 0,
-                exit_code=result.returncode,
-                stdout=result.stdout if capture_output else "",
-                stderr=result.stderr if capture_output else "",
-                execution_time=execution_time
-            )
-            
-        except subprocess.TimeoutExpired:
-            execution_time = time.time() - start_time
-            logging.warning(f"Command timeout after {timeout} seconds: {cmd}")
-            return CommandResult(
-                success=False,
-                exit_code=-1,
-                stdout="",
-                stderr=f"Command timeout after {timeout} seconds",
-                execution_time=execution_time
-            )
-            
-        except Exception as e:
-            execution_time = time.time() - start_time
-            logging.error(f"Command execution failed: {str(e)}")
-            return CommandResult(
-                success=False,
-                exit_code=-1,
-                stdout="",
-                stderr=str(e),
-                execution_time=execution_time
-            )
+        return self.executor.run(
+            cmd,
+            timeout=timeout,
+            capture_output=capture_output,
+            abort_event=abort_event,
+            abort_poll_interval=abort_poll_interval,
+            **kwargs,
+        )
 
     def _run_command_abortable(self, cmd: str, capture_output: bool = True,
                                timeout: int = 300, abort_event=None,
@@ -1007,14 +969,14 @@ class ContainerManager:
             timeout=exec_timeout
         )
     
-    def cleanup(self):
+    def cleanup(self, stop_timeout: int = 30):
         """Cleanup container resources"""
         logging.debug("entry function: %s" % inspect.currentframe().f_code.co_name)
         if self.config and self.config.container_name:
             logging.info(f"Cleaning up container: {self.config.container_name}")
             
             # Stop container
-            self.stop_container(self.config.container_name)
+            self.stop_container(self.config.container_name, timeout=stop_timeout)
             
             # Remove container if not auto-remove
             if not self.config.auto_remove:
