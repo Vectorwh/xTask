@@ -1,0 +1,26 @@
+{
+    "DeepSeek": {
+        "owner": [["申舒玮", "shenshuwei.3"],["陈楚未", "ext.chenchuwei1"]],
+        "model_name": ["deepseek_r1", "deepseek_v3", "deepseek_v3.2","deepseek_v4"]
+    },
+    "glm": {
+        "owner": [["沈运恒", "shenyunheng3"],["沈效龙", "ext.shenxiaolong5"]],
+        "model_name": ["glm_4.7", "glm_5", "glm_5.2"]
+    },
+    "Qwen3": {
+        "owner": [["冯艳", "fengyan.119"],["高鹏举", "ext.gaopengju1"]],
+        "model_name": ["qwen3_8b", "qwen3_32b","qwen3_30b_a3b"]
+    },
+    "Qwen3.56_LLM": {
+        "owner": [["曾玉婷", "zengyuting12"],["高鹏举", "ext.gaopengju1"]],
+        "model_name": ["qwen3.5_2b", "qwen3.5_27b","qwen3.6_27b","qwen3.6_35b_a3b"]
+    },
+    "VLM_Model": {
+        "owner": [["王贇龙", "wangyunlong.115"],["单晨峰", "ext.shanchenfeng1"]],
+        "model_name": ["qwen2.5_vl_7b", "qwen2.5_vl_72b","qwen3_vl_8b","qwen3_vl_32b","qwen3_vl_30b_a3b","qwen3.6_27b_vlm","qwen3.6_35b_a3b_vlm","oxygen_vl_7b","oxygen_vl_32b"]
+    },
+    "MiniMax": {
+        "owner": [["彭恒多", "ext.penghengduo1"]],
+        "model_name": ["Minimax2.7"]
+    }
+}

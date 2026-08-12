@@ -2,6 +2,7 @@
 
 import logging
 import traceback
+from pathlib import Path
 
 
 class TaskExecutionWorkflow:
@@ -38,6 +39,7 @@ class TaskExecutionWorkflow:
         self.keys_to_process = []
         self.reporter = None
         self.scheduler_session = None
+        self.active_auto_assess_case = None
 
     def run(self):
         """Generate the initial queue, execute it, and always close resources."""
@@ -83,6 +85,7 @@ class TaskExecutionWorkflow:
                 return None
 
             output_path = self.tasks[current_task_key]
+            self._activate_auto_assess_case(current_task_key)
             logging.info("Running scheduler for task: %s ...", current_task_key)
             result, self.scheduler_session = self.task_executor(
                 current_task_key,
@@ -90,7 +93,9 @@ class TaskExecutionWorkflow:
                 self.args,
                 self.scheduler_session,
             )
-            self.openme_client.AddCaseResult(result)
+            self.openme_client.AddCaseResult(
+                result, task_path=current_task_key
+            )
 
             action = self.auto_assessor(
                 args=self.args,
@@ -102,8 +107,17 @@ class TaskExecutionWorkflow:
                 tasks=self.tasks,
                 keys_to_process=self.keys_to_process,
                 xtask_config=self.xtask_config,
+                current_task_key=current_task_key,
+                output_path=output_path,
             )
             self._record_result(current_task_key, output_path, result, action)
+            if (
+                getattr(self.args, "assess_test_type", None) == "auto_assess"
+                and action == "break"
+            ):
+                # A completed search ends only its base case. The next base
+                # case, if present, gets fresh state and a fresh service.
+                return None
             return action
         except Exception as error:
             logging.error(
@@ -114,6 +128,28 @@ class TaskExecutionWorkflow:
             traceback.print_exc()
             self._record_failure(current_task_key, error)
             return None
+
+    @staticmethod
+    def _auto_assess_case_name(task_key):
+        generated_case = Path(task_key).stem
+        base_case, separator, _ = generated_case.rpartition("_bs-")
+        return base_case if separator and base_case else generated_case
+
+    def _activate_auto_assess_case(self, task_key):
+        if getattr(self.args, "assess_test_type", None) != "auto_assess":
+            return
+        base_case = self._auto_assess_case_name(task_key)
+        if self.active_auto_assess_case is None:
+            self.active_auto_assess_case = base_case
+            return
+        if base_case == self.active_auto_assess_case:
+            return
+
+        self.session_closer(self.scheduler_session)
+        self.scheduler_session = None
+        self.config_para = {}
+        self.auto_assess_threshold = {"lower": 0, "curr": 0, "upper": 0}
+        self.active_auto_assess_case = base_case
 
     def _record_result(self, task_key, output_path, result, action):
         if self.reporter is None:

@@ -142,6 +142,7 @@ class RunValidatedWorkflowTest(unittest.TestCase):
         self.mock_workflow.assert_called_once_with(
             args, {"cfg": 1}, self.client, para_strategy=None
         )
+        self.client.SendJUEMsgCard.assert_called_once_with(args=args)
 
     def test_para_set_tpe_dispatches_to_tpe_search(self):
         self.mock_resolve.return_value = "tpe"
@@ -156,6 +157,7 @@ class RunValidatedWorkflowTest(unittest.TestCase):
             run_trial=main.run_scheduler,
         )
         self.mock_workflow.assert_not_called()
+        self.client.SendJUEMsgCard.assert_called_once_with(args=args)
 
     def test_para_set_non_tpe_runs_task_workflow_with_strategy(self):
         self.mock_resolve.return_value = "grid"
@@ -168,6 +170,7 @@ class RunValidatedWorkflowTest(unittest.TestCase):
         self.mock_workflow.assert_called_once_with(
             args, {"cfg": 1}, self.client, para_strategy="grid"
         )
+        self.client.SendJUEMsgCard.assert_called_once_with(args=args)
 
 
 class ParseAndValidateArgumentsTest(unittest.TestCase):

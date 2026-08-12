@@ -10,6 +10,7 @@ import shlex
 import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
@@ -669,6 +670,8 @@ def _copy_non_log_runtime_artifacts(
     destination_dir: Path,
     *,
     local_overlay_only: bool = False,
+    container_manager=None,
+    container_config=None,
 ) -> None:
     """Copy runtime artifacts without replacing the trial-specific ``log/``.
 
@@ -677,6 +680,10 @@ def _copy_non_log_runtime_artifacts(
     kernel metadata and shutdown logs are service-lifecycle artifacts shared by
     those trials.  They are added after service shutdown without overwriting the
     already archived trial log.
+
+    Host-side copies may still fail on root-owned files (for example
+    ``kernel_meta/`` temp dirs).  When a container handle is available, retry the
+    individual copy as root inside the container before emitting a warning.
     """
     if not source_dir.is_dir():
         return
@@ -688,9 +695,15 @@ def _copy_non_log_runtime_artifacts(
             source.name == "shutdown_log" or source.is_file() or source.is_symlink()
         ):
             continue
+        destination = destination_dir / source.name
         try:
-            _copy_archive_entry(source, destination_dir / source.name)
+            _copy_archive_entry(source, destination)
+            continue
         except Exception:
+            if _copy_entry_via_container(
+                container_manager, container_config, source, destination
+            ):
+                continue
             logging.warning(
                 "Failed to archive runtime artifact: %s",
                 source,
@@ -712,15 +725,23 @@ def _archive_service_group_runtime_artifacts(
     archive_root = Path(output_file_path) / benchmarkpath / "xllm_log"
 
     for runtime in runtimes or []:
-        source_dir = Path(runtime.plan.output_dir)
-        destination_dir = archive_root / runtime.plan.instance_name
+        plan = getattr(runtime, "plan", None)
+        if plan is None or not getattr(plan, "output_dir", None):
+            continue
+        source_dir = Path(plan.output_dir)
+        destination_dir = archive_root / plan.instance_name
         destination_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             if runtime.plan.is_local:
                 if not _make_runtime_path_host_accessible(runtime, source_dir):
                     continue
-                _copy_non_log_runtime_artifacts(source_dir, destination_dir)
+                _copy_non_log_runtime_artifacts(
+                    source_dir,
+                    destination_dir,
+                    container_manager=runtime.container_manager,
+                    container_config=getattr(runtime, "container_config", None),
+                )
                 continue
 
             with tempfile.TemporaryDirectory(
@@ -735,7 +756,10 @@ def _archive_service_group_runtime_artifacts(
                 )
                 if downloaded:
                     _copy_non_log_runtime_artifacts(
-                        remote_snapshot, destination_dir
+                        remote_snapshot,
+                        destination_dir,
+                        container_manager=runtime.container_manager,
+                        container_config=getattr(runtime, "container_config", None),
                     )
                 else:
                     logging.warning(
@@ -751,6 +775,8 @@ def _archive_service_group_runtime_artifacts(
                 source_dir,
                 destination_dir,
                 local_overlay_only=True,
+                container_manager=runtime.container_manager,
+                container_config=getattr(runtime, "container_config", None),
             )
         except Exception:
             logging.warning(
@@ -813,6 +839,363 @@ def _post_process_benchmark_rst(
     _archive_service_group_logs(
         service_runtimes, output_file_path, benchmarkpath
     )
+
+
+def _find_new_benchmark_date_dir(output_file_path: Path, init_entries):
+    """Return the newest date directory the benchmark created during this run.
+
+    A benchmark that started but failed midway may have created its
+    ``YYYYMMDD_HHMMSS`` directory without post-processing capturing it; that
+    directory is reused for the fallback archive instead of creating another
+    one.  ``init_entries`` holds the case directory listing captured before the
+    benchmark ran, so directories from previous runs are never reused.
+    """
+    date_pattern = re.compile(r"^\d{8}_\d{6}$")
+    try:
+        candidates = [
+            entry
+            for entry in output_file_path.iterdir()
+            if entry.is_dir()
+            and date_pattern.match(entry.name)
+            and entry.name not in init_entries
+        ]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda entry: entry.name, reverse=True)
+    return candidates[0]
+
+
+def _create_fallback_date_dir(output_file_path: Path, init_entries) -> Optional[Path]:
+    """Create a ``YYYYMMDD_HHMMSS`` directory matching the benchmark layout."""
+    try:
+        output_file_path.mkdir(parents=True, exist_ok=True)
+        candidate_time = datetime.now()
+        for _ in range(10):
+            dirname = candidate_time.strftime("%Y%m%d_%H%M%S")
+            date_dir = output_file_path / dirname
+            if dirname in init_entries or date_dir.exists():
+                candidate_time += timedelta(seconds=1)
+                continue
+            date_dir.mkdir()
+            return date_dir
+        logging.warning(
+            "Failed to allocate a fallback date directory under %s",
+            output_file_path,
+        )
+    except OSError:
+        logging.warning(
+            "Failed to create fallback date directory under %s",
+            output_file_path,
+            exc_info=True,
+        )
+    return None
+
+
+def _chmod_via_running_container(container_manager, container_config, host_path) -> bool:
+    """chmod a container-created path only while its container is still running.
+
+    Returns True when the chmod command was issued successfully (or the path
+    does not exist yet).  False means no usable running container was available
+    or the chmod itself failed.
+    """
+    try:
+        if container_manager is None or container_config is None:
+            return False
+        if not container_manager.container_is_running(
+            container_config.container_name
+        ):
+            return False
+        from xtask.utils.container_manager import path_mapping_in_container
+
+        container_path = path_mapping_in_container(str(host_path))
+        result = container_manager.exec_in_container(
+            container_config.container_name,
+            f"test ! -e {shlex.quote(container_path)} || "
+            f"chmod -R a+rwX {shlex.quote(container_path)}",
+            timeout=30,
+        )
+        return bool(getattr(result, "success", False))
+    except Exception:
+        logging.debug(
+            "chmod through container failed for %s", host_path, exc_info=True
+        )
+        return False
+
+
+def _iter_running_container_handles(context):
+    """Yield (container_manager, container_config) pairs still usable for exec."""
+    state = context.state
+    seen = set()
+    for runtime in state.get("service_runtimes") or []:
+        manager = getattr(runtime, "container_manager", None)
+        config = getattr(runtime, "container_config", None)
+        name = getattr(config, "container_name", None)
+        if manager is None or config is None or name in seen:
+            continue
+        seen.add(name)
+        yield manager, config
+    manager = state.get("container_manager")
+    config = state.get("container_config")
+    name = getattr(config, "container_name", None) if config is not None else None
+    if manager is not None and config is not None and name not in seen:
+        yield manager, config
+
+
+def _make_path_host_writable(context, host_path: Path) -> bool:
+    """Make a container-created path writable by the host user when possible."""
+    if os.access(host_path, os.W_OK):
+        return True
+    for manager, config in _iter_running_container_handles(context):
+        if _chmod_via_running_container(manager, config, host_path):
+            if os.access(host_path, os.W_OK):
+                return True
+    return os.access(host_path, os.W_OK)
+
+
+def _first_running_container_handle(context):
+    for manager, config in _iter_running_container_handles(context):
+        try:
+            if manager.container_is_running(config.container_name):
+                return manager, config
+        except Exception:
+            continue
+    return None, None
+
+
+def _copy_entry_via_container(
+    container_manager, container_config, source: Path, destination: Path
+) -> bool:
+    """Copy one file/directory into a root-owned date dir from inside the container."""
+    if container_manager is None or container_config is None or not source.exists():
+        return False
+    try:
+        if not container_manager.container_is_running(
+            container_config.container_name
+        ):
+            return False
+        from xtask.utils.container_manager import path_mapping_in_container
+
+        source_path = path_mapping_in_container(str(source))
+        destination_path = path_mapping_in_container(str(destination))
+        parent_path = path_mapping_in_container(str(destination.parent))
+        result = container_manager.exec_in_container(
+            container_config.container_name,
+            (
+                f"test ! -e {shlex.quote(source_path)} || "
+                f"(mkdir -p {shlex.quote(parent_path)} && "
+                f"rm -rf {shlex.quote(destination_path)} && "
+                f"cp -a {shlex.quote(source_path)} {shlex.quote(destination_path)} && "
+                f"chmod -R a+rwX {shlex.quote(destination_path)})"
+            ),
+            timeout=60,
+        )
+        return bool(getattr(result, "success", False))
+    except Exception:
+        logging.warning(
+            "Failed to archive %s into %s via container",
+            source,
+            destination,
+            exc_info=True,
+        )
+        return False
+
+
+def _copy_fallback_entry(
+    source: Path,
+    destination: Path,
+    *,
+    container_manager=None,
+    container_config=None,
+    prefer_container: bool = False,
+) -> None:
+    if not source.exists():
+        return
+    if prefer_container and _copy_entry_via_container(
+        container_manager, container_config, source, destination
+    ):
+        return
+    try:
+        _copy_archive_entry(source, destination)
+        return
+    except Exception:
+        if prefer_container:
+            logging.warning(
+                "Failed to archive %s into %s", source, destination, exc_info=True
+            )
+            return
+        # Host cannot write into a root-owned aisbench date dir; retry as root
+        # inside the still-running container instead of creating another date dir.
+        if _copy_entry_via_container(
+            container_manager, container_config, source, destination
+        ):
+            return
+        logging.warning(
+            "Failed to archive %s into %s", source, destination, exc_info=True
+        )
+
+
+def _archive_fallback_runtime_artifacts(
+    runtime,
+    date_dir: Path,
+    *,
+    container_manager=None,
+    container_config=None,
+    prefer_container: bool = False,
+) -> None:
+    """Mirror the service-group archive layout for one instance.
+
+    Layout matches ``_archive_service_group_logs`` plus
+    ``_archive_service_group_runtime_artifacts``: instance logs land in
+    ``<date_dir>/xllm_log/<instance>/log`` and startup scripts, kernel
+    metadata and shutdown logs land alongside them.
+    """
+    source_dir = Path(runtime.plan.output_dir)
+    destination_dir = date_dir / "xllm_log" / runtime.plan.instance_name
+    copy_manager = container_manager or runtime.container_manager
+    copy_config = container_config or getattr(runtime, "container_config", None)
+
+    if runtime.plan.is_local:
+        # chmod the whole instance directory so host-side copies of kernel_meta
+        # and startup scripts succeed; log-only chmod left root temp files
+        # unreadable and produced archive warnings.
+        _chmod_via_running_container(
+            runtime.container_manager,
+            getattr(runtime, "container_config", None),
+            source_dir,
+        )
+    else:
+        # Prefer refreshing remote logs while the remote container is still
+        # alive (auto-assess trial failures keep the service running).  The
+        # normal cleanup path already downloads them before container removal.
+        try:
+            manager = runtime.container_manager
+            runtime_config = getattr(runtime, "container_config", None)
+            if (
+                manager is not None
+                and runtime_config is not None
+                and manager.container_is_running(runtime_config.container_name)
+            ):
+                _download_remote_runtime_path(
+                    runtime, str(source_dir / "log"), str(source_dir / "log")
+                )
+                _make_runtime_path_host_accessible(runtime, source_dir)
+        except Exception:
+            logging.warning(
+                "Failed to refresh logs for %s from %s during fallback archive",
+                runtime.plan.instance_name,
+                runtime.plan.host,
+                exc_info=True,
+            )
+
+    _copy_fallback_entry(
+        source_dir / "log",
+        destination_dir / "log",
+        container_manager=copy_manager,
+        container_config=copy_config,
+        prefer_container=prefer_container,
+    )
+    _copy_non_log_runtime_artifacts(
+        source_dir,
+        destination_dir,
+        container_manager=copy_manager,
+        container_config=copy_config,
+    )
+
+
+def _ensure_benchmark_date_dir(context) -> None:
+    """Archive case artifacts into a dated directory the benchmark never finished.
+
+    Prefer reusing a ``YYYYMMDD_HHMMSS`` directory aisbench/evalscope already
+    created in this run.  Only create a new date directory when no such
+    directory exists.  When the reused directory is root-owned, chmod it for
+    host writes while a container is still running; if the host still cannot
+    write, copy artifacts from inside the container instead of creating another
+    date directory.
+    """
+    result = context.result
+    state = context.state
+    if result.get("benchmark_output_path"):
+        return
+
+    output_file_path = Path(context.output_file_path)
+    init_entries = set(state.get("init_entries") or [])
+
+    date_dir = None
+    if state.get("init_entries") is not None:
+        date_dir = _find_new_benchmark_date_dir(output_file_path, init_entries)
+    if date_dir is None:
+        # No benchmark date directory in this run; create one only then.
+        date_dir = _create_fallback_date_dir(output_file_path, init_entries)
+    if date_dir is None:
+        return
+
+    # Always keep the reused/created date dir.  Make it host-writable when
+    # possible; otherwise archive through the container as root.
+    host_writable = _make_path_host_writable(context, date_dir)
+    copy_manager, copy_config = _first_running_container_handle(context)
+    prefer_container = not host_writable
+    if prefer_container and copy_manager is None:
+        logging.warning(
+            "Benchmark date directory %s is not writable by the host user and "
+            "no running container is available for in-container archive; "
+            "reusing it anyway without creating another date directory",
+            date_dir,
+        )
+
+    runtimes = state.get("service_runtimes") or []
+    if runtimes:
+        archived_runtime = False
+        for runtime in runtimes:
+            plan = getattr(runtime, "plan", None)
+            if plan is None or not getattr(plan, "output_dir", None):
+                continue
+            _archive_fallback_runtime_artifacts(
+                runtime,
+                date_dir,
+                container_manager=copy_manager,
+                container_config=copy_config,
+                prefer_container=prefer_container,
+            )
+            archived_runtime = True
+        # Keep parity with successful benchmark trials: shutdown logs and
+        # other service-lifecycle artifacts are overlaid at service shutdown.
+        if archived_runtime:
+            _record_service_group_archive_path(state, str(date_dir))
+    else:
+        log_dir = output_file_path / "log"
+        _chmod_via_running_container(
+            state.get("container_manager"), state.get("container_config"), log_dir
+        )
+        _copy_fallback_entry(
+            log_dir,
+            date_dir / "xllm_log",
+            container_manager=copy_manager or state.get("container_manager"),
+            container_config=copy_config or state.get("container_config"),
+            prefer_container=prefer_container,
+        )
+
+    task_config = result.get("task_config") or state.get("task_config") or {}
+    case_name = str(task_config.get("case_name") or "").lower()
+    root_files = [output_file_path / "start_xllm_serv.sh"]
+    if case_name:
+        root_files.insert(0, output_file_path / f"{case_name}.json")
+    for source in root_files:
+        _copy_fallback_entry(
+            source,
+            date_dir / source.name,
+            container_manager=copy_manager or state.get("container_manager"),
+            container_config=copy_config or state.get("container_config"),
+            prefer_container=prefer_container,
+        )
+
+    result["benchmark_output_path"] = str(date_dir)
+    logging.info(
+        "Benchmark date directory missing; archived case artifacts to %s",
+        date_dir,
+    )
+
 
 def _initial_result() -> Dict[str, Any]:
     return {
@@ -1728,8 +2111,9 @@ def _run_benchmark_and_process(context):
                 )
                 _record_service_group_archive_path(state, output_dir)
             else:
-                logging.warning(
-                    f"metrics is {task_config.get('metrics')}，skip accaurcy task."
+                logging.debug(
+                    "metrics is %s, skip accuracy task.",
+                    task_config.get("metrics"),
                 )
 
             if "perf" in task_config.get("metrics"):
@@ -1790,6 +2174,10 @@ def _finalize_result(context):
     task_config = context.result.get("task_config") or context.state.get(
         "task_config"
     )
+    try:
+        _ensure_benchmark_date_dir(context)
+    except Exception:
+        logging.error("Failed to prepare fallback result directory", exc_info=True)
     write_result(
         context.result,
         task_config,
@@ -1969,6 +2357,17 @@ def _wait_xllm_processes_exit(runtimes, grace_s: int = 15) -> None:
 
 def _cleanup_scheduler(context):
     from xtask.core.service_group import cleanup_service_group
+
+    # Archive into a dated directory while containers are still available so
+    # root-owned aisbench directories can be chmod'd for host-side copies.  The
+    # finalize-stage call is kept as a no-op safety net when this already ran.
+    try:
+        _ensure_benchmark_date_dir(context)
+    except Exception:
+        logging.error(
+            "Failed to prepare fallback result directory during cleanup",
+            exc_info=True,
+        )
 
     engine_config = context.state.get("engine_config")
     should_clean = bool(

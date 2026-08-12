@@ -281,6 +281,68 @@ class AssessmentReportTests(unittest.TestCase):
                 summary["trials"][0]["error"], "archive permission denied"
             )
 
+    def test_auto_assess_group_preserves_each_case_stop_reason(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_root = Path(temporary_directory) / "outputs"
+            reporter = AssessmentReporter(
+                SimpleNamespace(
+                    assess_test_type="auto_assess",
+                    target_ttft=1000,
+                    target_tpot=50,
+                ),
+                {},
+                strategy="auto_assess",
+                output_root=output_root,
+            )
+
+            for base_case, stop_reason in (
+                ("case_a", "interval_converged"),
+                ("case_b", "tpot_target_reached"),
+            ):
+                case_name = f"{base_case}_bs-4"
+                reporter.record_result(
+                    f"{case_name}.yaml",
+                    str(output_root / case_name),
+                    {
+                        "success": True,
+                        "task_config": {
+                            "case_name": case_name,
+                            "metrics": "perf",
+                            "benchmark": {"perf": {"batch_size": 4}},
+                        },
+                        "benchmark_perf_result": _perf_result(100, 900, 40),
+                    },
+                    search_state={
+                        "lower": 3,
+                        "curr": 4,
+                        "upper": 5,
+                        "stop_reason": stop_reason,
+                    },
+                    action="break",
+                )
+
+            reporter.finalize("tpot_target_reached")
+
+            reasons = {}
+            for base_case in ("case_a", "case_b"):
+                summary = yaml.safe_load(
+                    (
+                        output_root
+                        / "search"
+                        / base_case
+                        / "search_summary.yaml"
+                    ).read_text(encoding="utf-8")
+                )
+                reasons[base_case] = summary["stop_reason"]
+
+        self.assertEqual(
+            reasons,
+            {
+                "case_a": "interval_converged",
+                "case_b": "tpot_target_reached",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

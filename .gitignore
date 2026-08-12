@@ -25,3 +25,5 @@ _tmp_ranktable_*.json
 pkg/xllm/vendors/
 pkg/xllm/*.whl
 *.rpm
+*.whl
+.joycode

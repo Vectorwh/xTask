@@ -7,6 +7,14 @@ from xtask.utils.container_manager import path_mapping_in_container
 from xtask.datasets.dataset_downloader import download_dataset
 from xtask.datasets.dataset_manger import preprocess_dataset
 
+
+def append_checked_command(shell_content, command, failure_message):
+    shell_content.append(f'if ! {command}; then')
+    shell_content.append(f'    echo "{failure_message}" >&2')
+    shell_content.append('    exit 1')
+    shell_content.append('fi')
+
+
 def generate_evalscope_script(
     task_config: Dict,
     output_file_path: str,
@@ -74,9 +82,11 @@ def generate_evalscope_script(
         limit = accuracy_cfg.get("acc_dataset_len")
         if limit is not None:
             accuracy_cmd = accuracy_cmd + f" --limit {limit}"
-
+        
         shell_content.append(f'echo "执行精度测试命令：{accuracy_cmd}"')
-        shell_content.append(accuracy_cmd)
+        append_checked_command(
+            shell_content, accuracy_cmd, "EvalScope精度测试执行失败"
+        )
         shell_content.append(f'echo "精度测试完成，结果保存至 {output_file_path_incontainer}"')
     else:
         shell_content.append("\n# 精度测试，skip task...")
@@ -121,7 +131,9 @@ def generate_evalscope_script(
         )
 
         shell_content.append(f'echo "执行性能测试命令：{perf_cmd}"')
-        shell_content.append(perf_cmd)
+        append_checked_command(
+            shell_content, perf_cmd, "EvalScope性能测试执行失败"
+        )
         shell_content.append(f'echo "性能测试完成，结果保存至 {output_file_path_incontainer}"')
     else:
         shell_content.append("\n# 性能测试，skip task...")
