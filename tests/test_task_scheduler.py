@@ -1216,8 +1216,8 @@ deployment:
         checker.parse_arguments.return_value = args
         checker.validate_arguments.return_value = SimpleNamespace(is_valid=True)
         tasks = {
-            "task-1.yaml": "output-1",
-            "task-2.yaml": "output-2",
+            "case_bs-1.yaml": "output-1",
+            "case_bs-2.yaml": "output-2",
         }
         session = object()
         result = {"task_config": {"metrics": []}}
@@ -1251,7 +1251,7 @@ deployment:
             main_module.main()
 
         start_session_mock.assert_called_once_with(
-            "task-1.yaml", "output-1", args
+            "case_bs-1.yaml", "output-1", args
         )
         self.assertEqual(run_trial_mock.call_count, 2)
         close_session_mock.assert_called_once_with(session)
@@ -1379,8 +1379,465 @@ deployment:
             openme_client=openme,
             run_trial=main_module.run_scheduler,
         )
+        openme.SendJUEMsgCard.assert_called_once_with(args=args)
         get_tasks_mock.assert_not_called()
         reporter_factory.assert_not_called()
+
+    def test_fallback_archive_creates_date_dir_when_benchmark_missing(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            log_dir = output_path / "log"
+            log_dir.mkdir()
+            (log_dir / "node_0.log").write_text("startup failed\n", encoding="utf-8")
+            (output_path / "start_xllm_serv.sh").write_text(
+                "#!/bin/bash\n", encoding="utf-8"
+            )
+            (output_path / "case_a.json").write_text("{}\n", encoding="utf-8")
+
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state.update(
+                task_config={"case_name": "case_a"},
+                init_entries=["log", "start_xllm_serv.sh", "case_a.json"],
+            )
+
+            scheduler._ensure_benchmark_date_dir(context)
+
+            benchmark_output = Path(context.result["benchmark_output_path"])
+            self.assertEqual(benchmark_output.parent, output_path)
+            self.assertRegex(benchmark_output.name, r"^\d{8}_\d{6}$")
+            self.assertEqual(
+                (benchmark_output / "xllm_log" / "node_0.log").read_text(
+                    encoding="utf-8"
+                ),
+                "startup failed\n",
+            )
+            self.assertTrue((benchmark_output / "start_xllm_serv.sh").is_file())
+            self.assertTrue((benchmark_output / "case_a.json").is_file())
+            # The fallback archives copies; the case-root sources stay in place.
+            self.assertTrue((log_dir / "node_0.log").is_file())
+            self.assertTrue((output_path / "start_xllm_serv.sh").is_file())
+
+    def test_fallback_archive_keeps_benchmark_generated_date_dir(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            benchmark_dir = output_path / "20260720_101010"
+            benchmark_dir.mkdir()
+
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["benchmark_output_path"] = str(benchmark_dir)
+            context.state["init_entries"] = []
+
+            scheduler._ensure_benchmark_date_dir(context)
+
+            self.assertEqual(
+                context.result["benchmark_output_path"], str(benchmark_dir)
+            )
+            self.assertEqual(
+                [entry.name for entry in output_path.iterdir()],
+                ["20260720_101010"],
+            )
+
+    def test_fallback_archive_reuses_uncaptured_benchmark_date_dir(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            benchmark_dir = output_path / "20260811_093000"
+            benchmark_dir.mkdir()
+            (benchmark_dir / "partial.txt").write_text("partial\n", encoding="utf-8")
+            log_dir = output_path / "log"
+            log_dir.mkdir()
+            (log_dir / "node_0.log").write_text("crash\n", encoding="utf-8")
+
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state["init_entries"] = ["log"]
+
+            scheduler._ensure_benchmark_date_dir(context)
+
+            self.assertEqual(
+                context.result["benchmark_output_path"], str(benchmark_dir)
+            )
+            self.assertEqual(
+                (benchmark_dir / "xllm_log" / "node_0.log").read_text(
+                    encoding="utf-8"
+                ),
+                "crash\n",
+            )
+            self.assertTrue((benchmark_dir / "partial.txt").is_file())
+
+    def test_fallback_archive_ignores_date_dirs_from_previous_runs(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            old_dir = output_path / "20260701_000000"
+            old_dir.mkdir()
+
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.state["init_entries"] = ["20260701_000000"]
+
+            scheduler._ensure_benchmark_date_dir(context)
+
+            benchmark_output = Path(context.result["benchmark_output_path"])
+            self.assertNotEqual(benchmark_output.name, "20260701_000000")
+            self.assertRegex(benchmark_output.name, r"^\d{8}_\d{6}$")
+            self.assertEqual(list(old_dir.iterdir()), [])
+
+    def test_fallback_archive_mirrors_service_group_layout(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            instance_dir = output_path / "xllm_log" / "master-0"
+            log_dir = instance_dir / "log"
+            log_dir.mkdir(parents=True)
+            (log_dir / "node_0.log").write_text("ready\n", encoding="utf-8")
+            (instance_dir / "start_xllm_serv_master-0.sh").write_text(
+                "start\n", encoding="utf-8"
+            )
+
+            runtime = SimpleNamespace(
+                plan=SimpleNamespace(
+                    output_dir=str(instance_dir),
+                    instance_name="master-0",
+                    host="127.0.0.1",
+                    is_local=True,
+                ),
+                container_config=SimpleNamespace(
+                    container_name="master-container"
+                ),
+                container_manager=mock.Mock(),
+            )
+            runtime.container_manager.container_is_running.return_value = False
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state.update(
+                task_config={"case_name": "case_a"},
+                init_entries=["xllm_log"],
+                service_runtimes=[runtime],
+            )
+
+            scheduler._ensure_benchmark_date_dir(context)
+
+            benchmark_output = Path(context.result["benchmark_output_path"])
+            self.assertRegex(benchmark_output.name, r"^\d{8}_\d{6}$")
+            archived = benchmark_output / "xllm_log" / "master-0"
+            self.assertEqual(
+                (archived / "log" / "node_0.log").read_text(encoding="utf-8"),
+                "ready\n",
+            )
+            self.assertTrue(
+                (archived / "start_xllm_serv_master-0.sh").is_file()
+            )
+            self.assertEqual(
+                context.state["service_group_archive_paths"],
+                [str(benchmark_output)],
+            )
+
+    def test_fallback_archive_reuses_unwritable_date_dir_without_creating_another(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            root_like_dir = output_path / "20260811_201941"
+            root_like_dir.mkdir()
+            (root_like_dir / "configs").mkdir()
+            # Simulate an aisbench-created directory the host user cannot write into.
+            root_like_dir.chmod(0o555)
+            log_dir = output_path / "log"
+            log_dir.mkdir()
+            (log_dir / "node_0.log").write_text("crash\n", encoding="utf-8")
+            (output_path / "start_xllm_serv.sh").write_text(
+                "#!/bin/bash\n", encoding="utf-8"
+            )
+
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state["init_entries"] = ["log", "start_xllm_serv.sh"]
+
+            try:
+                scheduler._ensure_benchmark_date_dir(context)
+            finally:
+                root_like_dir.chmod(0o755)
+
+            # Prefer reuse even when host cannot write; do not mint another date dir.
+            self.assertEqual(
+                context.result["benchmark_output_path"], str(root_like_dir)
+            )
+            date_dirs = [
+                entry
+                for entry in output_path.iterdir()
+                if entry.is_dir() and entry.name[:8].isdigit()
+            ]
+            self.assertEqual([entry.name for entry in date_dirs], ["20260811_201941"])
+            self.assertTrue((root_like_dir / "configs").is_dir())
+
+    def test_fallback_archive_copies_via_container_when_reused_not_writable(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            root_like_dir = output_path / "20260811_201941"
+            root_like_dir.mkdir()
+            root_like_dir.chmod(0o555)
+            log_dir = output_path / "log"
+            log_dir.mkdir()
+            (log_dir / "node_0.log").write_text("crash\n", encoding="utf-8")
+            (output_path / "start_xllm_serv.sh").write_text(
+                "#!/bin/bash\n", encoding="utf-8"
+            )
+
+            manager = mock.Mock()
+            manager.container_is_running.return_value = True
+            # chmod claims success but does not make the directory writable, so
+            # the fallback must archive through the container without minting
+            # another date directory.
+            manager.exec_in_container.return_value = SimpleNamespace(success=True)
+
+            def _container_copy(_manager, _config, source, destination):
+                root_like_dir.chmod(0o755)
+                scheduler._copy_archive_entry(Path(source), Path(destination))
+                root_like_dir.chmod(0o555)
+                return True
+
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state.update(
+                init_entries=["log", "start_xllm_serv.sh"],
+                container_manager=manager,
+                container_config=SimpleNamespace(container_name="case-container"),
+            )
+
+            try:
+                with mock.patch.object(
+                    scheduler,
+                    "_copy_entry_via_container",
+                    side_effect=_container_copy,
+                ), mock.patch(
+                    "xtask.utils.container_manager.path_mapping_in_container",
+                    side_effect=lambda path: path,
+                ):
+                    scheduler._ensure_benchmark_date_dir(context)
+            finally:
+                root_like_dir.chmod(0o755)
+
+            self.assertEqual(
+                context.result["benchmark_output_path"], str(root_like_dir)
+            )
+            self.assertEqual(
+                (root_like_dir / "xllm_log" / "node_0.log").read_text(
+                    encoding="utf-8"
+                ),
+                "crash\n",
+            )
+            self.assertTrue((root_like_dir / "start_xllm_serv.sh").is_file())
+            date_dirs = [
+                entry.name
+                for entry in output_path.iterdir()
+                if entry.is_dir() and entry.name[:8].isdigit()
+            ]
+            self.assertEqual(date_dirs, ["20260811_201941"])
+
+    def test_fallback_archive_retries_unreadable_kernel_meta_via_container(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            date_dir = output_path / "20260812_100920"
+            date_dir.mkdir()
+            instance_dir = output_path / "xllm_log" / "master-0"
+            log_dir = instance_dir / "log"
+            log_dir.mkdir(parents=True)
+            (log_dir / "node_0.log").write_text("ready\n", encoding="utf-8")
+            (instance_dir / "start_xllm_serv_master-0.sh").write_text(
+                "start\n", encoding="utf-8"
+            )
+            kernel_meta = instance_dir / "kernel_meta"
+            kernel_meta.mkdir()
+            locked = kernel_meta / "kernel_meta_temp_1" / "locked.bin"
+            locked.parent.mkdir()
+            locked.write_text("secret\n", encoding="utf-8")
+            locked.chmod(0o000)
+
+            manager = mock.Mock()
+            manager.container_is_running.return_value = True
+            manager.exec_in_container.return_value = SimpleNamespace(success=True)
+
+            def _container_copy(_manager, _config, source, destination):
+                # Simulate root-in-container being able to read/copy the locked tree.
+                locked.chmod(0o644)
+                scheduler._copy_archive_entry(Path(source), Path(destination))
+                return True
+
+            runtime = SimpleNamespace(
+                plan=SimpleNamespace(
+                    output_dir=str(instance_dir),
+                    instance_name="master-0",
+                    host="127.0.0.1",
+                    is_local=True,
+                ),
+                container_config=SimpleNamespace(container_name="master-container"),
+                container_manager=manager,
+            )
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state.update(
+                task_config={"case_name": "case_a"},
+                init_entries=["xllm_log"],
+                service_runtimes=[runtime],
+                container_manager=manager,
+                container_config=SimpleNamespace(container_name="master-container"),
+            )
+
+            try:
+                with mock.patch.object(
+                    scheduler,
+                    "_copy_entry_via_container",
+                    side_effect=_container_copy,
+                ), mock.patch(
+                    "xtask.utils.container_manager.path_mapping_in_container",
+                    side_effect=lambda path: path,
+                ), mock.patch.object(
+                    scheduler.logging, "warning"
+                ) as warning_mock:
+                    scheduler._ensure_benchmark_date_dir(context)
+                archive_warnings = [
+                    call
+                    for call in warning_mock.call_args_list
+                    if call.args and "Failed to archive" in str(call.args[0])
+                ]
+                self.assertEqual(archive_warnings, [])
+            finally:
+                locked.chmod(0o644)
+
+            self.assertEqual(
+                context.result["benchmark_output_path"], str(date_dir)
+            )
+            archived = date_dir / "xllm_log" / "master-0"
+            self.assertEqual(
+                (archived / "log" / "node_0.log").read_text(encoding="utf-8"),
+                "ready\n",
+            )
+            self.assertTrue((archived / "start_xllm_serv_master-0.sh").is_file())
+            self.assertEqual(
+                (archived / "kernel_meta" / "kernel_meta_temp_1" / "locked.bin").read_text(
+                    encoding="utf-8"
+                ),
+                "secret\n",
+            )
+
+    def test_fallback_archive_reuses_after_container_chmod(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            root_like_dir = output_path / "20260811_201941"
+            root_like_dir.mkdir()
+            root_like_dir.chmod(0o555)
+            log_dir = output_path / "log"
+            log_dir.mkdir()
+            (log_dir / "node_0.log").write_text("crash\n", encoding="utf-8")
+
+            manager = mock.Mock()
+            manager.container_is_running.return_value = True
+            manager.exec_in_container.return_value = SimpleNamespace(success=True)
+
+            def _chmod_side_effect(*_args, **_kwargs):
+                root_like_dir.chmod(0o755)
+                return SimpleNamespace(success=True)
+
+            manager.exec_in_container.side_effect = _chmod_side_effect
+
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state.update(
+                init_entries=["log"],
+                container_manager=manager,
+                container_config=SimpleNamespace(container_name="case-container"),
+            )
+
+            try:
+                with mock.patch(
+                    "xtask.utils.container_manager.path_mapping_in_container",
+                    side_effect=lambda path: path,
+                ):
+                    scheduler._ensure_benchmark_date_dir(context)
+            finally:
+                root_like_dir.chmod(0o755)
+
+            self.assertEqual(
+                context.result["benchmark_output_path"], str(root_like_dir)
+            )
+            self.assertEqual(
+                (root_like_dir / "xllm_log" / "node_0.log").read_text(
+                    encoding="utf-8"
+                ),
+                "crash\n",
+            )
+            manager.exec_in_container.assert_called()
+
+    def test_cleanup_prepares_fallback_date_dir_before_container_removal(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state["task_config"] = {"case_name": "case_a"}
+            context.state["engine_config"] = {}
+            container_manager = mock.Mock()
+            context.state["container_manager"] = container_manager
+
+            call_order = []
+
+            def _ensure(ctx):
+                call_order.append("ensure")
+                ctx.result["benchmark_output_path"] = str(
+                    output_path / "20260811_210000"
+                )
+
+            def _cleanup():
+                call_order.append("cleanup")
+
+            container_manager.cleanup.side_effect = _cleanup
+
+            with mock.patch.object(
+                scheduler, "_ensure_benchmark_date_dir", side_effect=_ensure
+            ), mock.patch.object(
+                scheduler,
+                "get_xtask_config_data",
+                return_value={"ENV_CONFIG": {"CLEAN_RESULTS": True}},
+            ):
+                scheduler._cleanup_scheduler(context)
+
+            self.assertEqual(call_order, ["ensure", "cleanup"])
+            self.assertEqual(
+                context.result["benchmark_output_path"],
+                str(output_path / "20260811_210000"),
+            )
+
+    def test_finalize_result_reports_fallback_date_dir(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory)
+            context = TaskExecutionContext("case_a.yaml", str(output_path))
+            context.result["task_config"] = {"case_name": "case_a"}
+            context.state["task_config"] = {"case_name": "case_a"}
+
+            with mock.patch.object(scheduler, "write_result") as write_mock:
+                scheduler._finalize_result(context)
+
+            result_arg = write_mock.call_args.args[0]
+            benchmark_output = Path(result_arg["benchmark_output_path"])
+            self.assertEqual(benchmark_output.parent, output_path)
+            self.assertRegex(benchmark_output.name, r"^\d{8}_\d{6}$")
 
 
 if __name__ == "__main__":

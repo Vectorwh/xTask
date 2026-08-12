@@ -559,7 +559,7 @@ def run_tpe_parameter_search(args, openme_client, run_trial, output_root=None):
                 continue
 
             all_results.append(result)
-            openme_client.AddCaseResult(result)
+            openme_client.AddCaseResult(result, task_path=task_file)
             controller.tell_result(candidate, result)
         controller.write_reports()
     return all_results

@@ -1,0 +1,202 @@
+{
+  "elements": [
+    {
+      "tag": "me_md",
+      "content": "**测试版本信息**"
+    },
+    {
+      "columns": [
+        {
+          "padding": "4px 4px 4px 4px",
+          "elements": [
+            {
+              "tag": "me_md",
+              "content": "版本号"
+            },
+            {
+              "tag": "me_md",
+              "content": "$version"
+            }
+          ],
+          "horizontal_align": "center",
+          "weight": 1,
+          "background_style": "gray",
+          "tag": "column"
+        },
+        {
+          "padding": "4px 4px 4px 4px",
+          "elements": [
+            {
+              "tag": "me_md",
+              "content": "Device"
+            },
+            {
+              "tag": "me_md",
+              "content": "$device"
+            }
+          ],
+          "horizontal_align": "center",
+          "weight": 1,
+          "background_style": "gray",
+          "tag": "column"
+        },
+        {
+          "padding": "4px 4px 4px 4px",
+          "elements": [
+            {
+              "tag": "me_md",
+              "content": "执行机"
+            },
+            {
+              "tag": "me_md",
+              "content": "$host"
+            }
+          ],
+          "horizontal_align": "center",
+          "weight": 1,
+          "background_style": "gray",
+          "tag": "column"
+        }
+      ],
+      "tag": "column_set"
+    },
+    {
+      "tag": "me_md",
+      "content": "**回归测试概览**"
+    },
+    {
+      "columns": [
+        {
+          "padding": "4px 4px 4px 4px",
+          "vertical_align": "center",
+          "elements": [
+            {
+              "tag": "me_md",
+              "content": "测试执行时间"
+            },
+            {
+              "tag": "me_md",
+              "content": "$execution_time"
+            }
+          ],
+          "horizontal_align": "center",
+          "weight": 1,
+          "background_style": "gray",
+          "tag": "column",
+          "vertical_spacing": "default"
+        },
+        {
+          "padding": "4px 4px 4px 4px",
+          "vertical_align": "center",
+          "elements": [
+            {
+              "tag": "me_md",
+              "content": "卡片用例总数"
+            },
+            {
+              "tag": "me_md",
+              "content": "$all_case_num"
+            }
+          ],
+          "horizontal_align": "center",
+          "weight": 1,
+          "background_style": "gray",
+          "tag": "column",
+          "vertical_spacing": "default"
+        },
+        {
+          "padding": "4px 4px 4px 4px",
+          "vertical_align": "center",
+          "elements": [
+            {
+              "color": "#1b1b1b",
+              "tag": "me_md",
+              "content": "失败用例总数"
+            },
+            {
+              "color": "#1b1b1b",
+              "tag": "me_md",
+              "content": "$fail_case_num"
+            }
+          ],
+          "horizontal_align": "center",
+          "weight": 1,
+          "background_style": "gray",
+          "tag": "column",
+          "vertical_spacing": "default"
+        }
+      ],
+      "tag": "column_set"
+    },
+    {
+      "tag": "me_md",
+      "content": "**测试用例明细**"
+    },
+    {
+      "is_stripes": true,
+      "stripes_color": "orange",
+      "header_style": {
+        "text_size": "normal",
+        "background_style": "grey",
+        "text_color": "default",
+        "bold": true,
+        "lines": 1
+      },
+      "columns": [
+        {
+          "vertical_align": "center",
+          "data_type": "text",
+          "horizontal_align": "left",
+          "name": "model_name",
+          "width": "auto",
+          "display_name": {
+            "content": "模型"
+          }
+        },
+        {
+          "vertical_align": "center",
+          "data_type": "me_md",
+          "horizontal_align": "center",
+          "name": "exec_status",
+          "width": "auto",
+          "display_name": {
+            "content": "用例执行情况"
+          }
+        },
+        {
+          "vertical_align": "center",
+          "data_type": "me_md",
+          "horizontal_align": "center",
+          "name": "model_owner",
+          "width": "auto",
+          "display_name": {
+            "content": "责任人"
+          }
+        }
+      ],
+      "row_height": "middle",
+      "tag": "table",
+      "rows": "$case_details",
+      "page_size": 20
+    },
+    {
+      "tag": "me_md",
+      "content": "$model_summary"
+    },
+    {
+      "tag": "me_md",
+      "content": "$case_framework_log"
+    }
+  ],
+  "header": {
+    "theme": "red",
+    "title": {
+      "tag": "plain_text",
+      "content": "xLLM Nightly Build Report"
+    }
+  },
+  "config": {
+    "locales": [],
+    "version": "2.0"
+  }
+}

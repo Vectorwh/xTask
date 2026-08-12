@@ -1,8 +1,33 @@
 """Dynamic batch-size decisions for auto-assessment runs."""
 
 import logging
+from pathlib import Path
 
-from xtask.tasks.task_parser import get_tasks
+from xtask.tasks.task_parser import gen_group_autoassess_task, get_tasks
+
+
+def _auto_assess_base_case(result, current_task_key):
+    generated_case = result.get("task_config", {}).get("case_name")
+    if not generated_case and current_task_key:
+        generated_case = Path(current_task_key).stem
+    base_case, separator, _ = str(generated_case or "").rpartition("_bs-")
+    if not separator or not base_case:
+        raise ValueError(
+            f"Cannot determine auto-assess base case from '{generated_case}'"
+        )
+    return base_case
+
+
+def _insert_tasks_after_current(keys_to_process, current_task_key, new_tasks):
+    new_keys = [key for key in new_tasks if key not in keys_to_process]
+    if not new_keys:
+        return
+    try:
+        insert_at = keys_to_process.index(current_task_key) + 1
+    except ValueError:
+        keys_to_process.extend(new_keys)
+        return
+    keys_to_process[insert_at:insert_at] = new_keys
 
 
 def process_auto_assessment(
@@ -15,6 +40,8 @@ def process_auto_assessment(
     tasks,
     keys_to_process,
     xtask_config,
+    current_task_key=None,
+    output_path=None,
 ):
     """Evaluate one trial and append the next batch-size task when needed."""
     is_auto_perf = (
@@ -122,10 +149,26 @@ def process_auto_assessment(
     config_para["batch_size"] = next_batch
     logging.info("Next Step: Calculated new Batch Size -> %s", next_batch)
 
-    new_tasks = get_tasks(args, xtask_config, config_para)
+    if current_task_key and output_path:
+        new_tasks = {}
+        base_case = _auto_assess_base_case(result, current_task_key)
+        generated = gen_group_autoassess_task(
+            base_case,
+            str(Path(output_path).parent),
+            new_tasks,
+            config_para,
+        )
+        if not generated:
+            new_tasks = {}
+    else:
+        # Keep direct callers compatible; the main workflow always supplies
+        # the current task so a case group advances only that base case.
+        new_tasks = get_tasks(args, xtask_config, config_para)
     if new_tasks:
         tasks.update(new_tasks)
-        keys_to_process.extend(new_tasks.keys())
+        _insert_tasks_after_current(
+            keys_to_process, current_task_key, new_tasks
+        )
         logging.info("Added %s new task(s) to the queue.", len(new_tasks))
     else:
         logging.warning("get_tasks returned no new tasks.")

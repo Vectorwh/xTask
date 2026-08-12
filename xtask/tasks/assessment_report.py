@@ -120,7 +120,7 @@ class AssessmentReporter:
             state["status"] = "completed"
             if self.mode == "auto_assess":
                 state["stop_reason"] = (
-                    stop_reason or state.get("stop_reason") or "queue_exhausted"
+                    state.get("stop_reason") or stop_reason or "queue_exhausted"
                 )
             self._write_state(state)
 

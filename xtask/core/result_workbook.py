@@ -17,6 +17,11 @@ SUMMARY_SHEET = "执行汇总"
 EXCEL_CELL_LIMIT = 32767
 INVALID_SHEET_CHARS = re.compile(r"[\\/*?:\[\]]")
 ACCURACY_CASE_TOKEN = re.compile(r"(?:^|[_-])acc(?:uracy)?(?:[_-]|$)", re.IGNORECASE)
+# Terminal color sequences (e.g. \x1b[32mINFO\x1b[0m) leaking in from tool stderr.
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# Control characters openpyxl refuses to store; mirrors
+# openpyxl.cell.cell.ILLEGAL_CHARACTERS_RE.
+ILLEGAL_XML_CHARS_RE = re.compile(r"[\000-\010]|[\013-\014]|[\016-\037]")
 NOT_APPLICABLE = "NA"
 MISSING_ACCURACY = "-"
 
@@ -89,7 +94,11 @@ def _excel_value(value: Any) -> Any:
         return ""
     if isinstance(value, (bool, int, float)):
         return value
-    text = str(value)
+    # Benchmark stderr may carry ANSI colors and control characters that
+    # openpyxl rejects (IllegalCharacterError), which would silently drop the
+    # whole result row; strip them before truncation keeps the row writable.
+    text = ANSI_ESCAPE_RE.sub("", str(value))
+    text = ILLEGAL_XML_CHARS_RE.sub("", text)
     if len(text) > EXCEL_CELL_LIMIT:
         text = text[: EXCEL_CELL_LIMIT - 16] + "...[truncated]"
     if text.startswith(("=", "+", "@")):

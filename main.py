@@ -69,6 +69,7 @@ def run_validated_workflow(args, xtask_config):
             openme_client=openme_client,
             run_trial=run_scheduler,
         )
+        openme_client.SendJUEMsgCard(args=args)
         return
 
     run_task_workflow(
@@ -77,9 +78,7 @@ def run_validated_workflow(args, xtask_config):
         openme_client,
         para_strategy=para_strategy,
     )
-    
-    # 发送京me通报
-    #openme_client.SendJUEMsgCard()
+    openme_client.SendJUEMsgCard(args=args)
 
 
 def parse_and_validate_arguments():

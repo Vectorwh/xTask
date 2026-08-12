@@ -409,6 +409,36 @@ class WriteResultTests(unittest.TestCase):
         self.assertEqual(model_summary[result_processor.FAILURE_BASELINE], 1)
         self.assertEqual(model_summary[result_processor.FAILURE_OTHER], 1)
 
+    def test_failure_reason_with_control_characters_is_written(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(
+            result_processor.os, "getcwd", return_value=root
+        ):
+            source = self._source_case(root)
+            config = self._config("case-a")
+            failure = self._result(config, success=False)
+            failure.update(
+                benchmark_success=False,
+                benchmark_stderr=(
+                    "Saving to: 'gsm8k.zip'\n"
+                    "[ais_bench] [\x1b[32mINFO\x1b[0m] Loading dataset\n"
+                    "wget progress\x08\x08 garbage"
+                ),
+                message="Benchmark command failed with exit code 1",
+            )
+            result_processor.write_result(failure, config, task_path=str(source))
+            rows = self._sheet_rows(Path(root) / "outputs" / "result.xlsx", "qwen3_8b")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "fail")
+        self.assertEqual(
+            rows[0]["failure_category"], result_processor.FAILURE_BENCHMARK
+        )
+        reason = rows[0]["failure_reason"]
+        self.assertIn("Benchmark command failed with exit code 1", reason)
+        self.assertIn("[ais_bench] [INFO] Loading dataset", reason)
+        self.assertNotIn("\x1b", reason)
+        self.assertNotIn("\x08", reason)
+
     def test_generated_search_case_resolves_original_model_folder(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(
             result_processor.os, "getcwd", return_value=root

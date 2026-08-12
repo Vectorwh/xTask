@@ -12,15 +12,26 @@ def get_api_type_file(api_type, shell_content):
     api_list = ["vllm_api_general_chat", "vllm_api_general_stream", "vllm_api_stream_chat"]
     if api_type not in api_list:
         logging.error(f"api_type: {api_type} is invalid")
-    shell_content.append("\n# 2. 定位vllm_api配置文件")
-    shell_content.append(f'CONFIG_FILE="$AIS_BENCH_PATH/benchmark/configs/models/vllm_api/{api_type}.py"')
-    shell_content.append('if [ ! -f "$CONFIG_FILE" ]; then')
-    shell_content.append('    echo "错误：配置文件不存在 $CONFIG_FILE"')
+    model_config_name = f"xtask_{api_type}"
+    shell_content.append("\n# 2. 创建用例级vllm_api配置")
+    shell_content.append(
+        f'SOURCE_CONFIG_FILE="${{AISBENCH_SOURCE_DIR:-/xllm_test_060/benchmark}}/'
+        f'ais_bench/benchmark/configs/models/vllm_api/{api_type}.py"'
+    )
+    shell_content.append('if [ ! -f "$SOURCE_CONFIG_FILE" ]; then')
+    shell_content.append(
+        f'    SOURCE_CONFIG_FILE="$AIS_BENCH_PATH/benchmark/configs/models/vllm_api/{api_type}.py"'
+    )
+    shell_content.append('fi')
+    shell_content.append(f'CONFIG_FILE="$AIS_BENCH_CONFIG_DIR/models/{model_config_name}.py"')
+    shell_content.append('if [ ! -f "$SOURCE_CONFIG_FILE" ]; then')
+    shell_content.append('    echo "错误：AISBench模型配置文件不存在 $SOURCE_CONFIG_FILE"')
     shell_content.append('    exit 1')
     shell_content.append('fi')
-    shell_content.append('echo "目标配置文件：$CONFIG_FILE"')
+    shell_content.append('cp -f "$SOURCE_CONFIG_FILE" "$CONFIG_FILE"')
+    shell_content.append('echo "用例级配置文件：$CONFIG_FILE"')
 
-    return "$CONFIG_FILE", shell_content
+    return "$CONFIG_FILE", model_config_name, shell_content
 
 def get_syn_config_file(shell_content):
     shell_content.append("\n# 2. 定位syn_config配置文件")
@@ -70,6 +81,13 @@ def update_generation_kwargs(generation_kwargs, api_type_file):
 
     return update_cmd
 
+
+def append_checked_command(shell_content, command, failure_message):
+    shell_content.append(f'if ! {command}; then')
+    shell_content.append(f'    echo "{failure_message}" >&2')
+    shell_content.append('    exit 1')
+    shell_content.append('fi')
+
 def generate_aisbench_script(
     task_config: Dict,
     output_file_path: str,
@@ -117,6 +135,8 @@ def generate_aisbench_script(
     shell_content.append('    exit 1')
     shell_content.append('fi')
     shell_content.append('echo "ais_bench安装路径：$AIS_BENCH_PATH"')
+    shell_content.append(f'AIS_BENCH_CONFIG_DIR="{output_file_path_incontainer}/aisbench_configs"')
+    shell_content.append('mkdir -p "$AIS_BENCH_CONFIG_DIR/models"')
 
     download_cmd = download_dataset(task_config)
     if download_cmd:
@@ -136,7 +156,7 @@ def generate_aisbench_script(
         repetition_penalty = accuracy_cfg.get("repetition_penalty", 1)
 
         api_type = accuracy_cfg.get("api_type", "vllm_api_general_chat")
-        api_type_file, shell_content = get_api_type_file(api_type, shell_content)
+        api_type_file, model_config_name, shell_content = get_api_type_file(api_type, shell_content)
 
         # Step 3: 修改配置文件中的核心参数（使用sed命令）
         shell_content.append("\n# 3. 修改vllm_api配置文件$CONFIG_FILE参数")
@@ -147,7 +167,9 @@ def generate_aisbench_script(
         # 替换模型名称
         shell_content.append(f'sed -i "s/model\s*=\s*.*,/model=\'{model_name}\',/g" {api_type_file}')
         # 替换模型路径
-        shell_content.append(f'sed -i "s#path\s*=\s*\\"\\",#path=\'{model_path_inside}\',#g" {api_type_file}')
+        shell_content.append(
+            f'''sed -i -E "s#^([[:space:]]*)path[[:space:]]*=.*,#\\1path='{model_path_inside}',#" {api_type_file}'''
+        )
 
         shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={temperature},/g" {api_type_file}')
         shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={request_rate},/g" {api_type_file}')
@@ -191,7 +213,8 @@ def generate_aisbench_script(
 
         # 构造ais-bench精度测试命令（参考ais-bench官方文档）
         accuracy_cmd = (
-            f'ais_bench --models {api_type} '
+            f'ais_bench --config-dir "$AIS_BENCH_CONFIG_DIR" '
+            f'--models {model_config_name} '
             f'--datasets {dataset_conf} '
             f'{dump_eval_details_str} '
             f'{num_prompts_str} '
@@ -199,7 +222,7 @@ def generate_aisbench_script(
         )
 
         shell_content.append(f'echo "执行精度测试命令：{accuracy_cmd}"')
-        shell_content.append(accuracy_cmd)
+        append_checked_command(shell_content, accuracy_cmd, "AISBench精度测试执行失败")
         shell_content.append(f'echo "精度测试完成，结果保存至 {output_file_path_incontainer}"')
 
         shell_content.append(f'cp {api_type_file} {output_file_path_incontainer}/ ')
@@ -222,7 +245,7 @@ def generate_aisbench_script(
         ignore_eos = perf_cfg.get("ignore_eos", "True")
 
         api_type = perf_cfg.get("api_type", "vllm_api_general_stream")
-        api_type_file, shell_content = get_api_type_file(api_type, shell_content)
+        api_type_file, model_config_name, shell_content = get_api_type_file(api_type, shell_content)
 
         # Step 2: 修改配置文件中的核心参数（使用sed命令）
         shell_content.append("\n# 3. 修改vllm_api配置文件$CONFIG_FILE参数")
@@ -233,7 +256,9 @@ def generate_aisbench_script(
         # 替换模型名称
         shell_content.append(f'sed -i "s/model\s*=\s*.*,/model=\'{model_name}\',/g" {api_type_file}')
         # 替换模型路径
-        shell_content.append(f'sed -i "s#path\s*=\s*\\"\\",#path=\'{model_path_inside}\',#g" {api_type_file}')
+        shell_content.append(
+            f'''sed -i -E "s#^([[:space:]]*)path[[:space:]]*=.*,#\\1path='{model_path_inside}',#" {api_type_file}'''
+        )
 
         shell_content.append("\n# 5. 执行性能测试")
         perf_concurrency = perf_cfg.get("concurrency", 10)
@@ -296,7 +321,8 @@ def generate_aisbench_script(
         
         # 构造ais-bench性能测试命令（参考ais-bench官方文档）
         perf_cmd = (
-            f'ais_bench --models {api_type} '
+            f'ais_bench --config-dir "$AIS_BENCH_CONFIG_DIR" '
+            f'--models {model_config_name} '
             f'--datasets {dataset_conf_type} '
             f'--num-warmups {num_warmups} '
             f'--mode {mode} --debug '
@@ -304,7 +330,7 @@ def generate_aisbench_script(
             f'--work-dir {output_file_path_incontainer}'
         )
         shell_content.append(f'echo "执行性能测试命令：{perf_cmd}"')
-        shell_content.append(perf_cmd)
+        append_checked_command(shell_content, perf_cmd, "AISBench性能测试执行失败")
         shell_content.append(f'echo "性能测试完成，结果保存至 {output_file_path_incontainer}"')
 
         shell_content.append(f'cp {api_type_file} {output_file_path_incontainer}/ ')
@@ -314,8 +340,9 @@ def generate_aisbench_script(
     
     shell_content.append(f'chown -R {user_id}:{user_id} {output_file_path_incontainer}/* ')
 
-    shell_content.append(f'cp $CHAT_CONFIG_FILE {output_file_path_incontainer}/ ')
-    shell_content.append('echo "配置文件修改完成（已生成备份文件 ${CHAT_CONFIG_FILE}.bak）"')
+    shell_content.append('if [ -n "${CHAT_CONFIG_FILE:-}" ] && [ -f "$CHAT_CONFIG_FILE" ]; then')
+    shell_content.append(f'    cp "$CHAT_CONFIG_FILE" {output_file_path_incontainer}/ ')
+    shell_content.append('fi')
 
     # 收尾：提示脚本完成
     shell_content.append("\necho \"===== ais-bench测试脚本执行完成 =====\"")

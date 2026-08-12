@@ -161,7 +161,7 @@ class ContainerManager:
             # 检查外部中断信号
             if abort_event is not None and abort_event.is_set():
                 aborted = True
-                logging.warning(f"Received abort signal, terminating command: {cmd}")
+                logging.info("Received abort signal, terminating command: %s", cmd)
                 self._terminate_process_group(proc)
                 break
 

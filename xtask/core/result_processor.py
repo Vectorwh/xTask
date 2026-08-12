@@ -3,11 +3,11 @@ import json
 import logging
 import math
 import os
-import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from xtask.core.model_identity import resolve_model_name, resolve_source_yaml
 from xtask.core.result_workbook import (
     MISSING_ACCURACY,
     PERF_SUMMARY_FIELDS,
@@ -44,11 +44,6 @@ FAILURE_OTHER = "其他异常"
 CHINA_STANDARD_TIME = timezone(timedelta(hours=8))
 CASE_GROUP_WORKBOOK_PATH_ATTR = "_xtask_case_group_result_path"
 CASE_GROUP_WORKBOOK_INITIALIZED_ATTR = "_xtask_case_group_result_initialized"
-
-_SEARCH_CASE_SUFFIXES = (
-    re.compile(r"_sg\d+$", re.IGNORECASE),
-    re.compile(r"_bs-[^/]+$", re.IGNORECASE),
-)
 
 
 def check_accuracy_within_threshold(baseline, threshold, result_value):
@@ -184,50 +179,8 @@ def _resolve_task_config(result, task_config):
     return task_config if isinstance(task_config, dict) else {}
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _base_case_names(case_name: str):
-    names = [case_name]
-    current = case_name
-    for pattern in _SEARCH_CASE_SUFFIXES:
-        stripped = pattern.sub("", current)
-        if stripped != current and stripped not in names:
-            names.append(stripped)
-            current = stripped
-    return names
-
-
 def _resolve_source_yaml(task_path, task_config):
-    metadata = task_config.get("_xtask") or {}
-    configured_source = metadata.get("source_case_file")
-    if configured_source:
-        source = Path(str(configured_source)).resolve()
-        if source.is_file():
-            return source
-
-    source = Path(task_path).resolve() if task_path else None
-    tests_root = (Path.cwd() / "tests").resolve()
-    if source and source.is_file() and _is_under(source, tests_root):
-        return source
-
-    case_name = str(task_config.get("case_name") or "")
-    if case_name:
-        from xtask.tasks.task_parser import find_case_file
-
-        for candidate_name in _base_case_names(case_name):
-            try:
-                candidate = find_case_file(candidate_name, str(tests_root))
-            except Exception:
-                candidate = None
-            if candidate:
-                return Path(candidate).resolve()
-    return source if source and source.is_file() else None
+    return resolve_source_yaml(task_path, task_config)
 
 
 def _contains_metric(task_config, metric_name):
@@ -468,12 +421,7 @@ def _build_result_row(result, task_config, task_path=None, args=None):
     if not case_name and task_path:
         case_name = Path(task_path).stem
 
-    source_yaml = _resolve_source_yaml(task_path, task_config)
-    model_name = (
-        source_yaml.parent.name
-        if source_yaml is not None
-        else (Path(task_path).parent.name if task_path else "unknown")
-    )
+    model_name = resolve_model_name(task_path, task_config)
     success = bool(result.get("success"))
     failure_category, failure_reason = _classify_failure(result, task_config)
     is_accuracy = _contains_metric(task_config, "acc")
