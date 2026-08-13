@@ -17,6 +17,7 @@ fi
 
 XLLM_DIR="${WORK_ROOT}/xllm"
 XLLM_PKG_DIR="${WORK_ROOT}/pkg/xllm"
+XLLM_DIST_DIR="${XLLM_DIR}/dist"
 RUNTIME_LIB_DIR="${XLLM_PKG_DIR}/runtime_libs"
 
 if [[ ! -f "${XLLM_DIR}/setup.py" ]]; then
@@ -35,13 +36,31 @@ git config --global --add safe.directory '*'
 # 编译：安装 pre-commit 后执行 setup.py 构建
 pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple
 # python setup.py build --device npu
+# 只清理源码目录中的历史 wheel。pkg/xllm 中的上一份可用产物会保留到新
+# wheel 成功生成并完成暂存，避免构建失败时丢失可用包。
+rm -f "${XLLM_DIST_DIR}"/xllm_npu*.whl
 python setup.py bdist_wheel --device npu
 
-# 编译完执行生成件归档
+# 本轮构建必须且只能生成一个 xLLM wheel，避免通配符把多个版本归档。
+shopt -s nullglob
+XLLM_WHEELS=("${XLLM_DIST_DIR}"/xllm_npu*.whl)
+shopt -u nullglob
+if [[ ${#XLLM_WHEELS[@]} -ne 1 ]]; then
+  echo "ERROR: expected exactly one xLLM wheel in '${XLLM_DIST_DIR}', found ${#XLLM_WHEELS[@]}." >&2
+  exit 1
+fi
+
+# 编译完执行生成件归档。先完整暂存新 wheel，再清理历史版本并替换，避免
+# 复制失败时破坏 pkg/xllm 中的上一份可用产物。
 mkdir -p "${XLLM_PKG_DIR}"
 cp -rf /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/ "${XLLM_PKG_DIR}/"
 #cp "${XLLM_DIR}/build/xllm/core/server/xllm" "${WORK_ROOT}/pkg/xllm/"
-cp -f "${XLLM_DIR}"/dist/* "${XLLM_PKG_DIR}/"
+XLLM_WHEEL_NAME="$(basename "${XLLM_WHEELS[0]}")"
+XLLM_WHEEL_TMP="${XLLM_PKG_DIR}/.${XLLM_WHEEL_NAME}.tmp"
+cp -f "${XLLM_WHEELS[0]}" "${XLLM_WHEEL_TMP}"
+rm -f "${XLLM_PKG_DIR}"/xllm_npu*.whl
+mv -f "${XLLM_WHEEL_TMP}" "${XLLM_PKG_DIR}/${XLLM_WHEEL_NAME}"
+echo "Archived xLLM wheel: ${XLLM_PKG_DIR}/${XLLM_WHEEL_NAME}"
 
 # 收集编译环境中 xLLM 启动所需、但尚未打入 wheel 的动态库。
 # libxxhash.so.0 通常是版本化文件的软链接，解引用后归档，避免测试容器拿到断链。
