@@ -140,5 +140,43 @@ class DownloadXllmScriptTests(unittest.TestCase):
         self.assertIn('[ ! -f "$XLLM_PACK_DIR/$binary" ]', fallback)
 
 
+class BuildXllmInContainerScriptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (
+            Path(__file__).resolve().parents[1]
+            / "tools"
+            / "build_xllm_in_container.sh"
+        ).read_text(encoding="utf-8")
+
+    def test_stale_dist_wheels_are_removed_before_build(self):
+        cleanup = 'rm -f "${XLLM_DIST_DIR}"/xllm_npu*.whl'
+        build = "python setup.py bdist_wheel --device npu"
+
+        self.assertIn(cleanup, self.script)
+        self.assertLess(self.script.index(cleanup), self.script.index(build))
+
+    def test_archive_requires_exactly_one_new_wheel(self):
+        self.assertIn(
+            'XLLM_WHEELS=("${XLLM_DIST_DIR}"/xllm_npu*.whl)',
+            self.script,
+        )
+        self.assertIn('if [[ ${#XLLM_WHEELS[@]} -ne 1 ]]; then', self.script)
+
+    def test_previous_archive_is_kept_until_new_wheel_is_staged(self):
+        stage = 'cp -f "${XLLM_WHEELS[0]}" "${XLLM_WHEEL_TMP}"'
+        cleanup = 'rm -f "${XLLM_PKG_DIR}"/xllm_npu*.whl'
+        replace = (
+            'mv -f "${XLLM_WHEEL_TMP}" '
+            '"${XLLM_PKG_DIR}/${XLLM_WHEEL_NAME}"'
+        )
+
+        self.assertIn(stage, self.script)
+        self.assertIn(cleanup, self.script)
+        self.assertIn(replace, self.script)
+        self.assertLess(self.script.index(stage), self.script.index(cleanup))
+        self.assertLess(self.script.index(cleanup), self.script.index(replace))
+
+
 if __name__ == "__main__":
     unittest.main()
