@@ -52,6 +52,44 @@ class AisbenchOutputDiscoveryTests(unittest.TestCase):
 
         self.assertEqual((actual_csv, actual_json), ("", ""))
 
+    def test_perf_falls_back_to_the_only_model_abbr_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            stale_expected_dir = (
+                Path(root) / "performances" / "vllm-api-stream-chat-multiturn"
+            )
+            stale_expected_dir.mkdir(parents=True)
+            (stale_expected_dir / "stale.csv").touch()
+            result_dir = (
+                Path(root) / "performances" / "vllm-multiturn-api-chat-stream"
+            )
+            result_dir.mkdir(parents=True)
+            csv_path = result_dir / "sharegpt.csv"
+            json_path = result_dir / "sharegpt.json"
+            csv_path.touch()
+            json_path.touch()
+            (result_dir / "sharegpt_details.json").touch()
+
+            actual_csv, actual_json = get_aisbench_csv_and_json(
+                root, "vllm_api_stream_chat_multiturn"
+            )
+
+        self.assertEqual(actual_csv, str(csv_path))
+        self.assertEqual(actual_json, str(json_path))
+
+    def test_perf_does_not_guess_when_multiple_model_directories_exist(self):
+        with tempfile.TemporaryDirectory() as root:
+            for model_abbr in ("model-a", "model-b"):
+                result_dir = Path(root) / "performances" / model_abbr
+                result_dir.mkdir(parents=True)
+                (result_dir / "dataset.csv").touch()
+                (result_dir / "dataset.json").touch()
+
+            actual_csv, actual_json = get_aisbench_csv_and_json(
+                root, "unknown_api_type"
+            )
+
+        self.assertEqual((actual_csv, actual_json), ("", ""))
+
 
 class AisbenchResultParserTests(unittest.TestCase):
     def test_summary_json_total_values_and_units_are_normalized(self):
@@ -87,6 +125,16 @@ OutputTokenThroughput,total,112.7 token/s,110 token/s,115 token/s,112 token/s,11
         self.assertAlmostEqual(result.summary.output_tps_avg, 112.7)
         self.assertAlmostEqual(result.summary.output_tps_total, 112.7145)
         self.assertAlmostEqual(result.summary.summary_tps_total, 225.4289)
+
+        summary_text = result.print_summary(detailed=True)
+        self.assertIn("AISBENCH TEST RESULT SUMMARY", summary_text)
+        self.assertIn("Total Requests", summary_text)
+        self.assertIn("6", summary_text)
+
+        with tempfile.TemporaryDirectory() as root:
+            summary_path = Path(root) / "summary.txt"
+            summary_path.write_text(summary_text, encoding="utf-8")
+            self.assertGreater(summary_path.stat().st_size, 0)
 
 
 if __name__ == "__main__":

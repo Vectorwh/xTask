@@ -56,6 +56,38 @@ class FakePerfResult:
         raise AssertionError("Excel extraction must not call to_json()")
 
 
+class VerifyResultTests(unittest.TestCase):
+    @staticmethod
+    def _config(baseline=None):
+        return {
+            "metrics": "perf",
+            "benchmark": {
+                "perf": {"baseline": baseline, "threshold": 0.1},
+            },
+        }
+
+    def test_failed_benchmark_command_is_not_overwritten_by_missing_baseline(self):
+        result = {
+            "benchmark_success": False,
+            "benchmark_perf_result": FakePerfResult(),
+        }
+
+        self.assertFalse(result_processor.verify_result(result, self._config()))
+
+    def test_missing_perf_summary_fails_without_baseline(self):
+        result = {"benchmark_success": True}
+
+        self.assertFalse(result_processor.verify_result(result, self._config()))
+
+    def test_valid_perf_summary_passes_without_baseline(self):
+        result = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(),
+        }
+
+        self.assertTrue(result_processor.verify_result(result, self._config()))
+
+
 class WriteResultTests(unittest.TestCase):
     def _source_case(self, root, model="qwen3_8b", case_name="case-a"):
         source = (

@@ -815,6 +815,9 @@ def _post_process_benchmark_rst(
     result_json = os.path.join(
         output_location, task_config.get("case_name").lower() + ".json"
     )
+    archived_result_json = os.path.join(
+        benchmark_location, os.path.basename(result_json)
+    )
     start_sh = os.path.join(output_location, "start_xllm_serv.sh")
     xllm_log = os.path.join(output_location, "log")
 
@@ -827,6 +830,7 @@ def _post_process_benchmark_rst(
 
     process_cmd = (
         f"cp -f {result_json} {benchmark_location}; "
+        f"chmod a+r {archived_result_json}; "
         f"cp -f {start_sh} {benchmark_location}; "
         f"if [ -d {xllm_log} ]; then "
         f"cp -rf {xllm_log} {xllmlog_location}; "

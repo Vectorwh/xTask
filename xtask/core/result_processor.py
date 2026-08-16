@@ -96,6 +96,10 @@ def verify_result(result, task_config):
     acc_flag = False
     logging.debug("entry function: %s"% inspect.currentframe().f_code.co_name)
 
+    if result.get("benchmark_success") is False:
+        logging.error("✗ Test failed: benchmark command did not complete successfully")
+        return False
+
     if "acc" in task_config.get("metrics"):
         baseline = task_config.get("benchmark").get("acc").get("baseline")
         if baseline:
@@ -105,13 +109,14 @@ def verify_result(result, task_config):
                 acc_flag = True
 
     if "perf" in task_config.get("metrics"):
+        perf_result = result.get("benchmark_perf_result")
+        if perf_result is None or getattr(perf_result, "summary", None) is None:
+            logging.error("✗ Test failed: missing perf result summary")
+            return False
+
         baseline = task_config.get("benchmark").get("perf").get("baseline")
         if baseline:
             threshold = task_config.get("benchmark").get("perf").get("threshold")
-            perf_result = result.get("benchmark_perf_result")
-            if perf_result is None or getattr(perf_result, "summary", None) is None:
-                logging.error("✗ Test failed: missing perf result summary")
-                return False
             benchmark_perf_result = float(perf_result.summary.output_tps_avg)
             if check_accuracy_within_threshold(baseline, threshold, benchmark_perf_result):
                 return True

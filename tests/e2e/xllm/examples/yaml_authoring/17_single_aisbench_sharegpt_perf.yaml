@@ -1,0 +1,51 @@
+case_name: 17_single_aisbench_sharegpt_perf
+engine_type: xllm
+model_path: /export/home/models/Qwen3-8B
+served_model_name: Qwen3-8B
+metrics: perf
+dataset_name: sharegpt
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    case_type: performance
+    api_type: vllm_api_stream_chat_multiturn
+    dataset_conf: sharegpt_gen
+    output_len: 512
+    max_out_len: 512
+    batch_size: 8
+    request_rate: 0
+    num_prompts: 100
+    num_warmups: 20
+    baseline: null
+    threshold: 0.10
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: false
+
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_seqs_per_batch: 16
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true

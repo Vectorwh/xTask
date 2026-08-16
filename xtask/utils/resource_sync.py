@@ -133,14 +133,24 @@ def _walk_strings(value: Any) -> Iterable[str]:
             yield from _walk_strings(nested)
 
 
-def _referenced_resource_paths(task_config: Dict[str, Any]) -> List[str]:
-    prefix = CONTAINER_RESOURCE_ROOT.rstrip("/") + "/"
+def _referenced_resource_paths(
+    task_config: Dict[str, Any], source_root: str = DEFAULT_RESOURCE_ROOT
+) -> List[str]:
+    prefixes = dict.fromkeys(
+        (
+            CONTAINER_RESOURCE_ROOT.rstrip("/") + "/",
+            DEFAULT_RESOURCE_ROOT.rstrip("/") + "/",
+            str(source_root).rstrip("/") + "/",
+        )
+    )
     found = []
     for value in _walk_strings(task_config):
-        if value.startswith(prefix):
-            relative_path = value[len(prefix):].strip("/")
-            if relative_path and relative_path not in found:
-                found.append(relative_path)
+        for prefix in prefixes:
+            if value.startswith(prefix):
+                relative_path = value[len(prefix):].strip("/")
+                if relative_path and relative_path not in found:
+                    found.append(relative_path)
+                break
     return found
 
 
@@ -192,7 +202,7 @@ def build_host_requirements(
     elif benchmark_type == "evalscope":
         _append_component(runner_components, _evalscope_component())
 
-    for relative_path in _referenced_resource_paths(task_config):
+    for relative_path in _referenced_resource_paths(task_config, root):
         _append_component(
             runner_components,
             _path_component(root, relative_path),

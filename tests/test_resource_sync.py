@@ -40,6 +40,10 @@ class _ResourceTree:
             "image",
         )
         self._write("datasets/mmmu/Music/validation.parquet", "dataset")
+        self._write(
+            "datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json",
+            "[]",
+        )
 
     def _write(self, relative_path, content):
         path = self.root / relative_path
@@ -175,6 +179,40 @@ class ResourceRequirementTests(unittest.TestCase):
                 "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl",
                 "evalscope-1.5.0-py3-none-any.whl",
                 "datasets/mmmu",
+            ],
+        )
+
+    def test_host_style_dataset_path_is_synced_to_remote_aisbench_runner(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _ResourceTree(temporary_directory)
+            requirements = build_host_requirements(
+                {
+                    "benchmark": {
+                        "benchmark_type": "aisbench",
+                        "perf": {
+                            "dataset_path": (
+                                "/export/home/models/xllm_test_060/datasets/sharegpt/"
+                                "ShareGPT_V3_unfiltered_cleaned_split.json"
+                            )
+                        },
+                    },
+                    "dataset_name": "sharegpt",
+                },
+                [_plan("11.0.0.2", runner=True)],
+                temporary_directory,
+            )
+
+        paths = [item.relative_path for item in requirements["11.0.0.2"]]
+        self.assertEqual(
+            paths,
+            [
+                "numactl-2.0.16-9.vo2203sp4.aarch64.rpm",
+                "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl",
+                "benchmark",
+                (
+                    "datasets/sharegpt/"
+                    "ShareGPT_V3_unfiltered_cleaned_split.json"
+                ),
             ],
         )
 

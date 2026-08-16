@@ -562,6 +562,60 @@ class ServiceGroupTests(unittest.TestCase):
 
 
 class GenerateXllmMultiHostTests(unittest.TestCase):
+    def test_generated_script_owns_logs_with_xtask_process_uid(self):
+        from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_script
+
+        config = {
+            "host_addr": "11.87.191.75",
+            "device_ids": [0],
+            "world_size": 1,
+            "model_path": "/export/home/models/Qwen3-8B",
+            "userid": 1048,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch(
+                "xtask.serv_fmk.xllm_serv.generate_xllm_serv.os.getuid",
+                return_value=1011,
+            ), mock.patch(
+                "xtask.utils.container_manager.get_xtask_config_data",
+                return_value={"DOCKER_CONFIG": {"volumes": {}}},
+            ):
+                name, _ = generate_xllm_script(config, tmp, "start_xllm_serv.sh")
+            with open(os.path.join(tmp, name), encoding="utf-8") as fh:
+                script = fh.read()
+
+        self.assertIn("USERID=1011", script)
+        self.assertNotIn("USERID=1048", script)
+        self.assertIn('touch "$LOG_FILE"', script)
+        self.assertIn('chown "$USERID" "$LOG_DIR" "$LOG_FILE"', script)
+
+    def test_generated_multi_card_script_owns_each_log_with_xtask_uid(self):
+        from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_script
+
+        config = {
+            "host_addr": "11.87.191.75",
+            "device_ids": [0, 1],
+            "world_size": 2,
+            "model_path": "/export/home/models/Qwen3-8B",
+            "userid": 1048,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch(
+                "xtask.serv_fmk.xllm_serv.generate_xllm_serv.os.getuid",
+                return_value=1011,
+            ), mock.patch(
+                "xtask.utils.container_manager.get_xtask_config_data",
+                return_value={"DOCKER_CONFIG": {"volumes": {}}},
+            ):
+                name, _ = generate_xllm_script(config, tmp, "start_xllm_serv.sh")
+            with open(os.path.join(tmp, name), encoding="utf-8") as fh:
+                script = fh.read()
+
+        self.assertIn("USERID=1011", script)
+        self.assertNotIn("USERID=1048", script)
+        self.assertIn('touch "$LOG_FILE"', script)
+        self.assertIn('chown "$USERID" "$LOG_FILE"', script)
+
     def test_single_host_script_keeps_local_master_and_rank0(self):
         from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_script
 
@@ -601,7 +655,8 @@ class GenerateXllmMultiHostTests(unittest.TestCase):
             self.assertIn('export ASCEND_RT_VISIBLE_DEVICES=0,1', script)
             self.assertIn('--nnodes="$GLOBAL_NNODES"', script)
             self.assertIn('NODE_RANK=$((RANK_START + i))', script)
-            self.assertIn('--device_id="$i"', script)
+            self.assertNotIn("--device_id", script)
+            self.assertNotIn("--devices", script)
 
     def test_single_card_script_uses_physical_device_and_rank_zero(self):
         from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_script
@@ -626,7 +681,8 @@ class GenerateXllmMultiHostTests(unittest.TestCase):
 
             self.assertIn('START_DEVICE=3', script)
             self.assertIn('export ASCEND_RT_VISIBLE_DEVICES=3', script)
-            self.assertIn('--device_id=0', script)
+            self.assertNotIn("--device_id", script)
+            self.assertNotIn("--devices", script)
             self.assertIn('--node_rank=0', script)
 
     def test_non_contiguous_device_ids_are_preserved_in_multi_card_script(self):
@@ -652,7 +708,8 @@ class GenerateXllmMultiHostTests(unittest.TestCase):
             self.assertIn("LOCAL_NNODES=4", script)
             self.assertIn("export ASCEND_RT_VISIBLE_DEVICES=4,7,11,15", script)
             self.assertIn('DEVICE="${DEVICE_IDS[$i]}"', script)
-            self.assertIn('--device_id="$i"', script)
+            self.assertNotIn("--device_id", script)
+            self.assertNotIn("--devices", script)
             self.assertNotIn("DEVICE=$((START_DEVICE + i))", script)
 
     def test_multi_host_worker_script_uses_master_host_and_rank_offset(self):
@@ -697,7 +754,8 @@ class GenerateXllmMultiHostTests(unittest.TestCase):
             self.assertIn("RANK_START=16", script)
             self.assertIn("GLOBAL_NNODES=32", script)
             self.assertIn("LOCAL_NNODES=16", script)
-            self.assertIn('--device_id="$i"', script)
+            self.assertNotIn("--device_id", script)
+            self.assertNotIn("--devices", script)
             self.assertIn("--rank_tablefile=/export/home/models/rank.json", script)
 
 

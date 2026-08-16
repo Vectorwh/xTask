@@ -68,6 +68,154 @@ class AisbenchScriptGenerationTests(unittest.TestCase):
         self.assertIn('if ! ais_bench ', script)
         self.assertIn('echo "AISBench性能测试执行失败" >&2', script)
 
+    def test_sharegpt_uses_explicit_dataset_path_and_multiturn_config(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            source_config = root / "sharegpt_gen.py"
+            source_config.write_text(
+                "from example import ShareGPTDataset\n"
+                "sharegpt_datasets = [\n"
+                "    dict(\n"
+                "        abbr='sharegpt',\n"
+                "        type=ShareGPTDataset,\n"
+                "        path='ais_bench/datasets/sharegpt/default.json',\n"
+                "    )\n"
+                "]\n",
+                encoding="utf-8",
+            )
+            dataset_path = (
+                "/xllm_test_060/datasets/sharegpt/"
+                "ShareGPT_V3_unfiltered_cleaned_split.json"
+            )
+            task_config = self._task_config()
+            task_config["dataset_name"] = "sharegpt"
+            task_config["dataset_path"] = dataset_path
+            task_config["benchmark"]["perf"].update(
+                {
+                    "api_type": "vllm_api_stream_chat_multiturn",
+                    "dataset_conf": "sharegpt_gen",
+                    "num_prompts": 8,
+                }
+            )
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator, "preprocess_dataset", return_value=([], "")
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config", return_value=source_config
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+            dataset_config = (
+                output_dir
+                / "aisbench_configs"
+                / "datasets"
+                / "xtask_sharegpt_gen.py"
+            ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "--models xtask_vllm_api_stream_chat_multiturn", script
+        )
+        self.assertIn("--datasets xtask_sharegpt_gen", script)
+        self.assertIn("--num-prompts 8", script)
+        self.assertIn(f"path='{dataset_path}'", dataset_config)
+        self.assertNotIn("default.json", dataset_config)
+
+    def test_sharegpt_defaults_to_aisbench_relative_dataset_path(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory) / "output"
+            output_dir.mkdir()
+            task_config = self._task_config()
+            task_config["dataset_name"] = "sharegpt"
+            task_config["benchmark"]["perf"].update(
+                {
+                    "api_type": "vllm_api_stream_chat_multiturn",
+                    "dataset_conf": "sharegpt_gen",
+                    "num_prompts": 8,
+                }
+            )
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator, "preprocess_dataset", return_value=([], "")
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config"
+            ) as find_config:
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("--datasets sharegpt_gen", script)
+        self.assertNotIn("--datasets xtask_sharegpt_gen", script)
+        self.assertNotIn("AISBench数据集路径不存在", script)
+        find_config.assert_not_called()
+
+    def test_generic_perf_dataset_uses_yaml_config_without_preprocessing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory) / "output"
+            output_dir.mkdir()
+            task_config = self._task_config()
+            task_config["dataset_name"] = "future_dataset"
+            task_config["benchmark"]["perf"]["dataset_conf"] = "future_gen"
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator, "preprocess_dataset", return_value=([], "")
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("--datasets future_gen", script)
+        self.assertNotIn("xtask_future_gen.py", script)
+
+    def test_preprocessed_dataset_keeps_specialized_path_handling(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory) / "output"
+            output_dir.mkdir()
+            task_config = self._task_config()
+            task_config["benchmark"]["perf"]["dataset_path"] = "/custom/gsm8k"
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator,
+                "preprocess_dataset",
+                return_value=(["prepare-gsm8k"], "generated_gsm8k"),
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config"
+            ) as find_config:
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("prepare-gsm8k", script)
+        self.assertIn("--datasets generated_gsm8k", script)
+        self.assertNotIn("AISBench数据集路径不存在", script)
+        find_config.assert_not_called()
+
     def test_stale_source_path_is_overwritten_and_failure_is_propagated(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
