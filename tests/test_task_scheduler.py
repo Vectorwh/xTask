@@ -356,6 +356,46 @@ deployment:
         self.assertIn("node_0.log", command)
         self.assertEqual(manager.exec_in_container.call_args.kwargs["timeout"], 350)
 
+    def test_local_master_readiness_waits_on_host_log(self):
+        from xtask.core import scheduler
+
+        manager = mock.Mock()
+        runtime = SimpleNamespace(
+            plan=SimpleNamespace(
+                instance_name="master-0",
+                role="master",
+                host="10.0.0.1",
+                is_local=True,
+                output_dir="/host/workspace/outputs/case/xllm_log/master-0",
+                readiness={},
+                instance_config={"enable_disagg_pd": False},
+            ),
+            container_config=SimpleNamespace(container_name="master-container"),
+            container_manager=manager,
+        )
+        host_log = (
+            "/host/workspace/outputs/case/xllm_log/master-0/log/node_0.log"
+        )
+
+        with mock.patch(
+            "xtask.serv_fmk.xllm_serv.generate_xllm_serv.wait_xllm_serv_start",
+            return_value=False,
+        ) as wait_for_start:
+            self.assertTrue(scheduler._wait_instance_ready(runtime, 1, "xllm"))
+
+        wait_for_start.assert_called_once_with(
+            runtime.plan.instance_config,
+            1,
+            runtime.plan.output_dir,
+            log_file=host_log,
+            success_keywords=[
+                "Brpc Server started on port",
+                "Success register instance to etcd",
+                "服务启动完成",
+            ],
+        )
+        manager.exec_in_container.assert_not_called()
+
     def test_regular_multi_host_worker_readiness_waits_for_worker_log(self):
         from xtask.core import scheduler
 
@@ -457,6 +497,10 @@ deployment:
             )
 
         command = manager.exec_in_container.call_args.args[1]
+        self.assertIn(
+            "chmod a+r", command
+        )
+        self.assertIn("20260727_174225/case.json", command)
         self.assertIn("chmod -R a+rwX", command)
         self.assertIn("20260727_174225/xllm_log", command)
 
@@ -1379,7 +1423,7 @@ deployment:
             openme_client=openme,
             run_trial=main_module.run_scheduler,
         )
-        openme.SendJUEMsgCard.assert_called_once_with(args=args)
+        openme.SendJUEMsgCard.assert_not_called()
         get_tasks_mock.assert_not_called()
         reporter_factory.assert_not_called()
 

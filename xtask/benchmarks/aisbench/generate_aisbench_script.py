@@ -1,6 +1,10 @@
-import os
+import ast
 import json
 import logging
+import os
+import re
+import shlex
+from pathlib import Path
 from typing import Dict
 
 from xtask.utils.container_manager import path_mapping_in_container
@@ -8,10 +12,28 @@ from xtask.datasets.dataset_downloader import download_dataset
 from xtask.datasets.dataset_manger import preprocess_dataset
 
 
+CONFIG_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _validate_config_name(value, field_name):
+    if not value or not CONFIG_NAME_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"{field_name} must contain only letters, numbers, '.', '_' or '-': {value!r}"
+        )
+    return value
+
+
+def _split_dataset_config_reference(dataset_conf):
+    parts = str(dataset_conf or "").split("/", 1)
+    config_name = _validate_config_name(parts[0], "dataset_conf")
+    config_suffix = ""
+    if len(parts) == 2:
+        config_suffix = _validate_config_name(parts[1], "dataset_conf suffix")
+    return config_name, config_suffix
+
+
 def get_api_type_file(api_type, shell_content):
-    api_list = ["vllm_api_general_chat", "vllm_api_general_stream", "vllm_api_stream_chat"]
-    if api_type not in api_list:
-        logging.error(f"api_type: {api_type} is invalid")
+    _validate_config_name(api_type, "api_type")
     model_config_name = f"xtask_{api_type}"
     shell_content.append("\n# 2. 创建用例级vllm_api配置")
     shell_content.append(
@@ -32,6 +54,107 @@ def get_api_type_file(api_type, shell_content):
     shell_content.append('echo "用例级配置文件：$CONFIG_FILE"')
 
     return "$CONFIG_FILE", model_config_name, shell_content
+
+
+def _aisbench_dataset_config_roots():
+    configured_root = os.environ.get("AISBENCH_SOURCE_DIR")
+    if configured_root:
+        yield Path(configured_root)
+    yield Path("/export/home/models/xllm_test_060/benchmark")
+    yield Path(__file__).resolve().parents[3] / "benchmark"
+
+
+def find_aisbench_dataset_config(dataset_conf):
+    """Find one bundled AISBench dataset config by its command-line name."""
+    dataset_conf, _ = _split_dataset_config_reference(dataset_conf)
+    relative_root = Path("ais_bench/benchmark/configs/datasets")
+    for root in _aisbench_dataset_config_roots():
+        config_root = root / relative_root
+        if not config_root.is_dir():
+            continue
+        matches = sorted(config_root.rglob(f"{dataset_conf}.py"))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(
+                f"AISBench dataset config {dataset_conf!r} is ambiguous under {config_root}"
+            )
+    raise FileNotFoundError(
+        f"AISBench dataset config {dataset_conf!r} was not found in the configured "
+        "AISBench source or the bundled benchmark tree"
+    )
+
+
+class _DatasetPathOverride(ast.NodeTransformer):
+    """Replace dataset dict path fields without importing AISBench on the host."""
+
+    def __init__(self, dataset_path):
+        self.dataset_path = dataset_path
+        self.replacements = 0
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if not isinstance(node.func, ast.Name) or node.func.id != "dict":
+            return node
+        keywords = {item.arg: item for item in node.keywords if item.arg}
+        if {"abbr", "type", "path"}.issubset(keywords):
+            keywords["path"].value = ast.Constant(value=self.dataset_path)
+            self.replacements += 1
+        return node
+
+    def visit_Dict(self, node):
+        self.generic_visit(node)
+        keys = {
+            key.value: index
+            for index, key in enumerate(node.keys)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if {"abbr", "type", "path"}.issubset(keys):
+            node.values[keys["path"]] = ast.Constant(value=self.dataset_path)
+            self.replacements += 1
+        return node
+
+
+def create_dataset_config_override(dataset_conf, dataset_path, output_file_path):
+    """Create an isolated AISBench dataset config for an explicit local path."""
+    config_name, config_suffix = _split_dataset_config_reference(dataset_conf)
+    if not dataset_path:
+        return dataset_conf
+
+    source_config = find_aisbench_dataset_config(config_name)
+    dataset_path_inside = path_mapping_in_container(str(dataset_path))
+    tree = ast.parse(source_config.read_text(encoding="utf-8"), str(source_config))
+    transformer = _DatasetPathOverride(dataset_path_inside)
+    tree = transformer.visit(tree)
+    if transformer.replacements == 0:
+        raise ValueError(
+            f"AISBench dataset config {source_config} has no dataset path field to override"
+        )
+
+    custom_name = f"xtask_{config_name}"
+    custom_dir = Path(output_file_path) / "aisbench_configs" / "datasets"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    custom_config = custom_dir / f"{custom_name}.py"
+    custom_config.write_text(
+        ast.unparse(ast.fix_missing_locations(tree)) + "\n", encoding="utf-8"
+    )
+    return f"{custom_name}/{config_suffix}" if config_suffix else custom_name
+
+
+def append_dataset_path_check(shell_content, dataset_path):
+    if not dataset_path:
+        return
+    dataset_path_inside = path_mapping_in_container(str(dataset_path))
+    if not os.path.isabs(dataset_path_inside):
+        return
+    quoted_path = shlex.quote(dataset_path_inside)
+    shell_content.append(f"if [ ! -e {quoted_path} ]; then")
+    error_message = shlex.quote(
+        f"错误：AISBench数据集路径不存在 {dataset_path_inside}"
+    )
+    shell_content.append(f"    echo {error_message} >&2")
+    shell_content.append("    exit 1")
+    shell_content.append("fi")
 
 def get_syn_config_file(shell_content):
     shell_content.append("\n# 2. 定位syn_config配置文件")
@@ -136,7 +259,7 @@ def generate_aisbench_script(
     shell_content.append('fi')
     shell_content.append('echo "ais_bench安装路径：$AIS_BENCH_PATH"')
     shell_content.append(f'AIS_BENCH_CONFIG_DIR="{output_file_path_incontainer}/aisbench_configs"')
-    shell_content.append('mkdir -p "$AIS_BENCH_CONFIG_DIR/models"')
+    shell_content.append('mkdir -p "$AIS_BENCH_CONFIG_DIR/models" "$AIS_BENCH_CONFIG_DIR/datasets"')
 
     download_cmd = download_dataset(task_config)
     if download_cmd:
@@ -144,7 +267,9 @@ def generate_aisbench_script(
 
     # Step 2: 生成精度测试命令, 如果--metrics配置了acc, 则读取benchmark xxx_acc_config.json配置我呢见中的参数
     if "acc" in task_config.get("metrics") and accuracy_cfg.get("dataset_conf"):
-        dataset_path = accuracy_cfg.get("dataset_path", "")
+        dataset_path = accuracy_cfg.get("dataset_path") or task_config.get(
+            "dataset_path", ""
+        )
         output_len = accuracy_cfg.get("output_len", 1024)
         request_rate = accuracy_cfg.get("request_rate", 0)
         batch_size = accuracy_cfg.get("batch_size", 32)
@@ -181,7 +306,11 @@ def generate_aisbench_script(
 
         shell_content.append("\n# 4. 执行精度测试")
         # metrics_str = ",".join(accuracy_metrics)
-        dataset_conf = accuracy_cfg.get("dataset_conf")
+        dataset_conf = accuracy_cfg.get("dataset_conf") or dataset_name
+        dataset_conf = create_dataset_config_override(
+            dataset_conf, dataset_path, output_file_path
+        )
+        append_dataset_path_check(shell_content, dataset_path)
         # accuracy_metrics = accuracy_cfg.get("metrics", ["bleu", "rouge"])
         accuracy_batch_size = accuracy_cfg.get("batch_size", batch_size)
         accuracy_max_out_len = accuracy_cfg.get("output_len", output_len)
@@ -232,7 +361,9 @@ def generate_aisbench_script(
 
     # Step 4: 生成性能测试命令（若开启）
     if "perf" in task_config.get("metrics"):
-        dataset_path = perf_cfg.get("dataset_path", "")
+        dataset_path = perf_cfg.get("dataset_path") or task_config.get(
+            "dataset_path", ""
+        )
         output_len = perf_cfg.get("output_len", 1024)
         request_rate = perf_cfg.get("request_rate", 0)
         batch_size = perf_cfg.get("batch_size", 32)
@@ -275,7 +406,14 @@ def generate_aisbench_script(
         perf_top_p = perf_cfg.get("top_p", 10)
         perf_seed = perf_cfg.get("seed", 1024)
 
-        process_dataset_cmd, dataset_conf_type = preprocess_dataset(dataset_name, task_config, output_file_path)
+        process_dataset_cmd, preprocessed_dataset_conf = preprocess_dataset(
+            dataset_name, task_config, output_file_path
+        )
+        dataset_conf_type = (
+            preprocessed_dataset_conf
+            or perf_cfg.get("dataset_conf")
+            or dataset_name
+        )
         shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={perf_concurrency},/g" {api_type_file}')
         # 替换最大生成token数
         shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={perf_max_out_len},/g" {api_type_file}')
@@ -314,16 +452,27 @@ def generate_aisbench_script(
             # 随机合成数据集
             dataset_conf_type = "synthetic_gen"
 
+        if not preprocessed_dataset_conf and dataset_name != "syn":
+            dataset_conf_type = create_dataset_config_override(
+                dataset_conf_type, dataset_path, output_file_path
+            )
+            append_dataset_path_check(shell_content, dataset_path)
+
         if process_dataset_cmd:
             shell_content.extend(process_dataset_cmd)
-        else:
-            logging.error("process_dataset_cmd is null.")
         
         # 构造ais-bench性能测试命令（参考ais-bench官方文档）
+        num_prompts = perf_cfg.get("num_prompts")
+        num_prompts_arg = (
+            f"--num-prompts {num_prompts} "
+            if isinstance(num_prompts, int) and num_prompts > 0
+            else ""
+        )
         perf_cmd = (
             f'ais_bench --config-dir "$AIS_BENCH_CONFIG_DIR" '
             f'--models {model_config_name} '
             f'--datasets {dataset_conf_type} '
+            f'{num_prompts_arg}'
             f'--num-warmups {num_warmups} '
             f'--mode {mode} --debug '
             f'--summarizer {summarizer} '

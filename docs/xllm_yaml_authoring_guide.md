@@ -17,6 +17,7 @@
 | 单机 EvalScope 性能 | `02_single_evalscope_perf.yaml` |
 | 单机 AISBench 精度 | `03_single_aisbench_acc.yaml` |
 | 单机 EvalScope 精度 | `04_single_evalscope_acc.yaml` |
+| 单机 AISBench ShareGPT 性能 | `17_single_aisbench_sharegpt_perf.yaml` |
 | 普通多机混部性能/精度 | `05_multihost_aisbench_perf.yaml`、`06_multihost_aisbench_acc.yaml` |
 | PD 分离性能/精度 | `07_pd_aisbench_perf.yaml`、`08_pd_aisbench_acc.yaml` |
 | 单机并发摸高 | `09_single_auto_assess.yaml` |
@@ -56,8 +57,8 @@ deployment: {}
 | `model_path` | 是 | 模型权重在宿主机上的目录 | 所有参与启动 xLLM 的服务器都要有这个目录。工程不会自动同步整个模型目录；容器内会通过路径映射访问它。 |
 | `served_model_name` | 是 | 请求接口里传给 `model` 的名字 | AISBench 和 EvalScope 都会使用它。它可以与目录名不同，但必须是当前 xLLM 服务接受的模型名。 |
 | `metrics` | 是 | 选择性能还是精度 | `perf` 表示性能，`acc` 表示精度。真正决定执行分支的是这个字段，不是 `case_type`。当前用例建议一次只写一种。 |
-| `dataset_name` | 是 | benchmark 使用的数据集或数据生成器名称 | AISBench 性能常用 `gsm8k`、`syn`；EvalScope 精度直接把它传给 `--datasets`，性能传给 `--dataset`。 |
-| `dataset_path` | 按数据集需要 | 顶层数据集路径 | 当前不同 benchmark 对它的依赖不完全一致。AISBench 的具体任务还可以在 `benchmark.perf/acc.dataset_path` 中填写；EvalScope 精度更常在 `dataset_args` 中指定。 |
+| `dataset_name` | 是 | benchmark 使用的数据集或数据生成器名称 | AISBench 性能常用 `gsm8k`、`syn`、`sharegpt`；EvalScope 精度直接把它传给 `--datasets`，性能传给 `--dataset`。 |
+| `dataset_path` | 按数据集需要 | 顶层数据集路径 | AISBench 配置了本地路径时会生成用例级数据集配置，优先使用 `benchmark.perf/acc.dataset_path`，否则使用此处路径；EvalScope 精度更常在 `dataset_args` 中指定。多机资源同步建议填写 `/xllm_test_060/...` 容器路径。 |
 | `dataset_format` | 建议 | 数据文件格式说明 | 常写 `json`。它主要作为任务元数据保留，具体解析方式仍由 benchmark 和数据集配置决定。 |
 | `communication_backend` | 多卡建议 | 多卡通信后端 | NPU 多卡通常写 `hccl`。 |
 | `hccl_if_port` | 端口冲突时填写 | HCCL 通信使用的基础端口 | xLLM 启动模板会导出为 `HCCL_IF_BASE_PORT`，默认 43439。同一服务器并行跑多套服务时可改成不冲突端口。 |
@@ -119,9 +120,9 @@ AISBench 性能字段如下：
 | 字段 | 建议填写 | 通俗解释 | 当前实际行为 |
 | --- | --- | --- | --- |
 | `case_type` | 是 | 标记这是性能测试 | 建议固定写 `performance`；执行分支仍由顶层 `metrics: perf` 决定。 |
-| `api_type` | 是 | AISBench 使用哪种 OpenAI/VLLM 接口配置 | 常用流式性能配置 `vllm_api_general_stream`；当前允许 `vllm_api_general_chat`、`vllm_api_general_stream`、`vllm_api_stream_chat`。 |
-| `dataset_conf` | 建议 | AISBench 数据集配置名 | 对 `dataset_name: gsm8k` 的性能流程，框架最终使用生成后的 `gsm8k_gen_0_shot_cot_str_perf`。 |
-| `dataset_path` | 按需 | benchmark 块内的数据路径 | 当前 AISBench 生成器会读取它，但现有命令没有直接使用它；新用例不要只靠此字段决定数据来源。 |
+| `api_type` | 是 | AISBench 使用哪种 OpenAI/VLLM 接口配置 | 常用 `vllm_api_general_stream`；多轮对话使用 `vllm_api_stream_chat_multiturn`。xTask 会按名称查找 AISBench 内置配置并校验文件存在，不再维护固定白名单。 |
+| `dataset_conf` | 是 | AISBench 数据集配置名 | 通用数据集直接使用此配置名；GSM8K/SYN 等需要专用预处理的数据集仍由预处理结果覆盖。AISBench 新增内置数据集后，通常只需在 YAML 更新此字段。 |
+| `dataset_path` | 按需 | benchmark 块内的数据路径 | 非空时，xTask 复制对应的 AISBench 内置数据集配置到用例输出目录，并把其中的数据集 `path` 改成映射后的容器路径，不修改公共 AISBench 源码。 |
 | `input_len` | 是 | 每个请求的输入 token 长度 | `dataset_name: gsm8k` 时，框架在容器内把 GSM8K 问题截断或重复到这个固定长度。 |
 | `output_len` | 是 | 希望生成的最大 token 数 | 当前会写入 AISBench 后端的 `max_out_len`，因此它才是实际控制输出上限的字段。 |
 | `max_out_len` | 兼容 | 历史上的最大输出长度 | 当前 AISBench 生成器不独立使用它；即使同时配置，也由 `output_len` 覆盖后端 `max_out_len`。新用例保持二者相同最直观。 |
@@ -135,6 +136,46 @@ AISBench 性能字段如下：
 | `threshold` | 配 baseline 时是 | 基线上下允许浮动的比例 | `0.10` 表示结果必须在 `baseline * 0.9` 到 `baseline * 1.1` 之间，不是 10 个绝对单位。取值应在 0 到 1。 |
 
 例如 `batch_size: 8`、`num_prompts: 32` 的意思是“最多按 8 的批量/并发档位跑，总共统计 32 个请求”，不是只发 8 个请求。
+
+### ShareGPT 性能
+
+ShareGPT 数据由使用者提前准备，xTask 不自动下载。默认沿用 AISBench
+`sharegpt_gen` 中配置的相对路径，宿主机应放到：
+
+```text
+/export/home/models/xllm_test_060/benchmark/ais_bench/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json
+```
+
+`download_ais_bench.sh` 将 `benchmark` 目录准备到 `/workspace/benchmark` 后，
+AISBench 会按默认相对路径读取
+`/workspace/benchmark/ais_bench/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json`。
+YAML 默认不需要填写 `dataset_path`：
+
+```yaml
+metrics: perf
+dataset_name: sharegpt
+
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    case_type: performance
+    api_type: vllm_api_stream_chat_multiturn
+    dataset_conf: sharegpt_gen
+    output_len: 512
+    batch_size: 8
+    request_rate: 0
+    num_prompts: 100
+    num_warmups: 20
+    baseline: null
+```
+
+如数据无法放在 AISBench 默认目录，仍可在顶层或 `benchmark.perf` 中填写
+`dataset_path`。xTask 会生成用例级配置覆盖 `sharegpt_gen` 的 `path`，该兼容方式保留，
+但不是 ShareGPT 示例的默认方案。
+
+`num_prompts` 会传给 AISBench，用于限制参与测试的对话组数；AISBench 最终按实际对话轮次发请求，因此结果中的请求数可能大于对话组数。ShareGPT 保留真实输入长度，不使用 GSM8K 的固定 `input_len` 构造流程。
+
+对于后续 AISBench 内置数据集，只要其配置是标准的单数据集配置，通常填写 `dataset_name`、`dataset_conf` 和可选的本地 `dataset_path` 即可，无需增加 xTask 数据集分支。包含多个子数据集或动态构造多个路径的 AISBench 配置，应沿用官方目录布局并省略 `dataset_path`，避免把多个子路径统一覆盖成同一个值。
 
 ### AISBench 精度
 

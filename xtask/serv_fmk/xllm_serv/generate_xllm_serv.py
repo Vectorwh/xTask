@@ -85,7 +85,9 @@ def _build_script_params(config):
         'COMMUNICATION_BACKEND': config.get('communication_backend', 'hccl'),
         'DP_SIZE': config.get("dp_size", ""),
         'EP_SIZE': config.get("tp_size", ""),
-        "USERID": config.get("userid", 0),
+        # xTask reads local serving logs from the host. Use the process owner
+        # instead of a YAML UID that may belong to a different machine.
+        "USERID": os.getuid(),
     }
 
 

@@ -67,6 +67,8 @@ MASTER_NODE_ADDR="$LOCAL_IP:$PROGRESS_CONN_PORT"
 export ASCEND_RT_VISIBLE_DEVICES={VISIBLE_DEVICES}
 LOG_DIR="log"
 LOG_FILE="$LOG_DIR/node_0.log"
+touch "$LOG_FILE"
+chown "$USERID" "$LOG_DIR" "$LOG_FILE"
 
 xllm_command=(
   xllm \
@@ -85,4 +87,4 @@ echo "服务启动命令: ${xllm_command[*]}"
 
 echo "启动设备 npu:$ASCEND_RT_VISIBLE_DEVICES，端口 $START_PORT，日志: $LOG_FILE"
 
-chown -R $USERID:$USERID $LOG_DIR
+chown -R "$USERID" "$LOG_DIR"

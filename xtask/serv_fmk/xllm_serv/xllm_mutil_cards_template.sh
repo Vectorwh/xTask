@@ -69,6 +69,7 @@ export HCCL_IF_BASE_PORT={HCCL_IF_PORT}
 # 主节点地址：跨机时 MASTER_HOST 为主节点 IP，本机 IP 使用 LOCAL_IP
 MASTER_NODE_ADDR="$MASTER_HOST:$PROGRESS_CONN_PORT"
 LOG_DIR="log"
+chown "$USERID" "$LOG_DIR"
 IFS=',' read -r -a DEVICE_IDS <<< "$ASCEND_RT_VISIBLE_DEVICES"
 if [ "${#DEVICE_IDS[@]}" -ne "$LOCAL_NNODES" ]; then
   echo "device_ids count (${#DEVICE_IDS[@]}) does not match LOCAL_NNODES ($LOCAL_NNODES)" >&2
@@ -82,6 +83,8 @@ do
   DEVICE="${DEVICE_IDS[$i]}"
   NODE_RANK=$((RANK_START + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
+  touch "$LOG_FILE"
+  chown "$USERID" "$LOG_FILE"
   xllm_command=(
   nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) xllm \
 #   xllm \
@@ -100,4 +103,4 @@ done
 
 echo "所有节点已启动，主节点地址: $MASTER_NODE_ADDR，本机 LOCAL_IP: $LOCAL_IP，RANK_START: $RANK_START"
 
-chown -R $USERID:$USERID $LOG_DIR
+chown -R "$USERID" "$LOG_DIR"

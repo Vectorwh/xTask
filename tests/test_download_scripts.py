@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class DownloadScriptTests(unittest.TestCase):
-    _required_files = (
+    _tree_files = (
         "setup.py",
         "requirements.txt",
         "ais_bench/benchmark/cli/main.py",
@@ -14,7 +14,7 @@ class DownloadScriptTests(unittest.TestCase):
     )
 
     def _write_tree(self, root: Path, content: str) -> None:
-        for relative_path in self._required_files:
+        for relative_path in self._tree_files:
             path = root / relative_path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
@@ -43,40 +43,59 @@ class DownloadScriptTests(unittest.TestCase):
             check=False,
         )
 
-    def test_complete_aisbench_target_skips_copy(self):
+    def test_aisbench_source_tree_is_mirrored_to_target(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             source = root / "source"
             target = root / "workspace" / "benchmark"
             self._write_tree(source, "source")
-            self._write_tree(target, "target")
-            sentinel = target / "keep-me"
-            sentinel.write_text("present", encoding="utf-8")
-
-            result = self._run_script(source, target)
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("skip copy", result.stdout)
-            self.assertEqual((target / "setup.py").read_text(), "target")
-            self.assertTrue(sentinel.is_file())
-
-    def test_incomplete_aisbench_target_is_replaced_and_verified(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            source = root / "source"
-            target = root / "workspace" / "benchmark"
-            self._write_tree(source, "source")
-            target.mkdir(parents=True)
+            dataset = source / "ais_bench/datasets/future/dataset.json"
+            dataset.parent.mkdir(parents=True)
+            dataset.write_text("dataset", encoding="utf-8")
+            self._write_tree(target, "stale-target")
             stale = target / "stale-file"
             stale.write_text("stale", encoding="utf-8")
 
             result = self._run_script(source, target)
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("missing or incomplete", result.stdout)
+            self.assertIn("Synchronizing AISBench directory", result.stdout)
+            self.assertEqual((target / "setup.py").read_text(), "source")
+            self.assertEqual(
+                (target / dataset.relative_to(source)).read_text(), "dataset"
+            )
             self.assertFalse(stale.exists())
-            for relative_path in self._required_files:
+            self.assertFalse((target / "benchmark").exists())
+
+    def test_missing_aisbench_target_is_created_at_exact_path(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            target = root / "workspace" / "benchmark"
+            self._write_tree(source, "source")
+
+            result = self._run_script(source, target)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for relative_path in self._tree_files:
                 self.assertTrue((target / relative_path).is_file())
+            self.assertFalse((target / "benchmark").exists())
+
+    def test_empty_aisbench_source_does_not_remove_target(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            target = root / "workspace" / "benchmark"
+            source.mkdir()
+            target.mkdir(parents=True)
+            sentinel = target / "keep-me"
+            sentinel.write_text("present", encoding="utf-8")
+
+            result = self._run_script(source, target)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("source directory is missing or empty", result.stdout)
+            self.assertTrue(sentinel.is_file())
 
 
 class DownloadXllmScriptTests(unittest.TestCase):
