@@ -163,6 +163,141 @@ class AisbenchScriptGenerationTests(unittest.TestCase):
         self.assertNotIn("AISBench数据集路径不存在", script)
         find_config.assert_not_called()
 
+    def test_sharegpt_last_fixed_length_uses_generated_dataset_and_case_config(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            source_config = root / "sharegpt_gen.py"
+            source_config.write_text(
+                "from example import MultiTurnGenInferencer, ShareGPTDataset\n"
+                "sharegpt_infer_cfg = dict(\n"
+                "    inferencer=dict(type=MultiTurnGenInferencer, infer_mode='every')\n"
+                ")\n"
+                "sharegpt_datasets = [dict(\n"
+                "    abbr='sharegpt',\n"
+                "    type=ShareGPTDataset,\n"
+                "    path='ais_bench/datasets/sharegpt/default.json',\n"
+                "    infer_cfg=sharegpt_infer_cfg,\n"
+                ")]\n",
+                encoding="utf-8",
+            )
+            dataset_path = "/datasets/sharegpt/source.json"
+            task_config = self._task_config()
+            task_config["dataset_name"] = "sharegpt"
+            task_config["dataset_path"] = dataset_path
+            task_config["benchmark"]["perf"].update(
+                {
+                    "api_type": "vllm_api_stream_chat_multiturn",
+                    "dataset_conf": "sharegpt_gen",
+                    "infer_mode": "last",
+                    "input_len": 2048,
+                    "num_prompts": 8,
+                }
+            )
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch(
+                "xtask.utils.container_manager.path_mapping_in_container",
+                side_effect=lambda path: path,
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config", return_value=source_config
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+            dataset_config = (
+                output_dir
+                / "aisbench_configs"
+                / "datasets"
+                / "xtask_sharegpt_gen.py"
+            ).read_text(encoding="utf-8")
+
+        generated_path = output_dir / "ShareGPT-in2048-n8-last.json"
+        self.assertIn("--datasettype=SHAREGPT", script)
+        self.assertIn("--inputlen=2048", script)
+        self.assertIn("--bs=8", script)
+        self.assertIn(f'--sourcepath="$SHAREGPT_SOURCE"', script)
+        self.assertIn(f"--outputpath={generated_path}", script)
+        self.assertIn("if ! python ", script)
+        self.assertIn("python -m pip install 'jinja2>=3.1,<4'", script)
+        self.assertIn("export PYTHONPATH=", script)
+        self.assertIn("--datasets xtask_sharegpt_gen", script)
+        self.assertIn("infer_mode='last'", dataset_config)
+        self.assertIn(
+            "from xtask.benchmarks.aisbench.sharegpt_last_inferencer import "
+            "XTaskShareGPTLastInferencer",
+            dataset_config,
+        )
+        self.assertIn("type=XTaskShareGPTLastInferencer", dataset_config)
+        self.assertIn(f"path='{generated_path}'", dataset_config)
+        self.assertNotIn(
+            "cp -f " + str(generated_path) + " $AIS_BENCH_PATH/datasets/sharegpt",
+            script,
+        )
+
+    def test_sharegpt_last_without_input_len_keeps_source_data_unmodified(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            source_config = root / "sharegpt_gen.py"
+            source_config.write_text(
+                "from example import MultiTurnGenInferencer, ShareGPTDataset\n"
+                "sharegpt_infer_cfg = dict(\n"
+                "    inferencer=dict(type=MultiTurnGenInferencer, infer_mode='every')\n"
+                ")\n"
+                "sharegpt_datasets = [dict(\n"
+                "    abbr='sharegpt', type=ShareGPTDataset,\n"
+                "    path='ais_bench/datasets/sharegpt/default.json',\n"
+                "    infer_cfg=sharegpt_infer_cfg,\n"
+                ")]\n",
+                encoding="utf-8",
+            )
+            task_config = self._task_config()
+            task_config["dataset_name"] = "sharegpt"
+            task_config["benchmark"]["perf"].update(
+                {
+                    "api_type": "vllm_api_stream_chat_multiturn",
+                    "dataset_conf": "sharegpt_gen",
+                    "infer_mode": "last",
+                    "num_prompts": 8,
+                }
+            )
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config", return_value=source_config
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+            dataset_config = (
+                output_dir
+                / "aisbench_configs"
+                / "datasets"
+                / "xtask_sharegpt_gen.py"
+            ).read_text(encoding="utf-8")
+
+        self.assertNotIn("--datasettype=SHAREGPT", script)
+        self.assertIn("export PYTHONPATH=", script)
+        self.assertIn("--datasets xtask_sharegpt_gen", script)
+        self.assertIn("infer_mode='last'", dataset_config)
+        self.assertIn("type=XTaskShareGPTLastInferencer", dataset_config)
+        self.assertIn(
+            "path='ais_bench/datasets/sharegpt/default.json'", dataset_config
+        )
+
     def test_generic_perf_dataset_uses_yaml_config_without_preprocessing(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             output_dir = Path(temporary_directory) / "output"

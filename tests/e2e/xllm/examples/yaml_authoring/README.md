@@ -24,3 +24,4 @@
 | `15` | PD 场景复用容器和 xLLM 服务做 auto_assess |
 | `16` | PD 场景 exhaustive 参数搜索 |
 | `17` | 单机 AISBench ShareGPT 多轮对话性能测试 |
+| `18` | 单机 AISBench ShareGPT `last` 模式固定输入长度性能测试 |

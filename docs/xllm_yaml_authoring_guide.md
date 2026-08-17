@@ -18,6 +18,7 @@
 | 单机 AISBench 精度 | `03_single_aisbench_acc.yaml` |
 | 单机 EvalScope 精度 | `04_single_evalscope_acc.yaml` |
 | 单机 AISBench ShareGPT 性能 | `17_single_aisbench_sharegpt_perf.yaml` |
+| 单机 AISBench ShareGPT `last` 固定长度性能 | `18_single_aisbench_sharegpt_last_fixed_perf.yaml` |
 | 普通多机混部性能/精度 | `05_multihost_aisbench_perf.yaml`、`06_multihost_aisbench_acc.yaml` |
 | PD 分离性能/精度 | `07_pd_aisbench_perf.yaml`、`08_pd_aisbench_acc.yaml` |
 | 单机并发摸高 | `09_single_auto_assess.yaml` |
@@ -123,12 +124,13 @@ AISBench 性能字段如下：
 | `api_type` | 是 | AISBench 使用哪种 OpenAI/VLLM 接口配置 | 常用 `vllm_api_general_stream`；多轮对话使用 `vllm_api_stream_chat_multiturn`。xTask 会按名称查找 AISBench 内置配置并校验文件存在，不再维护固定白名单。 |
 | `dataset_conf` | 是 | AISBench 数据集配置名 | 通用数据集直接使用此配置名；GSM8K/SYN 等需要专用预处理的数据集仍由预处理结果覆盖。AISBench 新增内置数据集后，通常只需在 YAML 更新此字段。 |
 | `dataset_path` | 按需 | benchmark 块内的数据路径 | 非空时，xTask 复制对应的 AISBench 内置数据集配置到用例输出目录，并把其中的数据集 `path` 改成映射后的容器路径，不修改公共 AISBench 源码。 |
-| `input_len` | 是 | 每个请求的输入 token 长度 | `dataset_name: gsm8k` 时，框架在容器内把 GSM8K 问题截断或重复到这个固定长度。 |
+| `infer_mode` | ShareGPT 按需 | 多轮对话发送方式 | 支持 `last`、`every`、`every_with_gt`；ShareGPT 固定输入长度必须使用 `last`。省略时保留 AISBench 配置中的默认模式。 |
+| `input_len` | 是 | 每个请求的输入 token 长度 | `dataset_name: gsm8k` 时，框架在容器内把问题截断或重复到固定长度；ShareGPT 同时配置 `infer_mode: last` 时，按完整 chat template 严格构造该长度。 |
 | `output_len` | 是 | 希望生成的最大 token 数 | 当前会写入 AISBench 后端的 `max_out_len`，因此它才是实际控制输出上限的字段。 |
 | `max_out_len` | 兼容 | 历史上的最大输出长度 | 当前 AISBench 生成器不独立使用它；即使同时配置，也由 `output_len` 覆盖后端 `max_out_len`。新用例保持二者相同最直观。 |
 | `batch_size` | 是 | AISBench 一批同时处理多少请求 | 也是 `auto_assess` 摸高的目标字段。它与总请求数不是同一回事。 |
 | `request_rate` | 是 | 发请求速率 | 会写入 AISBench API 配置。`0` 通常表示不主动限速，具体含义以所装 AISBench 版本为准。 |
-| `num_prompts` | 是 | 正式测试总请求/样本数 | `dataset_name: gsm8k` 时还决定固定长度数据集生成多少条。搜 `benchmark.perf.batch_size` 且未同时搜索 `num_prompts` 时，框架会自动令 `num_prompts = batch_size * 4`。 |
+| `num_prompts` | 是 | 正式测试总请求/样本数 | GSM8K 或固定长度 ShareGPT 会按此数量生成数据，不足时循环补齐。搜 `benchmark.perf.batch_size` 且未同时搜索 `num_prompts` 时，框架会自动令 `num_prompts = batch_size * 4`。 |
 | `num_warmups` | 建议 | AISBench 正式统计前预热多少条 | 传给 `ais_bench --num-warmups`；与 EvalScope 的 `warmup_paras` 不是一套机制。 |
 | `temperature`、`top_k`、`top_p`、`seed`、`repetition_penalty`、`ignore_eos` | 按需 | 常见生成参数 | 会先分别写入后端配置。布尔值应写 YAML 布尔值 `true/false`。 |
 | `generation_kwargs` | 建议 | 一次性覆盖后端的完整生成参数块 | 只要非空，框架会重写 AISBench 配置中的 `generation_kwargs`，因此它的内容最终优先于上面分散填写的同名生成字段。建议统一把生成参数写在这里。 |
@@ -173,7 +175,36 @@ benchmark:
 `dataset_path`。xTask 会生成用例级配置覆盖 `sharegpt_gen` 的 `path`，该兼容方式保留，
 但不是 ShareGPT 示例的默认方案。
 
-`num_prompts` 会传给 AISBench，用于限制参与测试的对话组数；AISBench 最终按实际对话轮次发请求，因此结果中的请求数可能大于对话组数。ShareGPT 保留真实输入长度，不使用 GSM8K 的固定 `input_len` 构造流程。
+上面的 `17_single_aisbench_sharegpt_perf.yaml` 保留 AISBench 默认 `every` 模式和原始
+ShareGPT 输入长度。严格固定最后一轮输入长度使用独立的
+`18_single_aisbench_sharegpt_last_fixed_perf.yaml`，关键配置如下：
+
+```yaml
+benchmark:
+  perf:
+    infer_mode: last
+    input_len: 2048
+    num_prompts: 100
+```
+
+ShareGPT 的固定长度处理是显式启用的：仅当 `infer_mode: last` 且填写正整数
+`input_len` 时生效。xTask 使用 `model_path` 对应的 tokenizer 和 chat template，按
+AISBench `last` 模式实际发送的内容计算长度，即“所有保留的历史问答 + 最后一条 human
+消息 + generation prompt/template token”。超长样本优先删除最早的完整问答轮次，再截断
+最后一条 human 内容；不足时重复该内容并补齐。生成后每条都会重新编码校验，未严格等于
+`input_len` 时直接终止测试。
+
+`num_prompts` 同时控制生成的对话组数和传给 AISBench 的正式请求数。源数据有效序列不足时，
+xTask 会循环复制已处理序列，并生成唯一 ID，最终文件严格包含 `num_prompts` 组。在
+`infer_mode: last` 下每组只发送最后一轮请求，因此正常情况下正式请求数就是
+`num_prompts`；预热会循环复用这些数据，不要求额外生成 `num_warmups` 组。
+
+处理结果和覆盖了 `path`、`infer_mode` 的数据集配置都写入当前 case 输出目录，不修改
+AISBench 源码、公共配置或原始 ShareGPT 文件。服务端必须使用与 `model_path` 相同的
+tokenizer/chat template，服务端上报的 `prompt_tokens` 才能与 `input_len` 严格一致。
+
+如果不同时配置 `infer_mode: last` 和 `input_len`，ShareGPT 继续使用原始数据，不执行固定
+长度预处理。只配置 `infer_mode` 时，xTask 仅生成用例级配置来切换 AISBench 推理模式。
 
 对于后续 AISBench 内置数据集，只要其配置是标准的单数据集配置，通常填写 `dataset_name`、`dataset_conf` 和可选的本地 `dataset_path` 即可，无需增加 xTask 数据集分支。包含多个子数据集或动态构造多个路径的 AISBench 配置，应沿用官方目录布局并省略 `dataset_path`，避免把多个子路径统一覆盖成同一个值。
 

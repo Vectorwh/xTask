@@ -1,6 +1,7 @@
 import json
 from transformers import AutoTokenizer
 import argparse
+import copy
 import os
 import sys
 import time
@@ -15,6 +16,9 @@ def parse_arguments():
     parser.add_argument("--datasettype", type=str, default='GSM8K', help="dataset generator type")
     parser.add_argument("--datapath", type=str, default='/workspace/benchmark/', help="dataset sample path")
     parser.add_argument("--modelpath", type=str, default="", help="model path")
+    parser.add_argument("--sourcepath", type=str, default="", help="source dataset path")
+    parser.add_argument("--outputpath", type=str, default="", help="generated dataset path")
+    parser.add_argument("--infermode", type=str, default="last", help="multi-turn inference mode")
     return parser.parse_args()
 
 #########################################################################################
@@ -94,6 +98,233 @@ def datatmp_generator(input_len, tokenizer, dataset, batch_size):
         dataset_tmp = dataset_tmp[:batch_size]
     return dataset_tmp
 
+
+SHAREGPT_PADDING_UNITS = (" x", "x", " a", "a", " 0", "0", " .", ".", "\n")
+
+
+def _sharegpt_messages(conversations):
+    role_map = {"human": "user", "gpt": "assistant"}
+    return [
+        {"role": role_map[item["from"]], "content": item["value"]}
+        for item in conversations[:-1]
+    ]
+
+
+def _sharegpt_prompt_length(tokenizer, conversations):
+    token_ids = tokenizer.apply_chat_template(
+        _sharegpt_messages(conversations),
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+    return len(token_ids)
+
+
+def _decode_token_ids(tokenizer, token_ids):
+    try:
+        return tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+    except TypeError:
+        return tokenizer.decode(token_ids, skip_special_tokens=False)
+
+
+def _repeat_token_prefix(token_ids, size):
+    if size <= 0:
+        return []
+    multiplier = (size + len(token_ids) - 1) // len(token_ids)
+    return (token_ids * multiplier)[:size]
+
+
+def _find_repeated_suffix(tokenizer, conversations, prefix, unit, target_len):
+    def length_for(repetitions):
+        conversations[-2]["value"] = prefix + unit * repetitions
+        return _sharegpt_prompt_length(tokenizer, conversations)
+
+    current_len = length_for(0)
+    if current_len == target_len:
+        return prefix
+
+    high = max(8, target_len - current_len + 8)
+    max_high = max(256, target_len * 4)
+    high_len = length_for(high)
+    while high_len < target_len and high < max_high:
+        high = min(high * 2, max_high)
+        high_len = length_for(high)
+
+    low = 0
+    while low + 1 < high:
+        middle = (low + high) // 2
+        if length_for(middle) < target_len:
+            low = middle
+        else:
+            high = middle
+
+    start = max(0, low - 32)
+    end = min(max_high, high + 32)
+    for repetitions in range(start, end + 1):
+        if length_for(repetitions) == target_len:
+            return prefix + unit * repetitions
+    return None
+
+
+def _fit_last_human_content(tokenizer, conversations, target_len):
+    original_text = conversations[-2]["value"]
+    conversations[-2]["value"] = ""
+    empty_prompt_len = _sharegpt_prompt_length(tokenizer, conversations)
+    if empty_prompt_len > target_len:
+        raise ValueError(
+            f"input_len={target_len} is smaller than the model chat-template overhead "
+            f"({empty_prompt_len} tokens)"
+        )
+
+    conversations[-2]["value"] = original_text
+    original_prompt_len = _sharegpt_prompt_length(tokenizer, conversations)
+    if original_prompt_len == target_len:
+        return
+
+    source_token_ids = tokenizer.encode(original_text, add_special_tokens=False)
+    if not source_token_ids:
+        source_token_ids = tokenizer.encode("ShareGPT conversation", add_special_tokens=False)
+    if not source_token_ids:
+        raise ValueError("the tokenizer produced no usable tokens for ShareGPT padding")
+
+    token_budget = target_len - empty_prompt_len
+    high = max(64, token_budget * 2 + 64)
+    cache = {}
+
+    def candidate_for(size):
+        if size not in cache:
+            text = _decode_token_ids(
+                tokenizer, _repeat_token_prefix(source_token_ids, size)
+            )
+            conversations[-2]["value"] = text
+            cache[size] = (text, _sharegpt_prompt_length(tokenizer, conversations))
+        return cache[size]
+
+    low = 0
+    while low + 1 < high:
+        middle = (low + high) // 2
+        _, prompt_len = candidate_for(middle)
+        if prompt_len <= target_len:
+            low = middle
+        else:
+            high = middle
+
+    if original_prompt_len < target_len:
+        best_text, best_len = original_text, original_prompt_len
+    else:
+        best_text, best_len = "", empty_prompt_len
+    candidate_sizes = {0, low, high}
+    candidate_sizes.update(range(max(0, low - 64), min(high + 64, high * 2) + 1))
+    for size in sorted(candidate_sizes):
+        text, prompt_len = candidate_for(size)
+        if prompt_len == target_len:
+            conversations[-2]["value"] = text
+            return
+        if best_len < prompt_len < target_len:
+            best_text, best_len = text, prompt_len
+
+    conversations[-2]["value"] = best_text
+    for unit in SHAREGPT_PADDING_UNITS:
+        fitted_text = _find_repeated_suffix(
+            tokenizer, conversations, best_text, unit, target_len
+        )
+        if fitted_text is not None:
+            conversations[-2]["value"] = fitted_text
+            return
+
+    raise RuntimeError(
+        f"unable to construct an exact {target_len}-token ShareGPT prompt; "
+        f"closest prompt length was {best_len}"
+    )
+
+
+def _validate_sharegpt_sample(sample):
+    conversations = sample.get("conversations") if isinstance(sample, dict) else None
+    if not isinstance(conversations, list) or len(conversations) < 2:
+        return False
+    if len(conversations) % 2 != 0:
+        return False
+    for index, item in enumerate(conversations):
+        expected_role = "human" if index % 2 == 0 else "gpt"
+        if not isinstance(item, dict) or item.get("from") != expected_role:
+            return False
+        if not isinstance(item.get("value"), str):
+            return False
+    return True
+
+
+def fix_sharegpt_sample(tokenizer, sample, target_len):
+    fixed_sample = copy.deepcopy(sample)
+    conversations = fixed_sample["conversations"]
+
+    # infer_mode=last sends all completed history plus the final human message.
+    # Drop the oldest complete rounds first so the recent context remains intact.
+    while len(conversations) > 2 and _sharegpt_prompt_length(tokenizer, conversations) > target_len:
+        conversations = conversations[2:]
+        fixed_sample["conversations"] = conversations
+
+    _fit_last_human_content(tokenizer, conversations, target_len)
+    actual_len = _sharegpt_prompt_length(tokenizer, conversations)
+    if actual_len != target_len:
+        raise RuntimeError(
+            f"ShareGPT prompt length validation failed: expected {target_len}, got {actual_len}"
+        )
+    return fixed_sample
+
+
+def process_sharegpt_dataset(tokenizer, source_path, output_path, input_len, num_prompts):
+    if input_len <= 0:
+        raise ValueError("input_len must be a positive integer")
+    if num_prompts <= 0:
+        raise ValueError("num_prompts must be a positive integer")
+
+    with open(source_path, "r", encoding="utf-8") as source_file:
+        source_dataset = json.load(source_file)
+    if not isinstance(source_dataset, list):
+        raise ValueError("ShareGPT source dataset must be a JSON array")
+
+    generated = []
+    for sample in source_dataset:
+        if len(generated) >= num_prompts:
+            break
+        if not _validate_sharegpt_sample(sample):
+            continue
+        generated.append(fix_sharegpt_sample(tokenizer, sample, input_len))
+
+    if not generated:
+        raise ValueError("ShareGPT source dataset contains no valid conversations")
+
+    source_count = len(generated)
+    while len(generated) < num_prompts:
+        generated.append(copy.deepcopy(generated[len(generated) % source_count]))
+    for index, sample in enumerate(generated):
+        source_id = sample.get("id", "sharegpt")
+        sample["id"] = f"{source_id}-xtask-{index}"
+
+    output_directory = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_directory, exist_ok=True)
+    temporary_path = f"{output_path}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as output_file:
+        json.dump(generated, output_file, ensure_ascii=False)
+    os.replace(temporary_path, output_path)
+
+    for sample in generated:
+        actual_len = _sharegpt_prompt_length(tokenizer, sample["conversations"])
+        if actual_len != input_len:
+            raise RuntimeError(
+                f"generated ShareGPT validation failed: expected {input_len}, got {actual_len}"
+            )
+    print(
+        f"[process_dataset]: generated {len(generated)} ShareGPT conversations "
+        f"with exact last-prompt length {input_len}: {output_path}"
+    )
+    return output_path
+
 ################################自定义函数区域#############################################
 
 if __name__ == '__main__':
@@ -160,6 +391,22 @@ if __name__ == '__main__':
         #生成annotations.json文件
         print("=== 生成textvqa_val_annotations.json文件中 ===")
         generate_annotations_file(batch_size, start_question_id=34602, output_file=f'Textvqa-in{input_len}-bs{batch_size}-annotation.json')
+
+    elif dataset_type == 'SHAREGPT':
+        if args.infermode.lower() != "last":
+            raise ValueError("ShareGPT fixed-length preprocessing only supports infer_mode=last")
+        if not args.sourcepath:
+            raise ValueError("--sourcepath is required for ShareGPT preprocessing")
+        output_path = args.outputpath or os.path.join(
+            data_path, f"ShareGPT-in{input_len}-n{batch_size}-last.json"
+        )
+        process_sharegpt_dataset(
+            tokenizer,
+            args.sourcepath,
+            output_path,
+            input_len,
+            batch_size,
+        )
 
 
 #数据集测试VID
@@ -240,8 +487,6 @@ if __name__ == '__main__':
         for i in range(number):
             audio_output.export(f'{concurrency_path}/m{length}_{i}_throatclearing.wav', format='wav')
         print(f"[process_dataset]: 已生成文件vocalsound测试文件，文件路径{concurrency_path}")
-
-
 
 
 

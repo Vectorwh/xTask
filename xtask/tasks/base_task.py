@@ -21,6 +21,7 @@ class BenchmarkConfig:
     dataset_path: str = ""  # 数据集文件路径
     dataset_conf: str = ""  # 数据集目录下的配置文件，对应aisbench的datasets，其他bench工具可为空
     api_type: str = ""  # 对应服务化后端的类型 vllm_api_general_chat/vllm_api_general_stream
+    infer_mode: str = ""  # AISBench multi-turn mode: last/every/every_with_gt
     num_prompts: str = ""
     input_len: int = 1024
     output_len: int = 1024

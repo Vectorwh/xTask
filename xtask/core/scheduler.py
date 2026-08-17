@@ -2147,6 +2147,10 @@ def _run_benchmark_and_process(context):
                 "perf benchmark command failed with exit code %s",
                 benchmark_result.exit_code,
             )
+            if benchmark_result.stdout:
+                logging.error("Benchmark stdout:\n%s", benchmark_result.stdout)
+            if benchmark_result.stderr:
+                logging.error("Benchmark stderr:\n%s", benchmark_result.stderr)
     else:
         state["benchmark_result"] = None
         logging.warning("benchmark_cmd is null, skip benchmark task.")
