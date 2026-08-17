@@ -9,7 +9,11 @@ from typing import Dict
 
 from xtask.utils.container_manager import path_mapping_in_container
 from xtask.datasets.dataset_downloader import download_dataset
-from xtask.datasets.dataset_manger import preprocess_dataset
+from xtask.datasets.dataset_manger import (
+    get_sharegpt_fixed_output_path,
+    is_sharegpt_fixed_length_enabled,
+    preprocess_dataset,
+)
 
 
 CONFIG_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -115,21 +119,127 @@ class _DatasetPathOverride(ast.NodeTransformer):
         return node
 
 
-def create_dataset_config_override(dataset_conf, dataset_path, output_file_path):
-    """Create an isolated AISBench dataset config for an explicit local path."""
+class _InferModeOverride(ast.NodeTransformer):
+    """Update infer_mode in an isolated multi-turn dataset config."""
+
+    def __init__(self, infer_mode):
+        self.infer_mode = infer_mode
+        self.replacements = 0
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if not isinstance(node.func, ast.Name) or node.func.id != "dict":
+            return node
+        for keyword in node.keywords:
+            if keyword.arg == "infer_mode":
+                keyword.value = ast.Constant(value=self.infer_mode)
+                self.replacements += 1
+        return node
+
+    def visit_Dict(self, node):
+        self.generic_visit(node)
+        for index, key in enumerate(node.keys):
+            if isinstance(key, ast.Constant) and key.value == "infer_mode":
+                node.values[index] = ast.Constant(value=self.infer_mode)
+                self.replacements += 1
+        return node
+
+
+class _LastInferencerOverride(ast.NodeTransformer):
+    """Use xTask's isolated workaround for AISBench infer_mode=last."""
+
+    def __init__(self):
+        self.replacements = 0
+
+    def _replace_type(self, type_node):
+        if isinstance(type_node, ast.Name) and type_node.id == "MultiTurnGenInferencer":
+            self.replacements += 1
+            return ast.Name(id="XTaskShareGPTLastInferencer", ctx=ast.Load())
+        return type_node
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if not isinstance(node.func, ast.Name) or node.func.id != "dict":
+            return node
+        keywords = {item.arg: item for item in node.keywords if item.arg}
+        if "infer_mode" in keywords and "type" in keywords:
+            keywords["type"].value = self._replace_type(keywords["type"].value)
+        return node
+
+    def visit_Dict(self, node):
+        self.generic_visit(node)
+        keys = {
+            key.value: index
+            for index, key in enumerate(node.keys)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if "infer_mode" in keys and "type" in keys:
+            type_index = keys["type"]
+            node.values[type_index] = self._replace_type(node.values[type_index])
+        return node
+
+
+def _add_last_inferencer_import(tree):
+    import_node = ast.ImportFrom(
+        module="xtask.benchmarks.aisbench.sharegpt_last_inferencer",
+        names=[ast.alias(name="XTaskShareGPTLastInferencer")],
+        level=0,
+    )
+    insert_index = 0
+    if (
+        tree.body
+        and isinstance(tree.body[0], ast.Expr)
+        and isinstance(tree.body[0].value, ast.Constant)
+        and isinstance(tree.body[0].value.value, str)
+    ):
+        insert_index = 1
+    while (
+        insert_index < len(tree.body)
+        and isinstance(tree.body[insert_index], ast.ImportFrom)
+        and tree.body[insert_index].module == "__future__"
+    ):
+        insert_index += 1
+    tree.body.insert(insert_index, import_node)
+
+
+def create_dataset_config_override(
+    dataset_conf,
+    dataset_path,
+    output_file_path,
+    infer_mode=None,
+    use_xtask_last_inferencer=False,
+):
+    """Create an isolated AISBench dataset config for per-case overrides."""
     config_name, config_suffix = _split_dataset_config_reference(dataset_conf)
-    if not dataset_path:
+    if not dataset_path and not infer_mode:
         return dataset_conf
 
     source_config = find_aisbench_dataset_config(config_name)
-    dataset_path_inside = path_mapping_in_container(str(dataset_path))
     tree = ast.parse(source_config.read_text(encoding="utf-8"), str(source_config))
-    transformer = _DatasetPathOverride(dataset_path_inside)
-    tree = transformer.visit(tree)
-    if transformer.replacements == 0:
-        raise ValueError(
-            f"AISBench dataset config {source_config} has no dataset path field to override"
-        )
+    if dataset_path:
+        dataset_path_inside = path_mapping_in_container(str(dataset_path))
+        path_transformer = _DatasetPathOverride(dataset_path_inside)
+        tree = path_transformer.visit(tree)
+        if path_transformer.replacements == 0:
+            raise ValueError(
+                f"AISBench dataset config {source_config} has no dataset path field to override"
+            )
+    if infer_mode:
+        infer_mode_transformer = _InferModeOverride(infer_mode)
+        tree = infer_mode_transformer.visit(tree)
+        if infer_mode_transformer.replacements == 0:
+            raise ValueError(
+                f"AISBench dataset config {source_config} has no infer_mode field to override"
+            )
+    if use_xtask_last_inferencer:
+        last_inferencer_transformer = _LastInferencerOverride()
+        tree = last_inferencer_transformer.visit(tree)
+        if last_inferencer_transformer.replacements == 0:
+            raise ValueError(
+                f"AISBench dataset config {source_config} has no "
+                "MultiTurnGenInferencer to override"
+            )
+        _add_last_inferencer_import(tree)
 
     custom_name = f"xtask_{config_name}"
     custom_dir = Path(output_file_path) / "aisbench_configs" / "datasets"
@@ -155,6 +265,16 @@ def append_dataset_path_check(shell_content, dataset_path):
     shell_content.append(f"    echo {error_message} >&2")
     shell_content.append("    exit 1")
     shell_content.append("fi")
+
+
+def append_xtask_pythonpath(shell_content):
+    """Make xTask compatibility modules importable in AISBench subprocesses."""
+    workspace_root = Path(__file__).resolve().parents[3]
+    workspace_root_inside = path_mapping_in_container(str(workspace_root))
+    quoted_root = shlex.quote(workspace_root_inside)
+    shell_content.append(
+        f'export PYTHONPATH={quoted_root}"${{PYTHONPATH:+:$PYTHONPATH}}"'
+    )
 
 def get_syn_config_file(shell_content):
     shell_content.append("\n# 2. 定位syn_config配置文件")
@@ -414,6 +534,14 @@ def generate_aisbench_script(
             or perf_cfg.get("dataset_conf")
             or dataset_name
         )
+        sharegpt_infer_mode = None
+        if dataset_name == "sharegpt" and perf_cfg.get("infer_mode"):
+            sharegpt_infer_mode = str(perf_cfg["infer_mode"]).lower()
+            if sharegpt_infer_mode not in {"last", "every", "every_with_gt"}:
+                raise ValueError(
+                    "ShareGPT benchmark.perf.infer_mode must be one of: "
+                    "last, every, every_with_gt"
+                )
         shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={perf_concurrency},/g" {api_type_file}')
         # 替换最大生成token数
         shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={perf_max_out_len},/g" {api_type_file}')
@@ -452,10 +580,28 @@ def generate_aisbench_script(
             # 随机合成数据集
             dataset_conf_type = "synthetic_gen"
 
-        if not preprocessed_dataset_conf and dataset_name != "syn":
-            dataset_conf_type = create_dataset_config_override(
-                dataset_conf_type, dataset_path, output_file_path
+        if is_sharegpt_fixed_length_enabled(dataset_name, task_config):
+            generated_dataset_path = get_sharegpt_fixed_output_path(
+                task_config, output_file_path
             )
+            dataset_conf_type = create_dataset_config_override(
+                dataset_conf_type,
+                generated_dataset_path,
+                output_file_path,
+                infer_mode="last",
+                use_xtask_last_inferencer=True,
+            )
+            append_xtask_pythonpath(shell_content)
+        elif not preprocessed_dataset_conf and dataset_name != "syn":
+            dataset_conf_type = create_dataset_config_override(
+                dataset_conf_type,
+                dataset_path,
+                output_file_path,
+                infer_mode=sharegpt_infer_mode,
+                use_xtask_last_inferencer=sharegpt_infer_mode == "last",
+            )
+            if sharegpt_infer_mode == "last":
+                append_xtask_pythonpath(shell_content)
             append_dataset_path_check(shell_content, dataset_path)
 
         if process_dataset_cmd:
