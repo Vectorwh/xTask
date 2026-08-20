@@ -6,6 +6,16 @@ XLLM_PKG_DIR="/workspace/pkg/xllm"
 XLLM_VENDORS_DIR="/workspace/pkg/xllm/vendors"
 XLLM_RUNTIME_LIB_DIR="$XLLM_PKG_DIR/runtime_libs"
 XLLM_SERVICE_BINARY_DIR="$XLLM_PKG_DIR/service_binary"
+XLLM_SERVICE_CURRENT_DIR="$XLLM_SERVICE_BINARY_DIR/current"
+XLLM_INSTALL_SERVICE="${XLLM_INSTALL_SERVICE:-1}"
+
+case "$XLLM_INSTALL_SERVICE" in
+    0|1) ;;
+    *)
+        echo "错误: XLLM_INSTALL_SERVICE 必须为 0 或 1，当前值: $XLLM_INSTALL_SERVICE" >&2
+        exit 1
+        ;;
+esac
 
 RPM_FILE="numactl-2.0.16-9.vo2203sp4.aarch64.rpm"
 TORCH_NPU_FILE="torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl"
@@ -159,30 +169,73 @@ else
     echo "未检测到 $XLLM_PKG_DIR 下的 xllm_npu*.whl 或 $XLLM_VENDORS_DIR，跳过 xLLM 依赖库下载与安装。"
 fi
 
-# etcd、xllm-service 的安装不依赖 xLLM 编译产物存在与否。
-if [ -f "$XLLM_SERVICE_BINARY_DIR/etcd" ] && \
-    [ -f "$XLLM_SERVICE_BINARY_DIR/etcdctl" ] && \
-    [ -f "$XLLM_SERVICE_BINARY_DIR/xllm_master_serving" ]; then
-    echo "service_binary下找到二进制文件，使用本地二进制。"
-    install -m 0755 \
-        "$XLLM_SERVICE_BINARY_DIR/etcd" \
-        "$XLLM_SERVICE_BINARY_DIR/etcdctl" \
-        "$XLLM_SERVICE_BINARY_DIR/xllm_master_serving" \
-        /usr/local/bin/
-else
-    echo "service_binary下未找到二进制文件，使用wget的二进制。"
-    ensure_xllm_pack
-    for binary in etcd etcdctl xllm_master_serving; do
-        if [ ! -f "$XLLM_PACK_DIR/$binary" ]; then
-            echo "错误: xllm_pack 中缺少 $binary" >&2
+# xTask 对普通 runtime 显式传 0；PD/service_routed 只在控制面 runtime 传 1。
+# 默认值 1 保留外部直接执行该脚本时的历史行为。
+if [ "$XLLM_INSTALL_SERVICE" -eq 1 ]; then
+    # etcd、xllm-service 的安装不依赖 xLLM 编译产物存在与否。
+    # xLLM-Service 编译归档使用 service_binary/current；保留直接放置文件的
+    # 旧布局兼容。Service 的 etcd_cpp_apiv3 是客户端库，不替代 etcd 服务端。
+    SERVICE_RUNTIME_DIR=""
+    if [ -f "$XLLM_SERVICE_CURRENT_DIR/xllm_master_serving" ] && \
+        [ -f "$XLLM_SERVICE_CURRENT_DIR/librust_tokenizers.so" ]; then
+        SERVICE_RUNTIME_DIR="$XLLM_SERVICE_CURRENT_DIR"
+        echo "service_binary/current下找到xLLM-Service二进制，使用本地二进制。"
+    elif [ -e "$XLLM_SERVICE_CURRENT_DIR" ] || [ -L "$XLLM_SERVICE_CURRENT_DIR" ]; then
+        echo "警告: service_binary/current归档不完整，将尝试旧布局或xllm_pack。" >&2
+    fi
+    if [ -z "$SERVICE_RUNTIME_DIR" ] && \
+        [ -f "$XLLM_SERVICE_BINARY_DIR/xllm_master_serving" ]; then
+        SERVICE_RUNTIME_DIR="$XLLM_SERVICE_BINARY_DIR"
+        echo "service_binary下找到xLLM-Service二进制，使用本地二进制。"
+    fi
+
+    if [ -n "$SERVICE_RUNTIME_DIR" ]; then
+        if [ -f "$SERVICE_RUNTIME_DIR/librust_tokenizers.so" ]; then
+            install -m 0755 "$SERVICE_RUNTIME_DIR/librust_tokenizers.so" /usr/lib64/librust_tokenizers.so
+            ldconfig
+        fi
+        install -m 0755 "$SERVICE_RUNTIME_DIR/xllm_master_serving" /usr/local/bin/xllm_master_serving
+    fi
+
+    # ETCD remains independently sourced. A Service source tree only contains
+    # the etcd C++ client library, not the etcd/etcdctl server binaries.
+    LOCAL_ETCD_READY=0
+    if [ -f "$XLLM_SERVICE_BINARY_DIR/etcd" ] && \
+        [ -f "$XLLM_SERVICE_BINARY_DIR/etcdctl" ]; then
+        echo "service_binary下找到本地etcd/etcdctl，使用本地二进制。"
+        install -m 0755 \
+            "$XLLM_SERVICE_BINARY_DIR/etcd" \
+            "$XLLM_SERVICE_BINARY_DIR/etcdctl" \
+            /usr/local/bin/
+        LOCAL_ETCD_READY=1
+    else
+        echo "service_binary下未找到本地etcd/etcdctl。"
+    fi
+
+    # Download/extract the legacy pack only when one of its independent runtime
+    # components is missing. This preserves the old all-in-one fallback while
+    # allowing a newly compiled Service to coexist with pack-provided ETCD.
+    if [ "$LOCAL_ETCD_READY" -eq 0 ] || [ -z "$SERVICE_RUNTIME_DIR" ]; then
+        ensure_xllm_pack
+    fi
+    if [ "$LOCAL_ETCD_READY" -eq 0 ]; then
+        for binary in etcd etcdctl; do
+            if [ ! -f "$XLLM_PACK_DIR/$binary" ]; then
+                echo "错误: xllm_pack 中缺少 $binary" >&2
+                exit 1
+            fi
+        done
+        install -m 0755 "$XLLM_PACK_DIR/etcd" "$XLLM_PACK_DIR/etcdctl" /usr/local/bin/
+    fi
+    if [ -z "$SERVICE_RUNTIME_DIR" ]; then
+        if [ ! -f "$XLLM_PACK_DIR/xllm_master_serving" ]; then
+            echo "错误: xllm_pack 中缺少 xllm_master_serving" >&2
             exit 1
         fi
-    done
-    install -m 0755 \
-        "$XLLM_PACK_DIR/etcd" \
-        "$XLLM_PACK_DIR/etcdctl" \
-        "$XLLM_PACK_DIR/xllm_master_serving" \
-        /usr/local/bin/
+        install -m 0755 "$XLLM_PACK_DIR/xllm_master_serving" /usr/local/bin/
+    fi
+else
+    echo "当前 runtime 不需要 xLLM-Service 控制面，跳过 xllm_master_serving 和 ETCD 安装。"
 fi
 
 cd "$TARGET_DIR"

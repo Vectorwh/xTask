@@ -5,11 +5,11 @@
 1. 先写模型和数据集。
 2. 再选一个 benchmark：AISBench 或 EvalScope。
 3. 再选一种测试：性能 `perf` 或精度 `acc`。
-4. 最后选部署：单机、普通多机，或者 PD 分离；需要搜索时再加搜索段。
+4. 最后选部署：单机、普通多机、普通实例统一路由，或者 PD 分离；需要搜索时再加搜索段。
 
 ## 1. 可参考示例
 
-可直接参考的独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
+可直接参考的 21 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
 
 | 目的 | 示例 |
 | --- | --- |
@@ -17,8 +17,6 @@
 | 单机 EvalScope 性能 | `02_single_evalscope_perf.yaml` |
 | 单机 AISBench 精度 | `03_single_aisbench_acc.yaml` |
 | 单机 EvalScope 精度 | `04_single_evalscope_acc.yaml` |
-| 单机 AISBench ShareGPT 性能 | `17_single_aisbench_sharegpt_perf.yaml` |
-| 单机 AISBench ShareGPT `last` 固定长度性能 | `18_single_aisbench_sharegpt_last_fixed_perf.yaml` |
 | 普通多机混部性能/精度 | `05_multihost_aisbench_perf.yaml`、`06_multihost_aisbench_acc.yaml` |
 | PD 分离性能/精度 | `07_pd_aisbench_perf.yaml`、`08_pd_aisbench_acc.yaml` |
 | 单机并发摸高 | `09_single_auto_assess.yaml` |
@@ -28,6 +26,12 @@
 | 多机普通搜参 | `13_multihost_para_set.yaml` |
 | 多机 PD 拓扑搜参 | `14_pd_topology_para_set.yaml` |
 | PD 并发摸高 | `15_pd_auto_assess.yaml` |
+| PD 固定拓扑 exhaustive 参数搜索 | `16_pd_para_set_exhaustive.yaml` |
+| 单机 AISBench ShareGPT 默认多轮模式性能测试 | `17_single_aisbench_sharegpt_perf.yaml` |
+| 单机 AISBench ShareGPT `last` 模式固定输入长度性能测试 | `18_single_aisbench_sharegpt_last_fixed_perf.yaml` |
+| 普通服务同节点多小实例混部 | `19_samehost_mixed_aisbench_perf.yaml` |
+| PD 多逻辑实例、同逻辑实例多 node 共节点部署 | `20_pd_samehost_multi_instance_perf.yaml` |
+| 多个普通独立实例通过 xllm-service 统一分发 | `21_service_routed_samehost_multi_instance_perf.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
 
@@ -62,8 +66,8 @@ deployment: {}
 | `dataset_path` | 按数据集需要 | 顶层数据集路径 | AISBench 配置了本地路径时会生成用例级数据集配置，优先使用 `benchmark.perf/acc.dataset_path`，否则使用此处路径；EvalScope 精度更常在 `dataset_args` 中指定。多机资源同步建议填写 `/xllm_test_060/...` 容器路径。 |
 | `dataset_format` | 建议 | 数据文件格式说明 | 常写 `json`。它主要作为任务元数据保留，具体解析方式仍由 benchmark 和数据集配置决定。 |
 | `communication_backend` | 多卡建议 | 多卡通信后端 | NPU 多卡通常写 `hccl`。 |
-| `hccl_if_port` | 端口冲突时填写 | HCCL 通信使用的基础端口 | xLLM 启动模板会导出为 `HCCL_IF_BASE_PORT`，默认 43439。同一服务器并行跑多套服务时可改成不冲突端口。 |
-| `progress_conn_port` | 端口冲突时填写 | xLLM 多进程主节点协调端口 | 启动模板用它组成 `MASTER_NODE_ADDR`，默认 9590。多任务共机运行时要避免冲突。 |
+| `hccl_if_port` | 端口冲突时填写 | HCCL 通信使用的基础端口 | xLLM 启动模板会导出为 `HCCL_IF_BASE_PORT`，默认 43439。它是物理 runtime/node 级配置：同一 host 上的多个 runtime 必须不同，不同 host 可以复用。顶层值只是默认值，可在普通 `instances[]` 或 PD `nodes[]` 中覆盖。 |
+| `progress_conn_port` | 端口冲突时填写 | xLLM 多进程主节点协调端口 | 启动模板用它组成 `MASTER_NODE_ADDR`，默认 9590。它是逻辑实例级配置：普通部署整组共享；统一路由和 PD 分别在各 `service_instances[]`、`pd_instances[]` 配置，同组所有 node 必须一致；多个逻辑组的主节点在同一 host 时必须使用不同值。 |
 | `userid` | 建议 | 结果文件归属用户的历史配置 | 常沿用环境中的 UID，例如 `1048`。部分当前流程直接取实际运行用户 UID，因此不要把它当作容器权限问题的唯一控制项。 |
 | `serving_wait_time` | 建议 | 服务启动命令发出后额外等待多少秒 | 它不是完整的服务启动超时。多机还会做实例 readiness 和统一 endpoint 健康检查。 |
 | `benchmark` | 是 | benchmark 类型及性能/精度参数 | 详见第 3 节。 |
@@ -82,7 +86,7 @@ deployment: {}
 
 ### 历史兼容字段
 
-旧用例顶层可能还有 `block_size`、`additional_config`、`host_addr`、`port`、`num_devices`、`start_device_id`、`world_size` 和顶层 `serving_extensiable_param`。调度器仍保留部分兼容逻辑，但新用例应以 `deployment.instances` 或 `deployment.pd_instances` 为准：
+旧用例顶层可能还有 `block_size`、`additional_config`、`host_addr`、`port`、`num_devices`、`start_device_id`、`world_size` 和顶层 `serving_extensiable_param`。调度器仍保留部分兼容逻辑，但新用例应按场景使用 `deployment.instances`、`deployment.service_instances` 或 `deployment.pd_instances`：
 
 - xLLM 启动参数写到实例的 `serving_extensiable_param`。
 - 卡号写 `device_ids`。
@@ -387,14 +391,18 @@ deployment:
 | `deployment.sync_workspace` | 多机建议 | 执行前是否把当前 xTask 工程同步到远端节点 | 默认 `true`。这是工程代码同步，不是模型目录同步。单机无需关心。 |
 | `deployment.benchmark.runner_instance` | 建议 | 在哪个实例的容器里执行 benchmark | 值必须对应某个 `instances[].name`。不写时优先选 `master`、`standalone`、`prefill`，再退回第一个实例。 |
 | `deployment.benchmark.health_path` | 建议 | 统一服务的健康检查路径 | 默认 `/health`，与推导出的 endpoint 拼接。不要在这里写完整 URL。 |
+| 顶层/`instances[].hccl_if_port` | 同节点混部是 | 每个物理 runtime 的 HCCL 基础端口 | 顶层值是默认 43439。同一 host 上多个 `instances` 必须分别覆盖成不同端口；跨 host 的实例可以复用。 |
+| 顶层/`instances[].progress_conn_port` | 端口冲突时填写 | 普通服务整组共用的主节点协调端口 | 优先使用 master/standalone 实例的显式值，其次使用顶层值，默认 9590；框架会把最终值统一下发给本组所有 runtime。启用 `enable_shm` 时，同一物理 host 上的不同逻辑组不能复用该端口。 |
 | `instances[].name` | 是 | 物理启动实例的唯一名字 | 用于输出目录、脚本名、容器名、benchmark runner 选择；同一用例内不能重复。它不是模型名。 |
 | `instances[].host` | 是 | 这个实例在哪台服务器启动 | 多机通过 SSH 连接非本机 host。相关 SSH 配置由工程的 HostExecutor/SSH 配置读取。 |
 | `instances[].role` | 是 | 这个节点在普通多机服务中的身份 | 普通部署建议主节点写 `master`，其余写 `worker`；单机写 `master` 或 `standalone`。PD 角色另见后文。 |
-| `instances[].rank_start` | 多机是 | 这个节点第一张卡的全局 rank | 普通多机的所有实例属于同一个 rank 组，后一节点要接着前面节点的卡数累计，例如 16 卡节点依次写 0、16、32。 |
+| `instances[].rank_start` | 多实例建议 | 这个节点第一张卡的全局 rank | 普通部署的所有实例属于同一个 rank 组，后一节点要接着前面节点的卡数累计，例如 16 卡节点依次写 0、16、32。省略时按 YAML 顺序自动累计，显式写出更容易核对。 |
 | `instances[].device_ids` | 是 | 这个节点实际占用哪些 NPU | 可写不连续卡号，例如 `[0, 2, 4, 6]`。框架按列表长度计算本节点卡数。 |
 | `instances[].num_devices` + `start_device_id` | 仅兼容 | 用“起始卡号 + 连续卡数”代替 `device_ids` | 只有未写 `device_ids` 时使用。新用例优先写清楚 `device_ids`，不要两种方式混用。 |
-| `instances[].local_port` | 是 | 该实例的 xLLM 本地监听端口 | 普通服务的 benchmark endpoint 使用主节点实例的此端口。默认回退为顶层 `port`，再回退到 8800，但新用例应显式写。 |
+| `instances[].local_port` | 是 | 该实例的 xLLM 本地监听端口起点 | 一个 N 卡 runtime 实际占用 `local_port` 到 `local_port + N - 1`。普通服务的 benchmark endpoint 使用主节点实例的起始端口。默认回退为顶层 `port`，再回退到 8800。 |
 | `instances[].service.port` | 仅兼容 | `local_port` 的旧写法 | 只在未配置 `local_port` 时使用。 |
+| `instances[].ipc_mode` | 特殊场景按需 | 容器 IPC 命名空间模式 | 同一 host 有多个 runtime 时框架默认使用 `host`。同一逻辑实例的同 host runtime 启用 `enable_shm` 后必须共享 IPC，不能配置 `private`。 |
+| `instances[].shm_size` | 私有 IPC 按需 | 容器私有 `/dev/shm` 上限 | 仅在显式使用私有 IPC 时有意义；需按模型和并发量自行设置。共享 host IPC 时通常不填写。 |
 | `instances[].serving_extensiable_param` | 按模型需要 | 传给这个 xLLM 实例的启动参数 | 详见“xLLM 启动参数”小节。实例级字段优先于兼容的顶层同名块。 |
 | `instances[].readiness` | 按需 | 自定义如何判断该实例已经启动 | 不写时 xTask 根据角色检查日志关键字或进程；可改成命令或 HTTP 检查。 |
 
@@ -418,7 +426,7 @@ readiness:
 
 `success_keywords` 是“匹配到任意一个即成功”。远端检查默认等待时长可由兼容字段 `serving_ready_timeout` 控制，默认约 320 秒。
 
-### 普通多机混部
+### 普通混部（跨节点或同节点）
 
 在单机 YAML 上增加 worker；两台机器仍然是一个 xLLM 服务：
 
@@ -438,11 +446,59 @@ deployment:
 
 `rank_start` 是全局卡编号的起点；后一个节点要接着前一个节点累计。多机默认会从主节点同步工程；`xllm_test_060` 只按需检查关键资源，不会无条件整目录复制。模型目录仍需提前放到每台机器。
 
-普通多机的 ranktable 规则是：所有 `deployment.instances` 组成同一个 `default` 组；实例数大于 1 时，框架在各服务器获取本机卡信息，生成各节点 ranktable，合并后再注入每个实例。只有一个实例时不自动生成 ranktable。
+多个 runtime 也可以放在同一个物理 host，例如卡 `[0,1]` 和 `[2,3]` 分别启动两个容器。它们仍属于同一个普通 xLLM 服务，因此共享一个 `progress_conn_port`；但每个 runtime 必须配置不同的 `hccl_if_port`，并使用互不重叠的 `device_ids` 和 `local_port` 端口段。启用 `enable_shm` 时，xLLM 会在同 IP runtime 之间使用共享内存通信，因此这些容器必须共享 host IPC；框架会自动使用 `ipc_mode: host`。完整写法见 `19_samehost_mixed_aisbench_perf.yaml`。
+
+普通部署的 ranktable 规则是：所有 `deployment.instances` 组成同一个 `default` 组；实例数大于 1 时，框架按物理 host 汇总本组卡号，同一 host 只生成一个 server 条目，同时保留每个 runtime 的全局 rank。只有一个实例时不自动生成 ranktable。
+
+### 多个普通实例统一路由
+
+当目标是启动多个彼此独立的普通 xLLM 实例，并由一组 `xllm-service + etcd` 统一分发请求时，使用 `mode: service_routed`。不要使用普通 `instances`：普通 `instances` 的多个元素始终属于同一个分布式 xLLM 实例。
+
+```yaml
+deployment:
+  mode: service_routed
+  master_host: 11.87.191.83
+  service_control:
+    host: 11.87.191.83
+    etcd_client_port: 13389
+    etcd_peer_port: 13390
+    http_server_port: 13888
+    rpc_server_port: 13889
+  benchmark: {runner_instance: default-0-node-0, health_path: /health}
+  service_instances:
+  - name: default-0
+    group_master_host: 11.87.191.83
+    progress_conn_port: 9590
+    nodes:
+    - {name: default-0-node-0, host: 11.87.191.83,
+       device_ids: [0,1], local_port: 48000, hccl_if_port: 43439}
+  - name: default-1
+    group_master_host: 11.87.191.83
+    progress_conn_port: 9690
+    nodes:
+    - {name: default-1-node-0, host: 11.87.191.83,
+       device_ids: [2,3], local_port: 48100, hccl_if_port: 43539}
+```
+
+每个 `service_instances[]` 是一个完整的普通逻辑实例，角色保持 xLLM `DEFAULT`；它可以只有一个 node，也可以由同一 host 或不同 host 上的多个 node 组成。xTask 自动为每个实例注入 `--enable_service_routing=true` 和统一的 `--etcd_addr`，benchmark 只访问 `service_control.host:http_server_port`。
+
+| 字段 | 作用和约束 |
+| --- | --- |
+| `deployment.mode` | 固定写 `service_routed`，只在明确选择此模式时启用普通实例统一路由。 |
+| `service_control.host` | etcd 和 `xllm_master_serving` 所在 host，必须对应一个实际 node。 |
+| `service_control.etcd_client_port` / `etcd_peer_port` | etcd 客户端和 peer 端口，默认 3389/3390。 |
+| `service_control.http_server_port` / `rpc_server_port` | 统一 HTTP 入口和内部 RPC 端口，默认 38888/38889。 |
+| `service_instances[].name` | 独立普通逻辑实例名，全局唯一。 |
+| `service_instances[].group_master_host` | 本逻辑实例的主节点，必须对应本组某个 node；默认取本组第一个 node。 |
+| `service_instances[].progress_conn_port` | 本逻辑实例所有 node 共用；同 host 上的不同逻辑实例必须不同。 |
+| `service_instances[].nodes` | 组成该逻辑实例的物理 node；卡号、本地端口段和同 host 的 HCCL 端口不能冲突。 |
+| `deployment.benchmark.runner_instance` | 填实际 `nodes[].name`，用于选择执行 benchmark 的容器。 |
+
+`enable_service_routing`、`etcd_addr`、`enable_disagg_pd` 和 `instance_role` 由框架管理，不应放入 `serving_extensiable_param`。不同普通逻辑实例分别计算 world size、rank 和 ranktable，不会与其他逻辑实例合并。完整真实用例见 `21_service_routed_samehost_multi_instance_perf.yaml`。
 
 ### 工程与测试资源同步
 
-普通多机和 PD 多机共用下面的前置处理：
+普通多机、普通实例统一路由和 PD 多机共用下面的前置处理：
 
 ```yaml
 deployment:
@@ -482,6 +538,7 @@ deployment:
 | `enable_schedule_overlap` | 是否开启调度重叠优化 | 是否有收益与模型、版本和部署模式有关。 |
 | `enable_prefix_cache` | 是否开启前缀缓存 | 输入无公共前缀时未必有收益。 |
 | `enable_shm` | 是否启用共享内存相关路径 | 多进程配置通常沿用已验证用例。 |
+| `enable_heterogeneous_pd` | 是否允许 P/D 使用不同并行拓扑 | 非 MLA 模型的 P/D 卡数或并行规模不一致时，P 和 D 两侧都要设为 `true`；20 号用例保持各逻辑组 TP2 以满足 Qwen3-8B 的显存要求，同时覆盖同 host 多逻辑实例和同一逻辑实例多 node。 |
 | `block_size` | KV cache block 大小 | 改动可能影响显存和调度效率。 |
 | `dp_size` | 数据并行规模 | 必须与实际卡数、模型并行配置匹配。 |
 | `ep_size` | 专家并行规模 | MoE 模型常用，必须与模型及总卡数匹配。 |
@@ -519,13 +576,19 @@ deployment:
   - name: prefill-0
     role: prefill
     group_master_host: 11.87.191.75
+    progress_conn_port: 9590
+    transfer_port_base: 26000
+    disagg_pd_port: 7777
     nodes: [{name: prefill-0-node-0, host: 11.87.191.75,
-             device_ids: [0,1], local_port: 48000}]
+             device_ids: [0,1], local_port: 48000, hccl_if_port: 43439}]
   - name: decode-0
     role: decode
     group_master_host: 11.87.191.121
+    progress_conn_port: 9690
+    transfer_port_base: 27000
+    disagg_pd_port: 7787
     nodes: [{name: decode-0-node-0, host: 11.87.191.121,
-             device_ids: [0,1], local_port: 48000}]
+             device_ids: [0,1], local_port: 48000, hccl_if_port: 43439}]
 ```
 
 `pd_control.host` 是 etcd 和统一 HTTP 服务所在节点，必须对应一个实际 node。`pd_instances[].name` 只标识逻辑 P/D 实例，`role` 只表示它是 P 还是 D；不要再写 `pd_group`。同一个逻辑实例有两个及以上 node 时，才为这一组生成和合并 ranktable；不同 P/D 组互不合并。
@@ -543,12 +606,51 @@ deployment:
 | `pd_control.rpc_server_port` | 建议 | `xllm_master_serving` 内部 RPC 端口 | 默认 38889，确保控制节点端口未占用。 |
 | `pd_control.startup_attempts` | 否 | 控制面启动失败最多重试几次 | 默认 2；每次重试前会清理旧的 etcd 和 `xllm_master_serving` 进程。 |
 | `pd_control.startup_wait_seconds` | 否 | 每次启动控制面后先等多少秒再检查 | 默认 3。它不是全部 P/D 实例注册完成的超时。 |
-| `pd_control.transfer_port_base` | 否 | 每个 P/D xLLM 进程的数据传输监听端口起点 | 默认 26000；多卡启动脚本按卡序号在此基础上递增。多实例/多任务并行时要避免冲突。 |
+| `pd_control.transfer_port_base` | 仅兼容 | 所有 P/D 逻辑组的 transfer 端口默认值 | 默认 26000。旧用例继续有效；同 host 多 P/D 组的新用例应改在各 `pd_instances[]` 上分别配置。 |
 | `pd_control.no_proxy_hosts` | 否 | 额外加入 `NO_PROXY` 的 host 列表 | localhost、控制面和所有实例 host 会自动加入；这里只需补充环境中特殊地址。 |
 | `deployment.benchmark.runner_instance` | 建议 | 在哪个物理 node 的容器里跑 benchmark | 层级 PD YAML 中应填写一个实际的 `nodes[].name`，例如 `prefill-0-node-0`，不是逻辑实例名 `prefill-0`。不写时框架会自动选择；写了却不匹配任何 node 时会退回首个 runtime，但配置含义会变得不明确。 |
 | `deployment.benchmark.health_path` | 建议 | 统一服务健康检查路径 | 默认 `/health`，拼在 `pd_control` 的 HTTP endpoint 后。 |
 
 注意：`deployment.benchmark.endpoint` 即使手工填写，当前服务组逻辑也不会把它作为权威地址；普通部署从 `master_host + local_port` 推导，PD 从 `pd_control.host + http_server_port` 推导。
+
+### PD 场景编译 xLLM-Service
+
+PD 场景的 `xllm_master_serving` 可以由 xTask 单独自动编译和归档，不改变原有
+xLLM wheel 的编译、归档和加载流程：
+
+```bash
+bash tools/prepare_xllm_service.sh
+```
+
+源码默认准备在 `xllm-service/`；也可以通过 `XLLM_SERVICE_SOURCE_DIR` 指定已有
+checkout，通过 `XLLM_SERVICE_REPO_URL` 指定仓库地址。脚本会执行 Service 官方要求的
+`prepare.sh`、CMake 和 `xllm_master_serving` 构建，并将产物原子切换到：
+
+```text
+pkg/xllm/service_binary/current/xllm_master_serving
+pkg/xllm/service_binary/current/librust_tokenizers.so
+```
+
+`download_xllm.sh` 会优先加载该 `current` 版本；旧的
+`pkg/xllm/service_binary/xllm_master_serving` 直放布局仍兼容。ETCD 不由该编译流程
+生成：xLLM-Service 的 `third_party/etcd_cpp_apiv3` 是 C++ 客户端库，不包含 `etcd`
+或 `etcdctl` 服务端程序。PD 启动所需的 ETCD 仍按原逻辑从本地归档或 `xllm_pack`
+加载。
+
+运行时依赖准备会按部署模式选择安装范围：普通实例不会安装
+`xllm_master_serving` 或 ETCD；PD / `service_routed` 只在 `pd_control.host` 或
+`service_control.host` 对应的控制面容器中安装，其他 runtime 只准备 xLLM wheel
+及其依赖。直接手工执行 `download_xllm.sh` 时，未设置开关仍保留旧行为；如需显式
+跳过控制面组件，可使用 `XLLM_INSTALL_SERVICE=0 bash tools/download_xllm.sh`。
+
+定时任务如需同时编译 xLLM 和 Service，可显式执行：
+
+```bash
+bash tools/cron_daily_build.sh build service_build test
+```
+
+默认 `build` 阶段仍只执行原有 `prepare_xllm.sh`，避免 Service 的 CMake/Rust 构建
+改变既有 xLLM 构建任务。
 
 ### `pd_instances` 和 `nodes` 字段
 
@@ -557,13 +659,20 @@ deployment:
 | `pd_instances[].name` | 是 | 一个逻辑 P 或 D 实例的唯一名字 | 例如 `prefill-0`、`decode-1`。框架自动用它生成内部 `pd_group`；禁止手工写 `pd_group` 或 `group`。 |
 | `pd_instances[].role` | 是 | 这个逻辑实例负责 P 还是 D | 只能是 `prefill` 或 `decode`。`name` 负责区分第几个实例，`role` 负责说明功能，两者不重复。 |
 | `pd_instances[].group_master_host` | 多 node 建议 | 这个逻辑 P/D 实例内谁是主节点 | 默认取 `nodes` 的第一个 host。组内 world size、启动主从关系和 readiness 都使用它；它必须对应本组实际 node。 |
+| `pd_instances[].hccl_if_port` | 仅作默认值 | 本逻辑实例各 node 的 HCCL 默认端口 | 默认继承顶层值或 43439。HCCL 实际是 node 级配置；同一 host 上有多个 node 时，必须在各 `nodes[].hccl_if_port` 覆盖成不同值。 |
+| `pd_instances[].progress_conn_port` | 同 host 多组是 | 本逻辑实例的主节点协调端口 | 默认继承顶层值或 9590。同一逻辑实例的 node 必须一致；多个逻辑组的 `group_master_host` 相同时必须不同。启用 `enable_shm` 的逻辑组只要共享任一物理 host，也必须使用不同值，避免共享内存对象重名。 |
+| `pd_instances[].transfer_port_base` | 同 host 多组是 | 本逻辑实例的数据传输端口起点 | 默认回退 `pd_control.transfer_port_base` 或 26000。实际端口为 `transfer_port_base + rank`，因此同 host 的不同逻辑组必须使用不重叠端口段。 |
+| `pd_instances[].disagg_pd_port` | 同 host 多组是 | 本逻辑实例的 PD 调度 bRPC 监听端口 | 默认 7777，并传给 xLLM 的 `--disagg_pd_port`。同一逻辑实例的所有 node 必须一致；不同 P/D 逻辑实例的 `group_master_host` 相同时必须不同。 |
+| `pd_instances[].ipc_mode` / `shm_size` | 特殊场景按需 | 本逻辑实例各 node 的容器 IPC 配置 | 同 host 存在多个 runtime 时默认使用 host IPC。同一逻辑实例需要在同 host node 间使用共享内存时禁止配置 `private`；不需要跨容器共享内存时可显式配置 private IPC 和相应 `shm_size`。 |
 | `pd_instances[].serving_extensiable_param` | 是 | 本逻辑实例所有 node 默认共用的 xLLM 参数 | P 和 D 可以写不同参数块。 |
-| `pd_instances[].nodes` | 是 | 组成这个逻辑实例的物理服务器节点列表 | 至少一个 node。同一逻辑实例有多个 node 时，各 node 的 host 必须不同。 |
+| `pd_instances[].nodes` | 是 | 组成这个逻辑实例的物理启动 node 列表 | 至少一个 node。多个 node 可以使用同一个物理 host，只要卡号和本地端口段不重叠。 |
 | `nodes[].name` | 建议 | 物理启动节点的唯一名字 | 不写时自动生成 `<逻辑实例名>-node-<序号>`。所有 P/D node 名全局不能重复。它会成为实际脚本、容器和输出目录名。 |
 | `nodes[].host` | 是 | 物理服务器 IP | 必须可 SSH 访问，并具备模型、NPU 和容器环境。 |
 | `nodes[].device_ids` | 是 | 该 node 使用的卡号 | 同一 P/D 组的 world size 等于组内所有 node 的卡数之和。 |
 | `nodes[].rank_start` | 可省 | 该 node 在本 P/D 组内的起始 rank | 省略时框架按 node 顺序从 0 累计。注意 P 组、D 组分别从各自的 0 开始，不跨组累计。 |
-| `nodes[].local_port` | 是 | 该物理 node 的 xLLM 本地端口 | 它用于 node 自身启动，不是对外统一 endpoint。不同服务器可以使用同一端口；同一服务器上多个 node 必须避免端口冲突。 |
+| `nodes[].local_port` | 是 | 该物理 node 的 xLLM 本地端口起点 | 它用于 node 自身启动，不是对外统一 endpoint。N 卡 node 占用从该值开始的 N 个连续端口；同一服务器上多个 node 的端口段不能重叠。 |
+| `nodes[].hccl_if_port` | 同 host 多 node 是 | 该物理 node/runtime 的 HCCL 基础端口 | 默认继承逻辑实例、顶层或 43439。同一 host 上的所有 runtime 必须不同；不同 host 可使用相同值。 |
+| `nodes[].progress_conn_port` | 不建议 | 逻辑实例协调端口的 node 级写法 | 应统一写在 `pd_instances[]`。node 即使显式填写也必须与本逻辑实例其他 node 完全一致，否则配置校验会拒绝。 |
 | `nodes[].serving_extensiable_param` | 按需 | 只覆盖这个 node 的 xLLM 参数 | 先继承逻辑实例参数，再用 node 内同名键覆盖。只把确实需要差异化的键放在 node 层。 |
 | `nodes[].readiness` | 按需 | 自定义该 node 的启动判断 | 与普通实例的 `readiness` 格式相同。 |
 
@@ -581,7 +690,9 @@ deployment:
     └── node-1
 ```
 
-ranktable 以逻辑实例为组分别处理。上例只给 `prefill-0` 和 `decode-0` 自动生成并合并 ranktable；单 node 的 `prefill-1` 跳过自动生成。P/D 各组之间不合并。
+ranktable 以逻辑实例为组分别处理。一个逻辑组内即使多个 node 位于同一物理 host，也会按 host 合并成一个 server 条目并保留各 node 的 rank。上例只给 `prefill-0` 和 `decode-0` 自动生成 ranktable；单 node 的 `prefill-1` 跳过自动生成。P/D 各组之间不合并。
+
+同一物理 host 上所有 runtime 的 `device_ids`、xLLM 监听端口段和 PD transfer 端口都必须互不重叠；`pd_control` 的 etcd、HTTP、RPC 端口也会参与冲突检查。多个 P/D 逻辑组共机的完整写法见 `20_pd_samehost_multi_instance_perf.yaml`。
 
 `startup_policy` 虽然在部分历史 YAML 中出现，但当前调度代码始终并行启动所有实例，它暂时不能真正切换串行/并行策略。新用例不需要依赖这个字段。
 
@@ -841,7 +952,7 @@ P/D 实例个数、每个实例的 node 数、每个 node 的卡数可以搜索�
 python main.py --case_name 01_single_aisbench_perf --host_addr 11.87.191.75
 ```
 
-多机普通用例的 IP 已经写在 YAML 中，不要用 `--host_addr` 试图整体替换多机拓扑：
+多机普通用例的 IP 已经写在 YAML 中、需要编译yaml修改，不要用 `--host_addr` 试图整体替换多机拓扑：
 
 ```bash
 python main.py --case_name 05_multihost_aisbench_perf
@@ -866,8 +977,9 @@ python main.py --case_group 11_single_para_set_tpe \
 
 - 先确认 `metrics`、`benchmark_type` 和对应的 `perf/acc` 块一致。
 - 确认模型路径在所有服务节点存在，数据资源路径在 benchmark runner 可见。
-- 单机只有一个 instance；普通多机用 `instances`；PD 只用 `pd_instances`。
+- 单机通常只有一个 instance；普通部署用 `instances`，可跨 host 或在同一 host 拆成多个小 runtime；PD 只用 `pd_instances`。
 - 多机每个 host 的 SSH、容器运行环境、NPU 卡号和端口都可用。
+- 同一 host 上检查 `device_ids`、`local_port` 端口段、HCCL/协调端口和 PD transfer 端口没有冲突。
 - 非 PD 多机的 `rank_start` 要按全局卡数累计；PD 可按逻辑实例分别累计或省略让框架计算。
 - 搜索路径必须指向 YAML 中已经存在的字段；不要使用 `nodes[0]`、`device_ids[0]` 这种通用列表路径。
 - `para_set` 的 case group 内不要混用 exhaustive 和 TPE；每个组合的完整配置会保存在输出目录，旧用例不会被改写。

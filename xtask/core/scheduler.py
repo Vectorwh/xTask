@@ -86,6 +86,7 @@ class Json_Reader:
                 "ENABLE_PROXY": cfg_data.get("enable_proxy", "False"),
                 "https_proxy": cfg_data.get("https_proxy_url", ""),
                 "http_proxy": cfg_data.get("http_proxy_url", ""),
+                "no_proxy": cfg_data.get("no_proxy", "localhost,127.0.0.1,0.0.0.0,11.87.0.0/16,::1"),
                 "WORKING_DIR": "/workspace"
             },
             "serving_container_name": cfg_data.get("serving_container_name", ""),
@@ -255,6 +256,8 @@ class ContainerConfigBuilder:
             entrypoint=engine_config.get("entrypoint"),
             command=engine_config.get("command"),
             network_mode=engine_config.get("network_mode", "host"),
+            ipc_mode=task_config.get("ipc_mode", engine_config.get("ipc_mode")),
+            shm_size=task_config.get("shm_size", engine_config.get("shm_size")),
             privileged=engine_config.get("privileged", True),
             auto_remove=engine_config.get("auto_remove", False),
             detach=True,
@@ -1289,6 +1292,9 @@ def _load_task_and_engine(context):
                 for instance in (task_config.get("deployment", {}).get("instances") or [])
             )
         ),
+        service_routed=(
+            task_config.get("deployment", {}).get("mode") == "service_routed"
+        ),
     )
     if multi_host and not service_plans:
         _fail_stage(
@@ -1493,6 +1499,36 @@ def _prepare_container_multi_host(context):
     state["init_entries"] = os.listdir(context.output_file_path)
 
 
+def _uses_xllm_control_service(task_config):
+    deployment = task_config.get("deployment") or {}
+    mode = deployment.get("mode")
+    if mode in {"pd_disaggregated", "service_routed"}:
+        return True
+    return any(
+        str(instance.get("role", "")).lower() in {"prefill", "decode"}
+        for instance in (deployment.get("instances") or [])
+    )
+
+
+def _xllm_control_host(task_config):
+    if not _uses_xllm_control_service(task_config):
+        return None
+    deployment = task_config.get("deployment") or {}
+    control_key = (
+        "service_control"
+        if deployment.get("mode") == "service_routed"
+        else "pd_control"
+    )
+    control = deployment.get(control_key) or {}
+    host = control.get("host") or deployment.get("master_host")
+    return str(host) if host else None
+
+
+def _download_xllm_command(install_service):
+    value = 1 if install_service else 0
+    return f"XLLM_INSTALL_SERVICE={value} bash /workspace/tools/download_xllm.sh;"
+
+
 def _prepare_runtime_dependencies(context):
     state = context.state
     if state.get("multi_host"):
@@ -1505,11 +1541,17 @@ def _prepare_runtime_dependencies(context):
     container_manager = state["container_manager"]
     timeout = engine_config.get("startup_timeout", 300)
 
-    compilation_cmd = "bash /workspace/tools/download_xllm.sh;"
+    compilation_cmd = _download_xllm_command(
+        _uses_xllm_control_service(task_config)
+    )
     logging.info(f"Starting the compilation task: {compilation_cmd}")
-    container_manager.exec_in_container(
+    download_result = container_manager.exec_in_container(
         container_config.container_name, compilation_cmd, timeout=timeout
     )
+    if not download_result.success:
+        detail = download_result.stderr or download_result.stdout or "unknown error"
+        _fail_stage(context, f"download_xllm failed: {detail}")
+        return
 
     benchmark_type = task_config.get("benchmark").get("benchmark_type")
     if benchmark_type == "aisbench":
@@ -1574,6 +1616,24 @@ def _prepare_runtime_dependencies_multi_host(context):
     plans = state.get("service_plans") or []
     timeout = engine_config.get("startup_timeout", 300)
 
+    control_runtime = None
+    if _uses_xllm_control_service(task_config):
+        control_host = _xllm_control_host(task_config)
+        control_runtime = next(
+            (
+                runtime
+                for runtime in runtimes
+                if str(runtime.plan.host) == str(control_host)
+            ),
+            None,
+        )
+        if control_runtime is None:
+            _fail_stage(
+                context,
+                f"xLLM control host {control_host!r} has no service runtime",
+            )
+            return
+
     # Auto-generate / merge / inject HCCL ranktables before downloading deps.
     # Workspace is already synced and containers are up; scripts may still lack path.
     try:
@@ -1628,8 +1688,9 @@ def _prepare_runtime_dependencies_multi_host(context):
             runtime.plan.instance_name,
             runtime.plan.host,
         )
+        download_cmd = _download_xllm_command(runtime is control_runtime)
         result = manager.exec_in_container(
-            name, "bash /workspace/tools/download_xllm.sh;", timeout=timeout
+            name, download_cmd, timeout=timeout
         )
         if not result.success:
             raise RuntimeError(
@@ -1654,7 +1715,26 @@ def _prepare_runtime_dependencies_multi_host(context):
             )
         return True
 
-    outcomes = run_on_runtimes_parallel(runtimes, _prepare_one)
+    # Containers on one physical host share the bind-mounted /workspace. Run
+    # dependency preparation serially per host so download/extract operations
+    # cannot race, while different hosts still prepare in parallel.
+    runtimes_by_host = {}
+    for runtime in runtimes:
+        runtimes_by_host.setdefault(str(runtime.plan.host), []).append(runtime)
+
+    host_representatives = [members[0] for members in runtimes_by_host.values()]
+
+    def _prepare_host(representative):
+        for runtime in runtimes_by_host[str(representative.plan.host)]:
+            try:
+                _prepare_one(runtime)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{runtime.plan.instance_name}: {exc}"
+                ) from exc
+        return True
+
+    outcomes = run_on_runtimes_parallel(host_representatives, _prepare_host)
     for runtime, _ok, exc in outcomes:
         if exc is not None:
             _fail_stage(
@@ -1758,14 +1838,15 @@ def _wait_instance_ready(runtime, serving_wait_time, engine):
     keywords = readiness.get("success_keywords")
     if keywords is None:
         is_pd_instance = bool(plan.instance_config.get("enable_disagg_pd"))
-        group_master_host = str(
-            plan.instance_config.get("master_host") or plan.host
+        is_routed_instance = bool(
+            plan.instance_config.get("enable_service_routing")
         )
-        is_pd_group_master = (
-            not is_pd_instance or str(plan.host) == group_master_host
-        )
-        if is_pd_instance and not is_pd_group_master:
-            # A multi-node P/D instance registers only once, from its group
+        # A routed logical group's service owner is its rank-0 runtime. Host
+        # comparison is insufficient because multiple nodes may share one host.
+        is_grouped_service = is_pd_instance or is_routed_instance
+        is_group_master = not is_grouped_service or plan.rank_start == 0
+        if is_grouped_service and not is_group_master:
+            # A multi-node logical instance registers once from its group
             # master. Other nodes are distributed workers and never emit the
             # service registration/BRPC readiness keywords.
             result = runtime.container_manager.exec_in_container(
@@ -1774,9 +1855,7 @@ def _wait_instance_ready(runtime, serving_wait_time, engine):
                 timeout=30,
             )
             return result.success
-        if role in {"master", "standalone", "prefill"} or (
-            is_pd_instance and role == "decode"
-        ):
+        if role in {"master", "standalone", "prefill"} or is_grouped_service:
             keywords = [
                 "Brpc Server started on port",
                 "Success register instance to etcd",
@@ -1790,13 +1869,17 @@ def _wait_instance_ready(runtime, serving_wait_time, engine):
             keywords = ["DistributeWorker server started"]
 
     if engine == "xllm":
-        if not plan.is_local:
+        poll_in_container = not plan.is_local or getattr(
+            plan, "isolate_ipc", False
+        )
+        if poll_in_container:
             from xtask.utils.container_manager import path_mapping_in_container
 
             keyword_pattern = "|".join(keywords)
-            # Logs are written under the container mount (/workspace/...), not the
-            # host absolute path. Grep must use the in-container path.
-            remote_log_file = path_mapping_in_container(
+            # Colocated local runtimes also poll inside their own containers.
+            # Concurrent host-side watchdog processes share global state and can
+            # miss readiness events from sibling runtimes.
+            container_log_file = path_mapping_in_container(
                 os.path.join(plan.output_dir, "log", "node_0.log")
             )
             ready_timeout = int(
@@ -1814,10 +1897,10 @@ def _wait_instance_ready(runtime, serving_wait_time, engine):
             wait_body = (
                 "for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do "
                 f"grep -Eq {shlex.quote(keyword_pattern)} "
-                f"{shlex.quote(remote_log_file)} 2>/dev/null && exit 0; "
+                f"{shlex.quote(container_log_file)} 2>/dev/null && exit 0; "
                 "sleep 1; done; "
                 f"while ! grep -Eq {shlex.quote(keyword_pattern)} "
-                f"{shlex.quote(remote_log_file)} 2>/dev/null; do "
+                f"{shlex.quote(container_log_file)} 2>/dev/null; do "
                 f"{process_probe} || exit 1; sleep 1; done"
             )
             command = wait_body
@@ -1859,40 +1942,49 @@ def _start_and_wait_service_multi_host(context):
 
     state = context.state
     task_config = state["task_config"]
-    if state.get("pd_disaggregated"):
+    if state.get("pd_disaggregated") or state.get("service_routed"):
         from xtask.core.pd_control_service import (
-            PdControlService,
+            XllmControlService,
             build_pd_control_config,
+            build_service_control_config,
         )
 
-        pd_control_config = build_pd_control_config(task_config)
+        control_config = (
+            build_pd_control_config(task_config)
+            if state.get("pd_disaggregated")
+            else build_service_control_config(task_config)
+        )
         control_runtime = next(
             (
                 runtime
                 for runtime in state.get("service_runtimes") or []
-                if runtime.plan.host == pd_control_config.host
+                if str(runtime.plan.host) == str(control_config.host)
             ),
             None,
         )
         if control_runtime is None:
             _fail_stage(
                 context,
-                f"PD control host {pd_control_config.host} has no service runtime",
+                f"xLLM control host {control_config.host} has no service runtime",
             )
             return
-        control_service = PdControlService(
+        control_service = XllmControlService(
             control_runtime,
-            pd_control_config,
+            control_config,
             task_config.get("model_path", ""),
             context.output_file_path,
         )
         try:
             control_service.start_with_retry()
         except Exception as exc:
-            _fail_stage(context, f"PD control service startup failed: {exc}")
-            state["pd_control_service"] = control_service
+            _fail_stage(context, f"xLLM control service startup failed: {exc}")
+            state["xllm_control_service"] = control_service
+            if state.get("pd_disaggregated"):
+                state["pd_control_service"] = control_service
             return
-        state["pd_control_service"] = control_service
+        state["xllm_control_service"] = control_service
+        if state.get("pd_disaggregated"):
+            state["pd_control_service"] = control_service
     engine_config = state["engine_config"]
     runtimes = state.get("service_runtimes") or []
     serving_wait_time = (
@@ -1968,18 +2060,18 @@ def _start_and_wait_service_multi_host(context):
             state["service_healthy"] = False
             return
 
-    # In PD disaggregated mode, xllm_master_serving only opens its HTTP port
-    # after both Prefill and Decode have registered with etcd. Wait for it
-    # before the unified health check, otherwise the benchmark endpoint is
-    # not ready even though the instances appear healthy.
-    pd_control_service = state.get("pd_control_service")
-    if pd_control_service is not None:
-        if not pd_control_service.wait_for_http_endpoint(timeout=90):
+    # The unified xllm-service endpoint may open only after routed instances
+    # register with etcd. Wait for it before the endpoint health check.
+    control_service = state.get("xllm_control_service") or state.get(
+        "pd_control_service"
+    )
+    if control_service is not None:
+        if not control_service.wait_for_http_endpoint(timeout=90):
             _fail_stage(
                 context,
-                f"PD control HTTP endpoint did not open at "
-                f"http://{pd_control_service.config.host}:"
-                f"{pd_control_service.config.http_server_port}/health",
+                f"xLLM control HTTP endpoint did not open at "
+                f"http://{control_service.config.host}:"
+                f"{control_service.config.http_server_port}/health",
             )
             state["service_healthy"] = False
             return
@@ -2385,8 +2477,13 @@ def _cleanup_scheduler(context):
     )
     if context.state.get("multi_host"):
         runtimes = context.state.get("service_runtimes") or []
-        snapshots = _freeze_service_group_logs(runtimes)
-        pd_control_service = context.state.get("pd_control_service")
+        # Snapshot/separate shutdown logs only when the runtime will actually
+        # be stopped.  In keep-alive mode, separating logs would remove the
+        # live log directory from underneath still-running xLLM processes.
+        snapshots = _freeze_service_group_logs(runtimes) if should_clean else {}
+        control_service = context.state.get("xllm_control_service") or (
+            context.state.get("pd_control_service")
+        )
         deployment = context.state.get("task_config", {}).get("deployment") or {}
         try:
             shutdown_grace_s = max(
@@ -2401,16 +2498,19 @@ def _cleanup_scheduler(context):
         except (TypeError, ValueError):
             pd_stop_timeout = 5
         try:
-            if pd_control_service is not None:
-                # Stop P/D data-plane fully before etcd/xllm-service, otherwise
-                # Prefill/Decode keep retrying heartbeat/etcd and flood node_0.log.
+            if should_clean and control_service is not None:
+                # Stop routed data-plane processes before etcd/xllm-service,
+                # otherwise instances keep retrying heartbeat/etcd during cleanup.
+                # CLEAN_RESULTS=false deliberately leaves the complete runtime
+                # (xLLM, xLLM-Service, ETCD and the containers) available.
                 _wait_xllm_processes_exit(runtimes, grace_s=shutdown_grace_s)
                 try:
-                    pd_control_service.stop()
+                    control_service.stop()
                 except Exception:
-                    logging.error("Failed to stop PD control service", exc_info=True)
+                    logging.error("Failed to stop xLLM control service", exc_info=True)
         finally:
-            _separate_shutdown_logs(runtimes, snapshots)
+            if should_clean:
+                _separate_shutdown_logs(runtimes, snapshots)
             for benchmarkpath in context.state.get(
                 "service_group_archive_paths", []
             ):
@@ -2419,7 +2519,7 @@ def _cleanup_scheduler(context):
                     context.output_file_path,
                     benchmarkpath,
                 )
-        if pd_control_service is not None:
+        if control_service is not None:
             cleanup_service_group(
                 runtimes, should_clean, stop_timeout=pd_stop_timeout
             )

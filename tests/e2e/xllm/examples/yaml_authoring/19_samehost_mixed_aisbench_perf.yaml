@@ -1,0 +1,59 @@
+case_name: 19_samehost_mixed_aisbench_perf
+engine_type: xllm
+model_path: /export/home/models/Qwen3-8B
+served_model_name: Qwen3-8B
+metrics: perf
+dataset_name: gsm8k
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    case_type: performance
+    api_type: vllm_api_general_stream
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    input_len: 1024
+    output_len: 256
+    max_out_len: 256
+    batch_size: 1
+    request_rate: 1
+    num_prompts: 4
+    num_warmups: 2
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: true
+
+deployment:
+  master_host: 11.87.191.75
+  sync_workspace: true
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [8, 9]
+    local_port: 8800
+    hccl_if_port: 43439
+    progress_conn_port: 9590
+    serving_extensiable_param: &service_params
+      max_memory_utilization: 0.85
+      max_seqs_per_batch: 10
+      enable_shm: true
+      dp_size: 1
+      enable_graph: false
+  - name: worker-0
+    host: 11.87.191.75
+    role: worker
+    rank_start: 2
+    device_ids: [10, 11]
+    local_port: 8810
+    hccl_if_port: 43539
+    progress_conn_port: 9590
+    serving_extensiable_param: *service_params

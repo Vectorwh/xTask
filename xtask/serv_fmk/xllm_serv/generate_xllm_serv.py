@@ -57,8 +57,11 @@ def _build_script_params(config):
     rank_start = int(config.get('rank_start', 0) or 0)
     pd_role = str(config.get("pd_role", config.get("role", ""))).upper()
     pd_enabled = bool(config.get("enable_disagg_pd", False))
+    service_routing = bool(config.get("enable_service_routing", False))
     pd_master_host = config.get("pd_master_host") or master_host
     pd_etcd_port = int(config.get("pd_etcd_port", 3389) or 3389)
+    service_control_host = config.get("service_control_host") or master_host
+    service_etcd_port = int(config.get("service_etcd_port", 3389) or 3389)
 
     return {
         'LOCAL_IP': local_ip,
@@ -81,6 +84,12 @@ def _build_script_params(config):
         'PD_MASTER_HOST': pd_master_host,
         'PD_ETCD_ADDR': f"{pd_master_host}:{pd_etcd_port}",
         'PD_NO_PROXY': config.get("pd_no_proxy", "localhost,127.0.0.1,0.0.0.0"),
+        'SERVICE_ROUTING': "true" if service_routing else "false",
+        'SERVICE_CONTROL_HOST': service_control_host,
+        'SERVICE_ETCD_ADDR': f"{service_control_host}:{service_etcd_port}",
+        'SERVICE_NO_PROXY': config.get(
+            "service_no_proxy", "localhost,127.0.0.1,0.0.0.0"
+        ),
         'LOG_DIR': 'log',
         'COMMUNICATION_BACKEND': config.get('communication_backend', 'hccl'),
         'DP_SIZE': config.get("dp_size", ""),
@@ -141,10 +150,13 @@ def generate_xllm_script(config, output_file_path: str, output_file="xllm_serv_s
     extense_str = ""
     extense_para = config.get("serving_extensiable_param", {}) or {}
     pd_enabled = bool(config.get("enable_disagg_pd", False))
+    service_routing = bool(config.get("enable_service_routing", False))
     pd_role = str(config.get("pd_role", config.get("role", ""))).upper()
     pd_master_host = config.get("pd_master_host") or config.get("master_host")
     pd_etcd_port = int(config.get("pd_etcd_port", 3389) or 3389)
     transfer_port_base = int(config.get("transfer_port_base", 26000) or 26000)
+    disagg_pd_port = int(config.get("disagg_pd_port", 7777) or 7777)
+    rank_start = int(params["RANK_START"])
     match_str = re.search(r'\n( *)\$SERVING_EXTENSIABLE_PARAM\n', script_content)
     space_str = match_str.group(1) if match_str else ""
     for key, value in extense_para.items():
@@ -155,13 +167,20 @@ def generate_xllm_script(config, output_file_path: str, output_file="xllm_serv_s
             f"--instance_role={pd_role}",
             f"--etcd_addr={pd_master_host}:{pd_etcd_port}",
             (
-                f"--transfer_listen_port=$(({transfer_port_base}+i))"
+                f"--transfer_listen_port=$(({transfer_port_base}+{rank_start}+i))"
                 if template_name == "xllm_mutil_cards_template.sh"
-                else f"--transfer_listen_port={transfer_port_base}"
+                else f"--transfer_listen_port={transfer_port_base + rank_start}"
             ),
-            "--disagg_pd_port=7777",
+            f"--disagg_pd_port={disagg_pd_port}",
         ]
         for parameter in pd_parameters:
+            extense_str += f"{space_str}{parameter} \\\n"
+    elif service_routing:
+        service_parameters = [
+            "--enable_service_routing=true",
+            f"--etcd_addr={config.get('service_control_host') or config.get('master_host')}:{int(config.get('service_etcd_port', 3389) or 3389)}",
+        ]
+        for parameter in service_parameters:
             extense_str += f"{space_str}{parameter} \\\n"
     script_content = script_content.replace(
         f"{space_str}$SERVING_EXTENSIABLE_PARAM\n", extense_str
@@ -244,6 +263,24 @@ def wait_xllm_serv_start(task_config, serving_wait_time, output_file_path: str,
         log_file = os.path.join(output_file_path, "log/node_0.log")
     if success_keywords is None:
         success_keywords = ["Brpc Server started on port", "服务启动完成"]
+
+    # A fast local runtime can write its readiness line before the watchdog
+    # process starts tailing the log.  Accept an already-present success line
+    # first; otherwise the watchdog waits for its full timeout despite a
+    # healthy service.  The scheduler clears each runtime log before launch,
+    # so this cannot reuse a previous trial's readiness state.
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="ignore") as log_stream:
+            existing_log = log_stream.read()
+        if any(keyword in existing_log for keyword in success_keywords):
+            logging.info(
+                "xLLM service readiness already present in %s", log_file
+            )
+            return True
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logging.debug("Unable to pre-check xLLM readiness log %s: %s", log_file, exc)
 
     device_ids = _resolve_device_ids(task_config)
     # Large multi-host models (e.g. DeepSeek 16+16) need longer than default 300s.

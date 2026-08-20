@@ -22,8 +22,11 @@ _generated_ranktable_*.json
 _tmp_ranktable_*.json
 
 # Locally downloaded or unpacked build dependencies
+/xllm-service/
 pkg/xllm/vendors/
 pkg/xllm/*.whl
+pkg/xllm/service_binary/current
+pkg/xllm/service_binary/releases/
 *.rpm
 *.whl
 .joycode

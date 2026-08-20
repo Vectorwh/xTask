@@ -138,25 +138,46 @@ class DownloadXllmScriptTests(unittest.TestCase):
             self.script,
         )
 
+    def test_service_install_can_be_disabled_per_runtime(self):
+        self.assertIn(
+            'XLLM_INSTALL_SERVICE="${XLLM_INSTALL_SERVICE:-1}"', self.script
+        )
+        self.assertIn('case "$XLLM_INSTALL_SERVICE" in', self.script)
+        self.assertIn('if [ "$XLLM_INSTALL_SERVICE" -eq 1 ]; then', self.script)
+        self.assertIn(
+            "跳过 xllm_master_serving 和 ETCD 安装", self.script
+        )
+
     def test_service_binary_lookup_does_not_require_the_directory(self):
         self.assertNotIn('cd "$XLLM_PKG_DIR"/service_binary', self.script)
         self.assertIn(
-            '[ -f "$XLLM_SERVICE_BINARY_DIR/etcd" ]', self.script
+            'XLLM_SERVICE_CURRENT_DIR="$XLLM_SERVICE_BINARY_DIR/current"',
+            self.script,
         )
         self.assertIn(
-            '"$XLLM_SERVICE_BINARY_DIR/xllm_master_serving"', self.script
+            '[ -f "$XLLM_SERVICE_CURRENT_DIR/xllm_master_serving" ]',
+            self.script,
+        )
+        self.assertIn(
+            '[ -f "$XLLM_SERVICE_CURRENT_DIR/librust_tokenizers.so" ]',
+            self.script,
+        )
+        self.assertIn(
+            '[ -f "$XLLM_SERVICE_BINARY_DIR/etcd" ]', self.script
         )
 
     def test_service_binary_fallback_prepares_and_validates_pack(self):
         fallback_start = self.script.index(
-            'echo "service_binary下未找到二进制文件，使用wget的二进制。"'
+            'echo "service_binary下未找到本地etcd/etcdctl。"'
         )
         fallback = self.script[fallback_start:]
         self.assertIn('ensure_xllm_pack', fallback)
         self.assertIn(
-            'for binary in etcd etcdctl xllm_master_serving', fallback
+            'for binary in etcd etcdctl', fallback
         )
         self.assertIn('[ ! -f "$XLLM_PACK_DIR/$binary" ]', fallback)
+        self.assertIn('LOCAL_ETCD_READY=0', self.script)
+        self.assertIn('if [ -z "$SERVICE_RUNTIME_DIR" ]; then', fallback)
 
 
 class BuildXllmInContainerScriptTests(unittest.TestCase):
@@ -195,6 +216,60 @@ class BuildXllmInContainerScriptTests(unittest.TestCase):
         self.assertIn(replace, self.script)
         self.assertLess(self.script.index(stage), self.script.index(cleanup))
         self.assertLess(self.script.index(cleanup), self.script.index(replace))
+
+
+class BuildXllmServiceScriptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.outer_script = (root / "tools" / "prepare_xllm_service.sh").read_text(
+            encoding="utf-8"
+        )
+        cls.inner_script = (
+            root / "tools" / "build_xllm_service_in_container.sh"
+        ).read_text(encoding="utf-8")
+
+    def test_service_build_is_separate_from_xllm_build(self):
+        self.assertIn("XLLM_SERVICE_SOURCE_DIR", self.outer_script)
+        self.assertIn("docker run", self.outer_script)
+        self.assertIn("submodule update --init", self.outer_script)
+        self.assertNotIn("submodule update --init --recursive", self.outer_script)
+        self.assertIn("REQUIRED_SOURCE_FILES", self.outer_script)
+        self.assertIn("third_party/etcd_cpp_apiv3/CMakeLists.txt", self.outer_script)
+        self.assertNotIn('bash "${SCRIPT_DIR}/prepare_xllm.sh"', self.outer_script)
+
+    def test_service_build_applies_patch_and_builds_only_master_target(self):
+        self.assertIn("bash prepare.sh", self.inner_script)
+        self.assertIn("cmake -S", self.inner_script)
+        self.assertIn("--target xllm_master_serving", self.inner_script)
+        self.assertIn("librust_tokenizers.so", self.inner_script)
+        self.assertIn("VCPKG_INSTALL_ROOT", self.inner_script)
+        self.assertIn("boost-locale boost-interprocess zlib", self.inner_script)
+        self.assertIn('CXX_STANDARD="${XLLM_SERVICE_CXX_STANDARD:-20}"', self.inner_script)
+        self.assertIn("CMAKE_PROJECT_xllm_service_INCLUDE", self.inner_script)
+        self.assertIn("-DWERROR=OFF", self.inner_script)
+        self.assertIn("trap restore_host_ownership EXIT", self.inner_script)
+
+    def test_service_archive_is_versioned_and_atomic(self):
+        self.assertIn(
+            'SERVICE_ARCHIVE_DIR="${XLLM_PKG_DIR}/service_binary"',
+            self.inner_script,
+        )
+        self.assertIn(
+            'SERVICE_ARCHIVE_DIR}/releases/${RELEASE_ID}',
+            self.inner_script,
+        )
+        self.assertIn(
+            'TMP_LINK="${SERVICE_ARCHIVE_DIR}/.current-${RELEASE_ID}.tmp"',
+            self.inner_script,
+        )
+        self.assertIn('mv -Tf "${TMP_LINK}" "${CURRENT_LINK}"', self.inner_script)
+        self.assertIn("xllm_submodule_commit", self.inner_script)
+
+    def test_service_does_not_claim_to_build_etcd(self):
+        self.assertIn("etcd/etcdctl", self.inner_script)
+        self.assertIn("independent", self.inner_script)
+        self.assertNotIn("make etcd", self.inner_script)
 
 
 if __name__ == "__main__":
