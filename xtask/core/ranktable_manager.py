@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from xtask.core.service_group import (
     ServiceLaunchPlan,
     is_multi_host_deployment,
+    is_service_routed_deployment,
     normalize_pd_deployment,
 )
 from xtask.utils.container_manager import path_mapping_in_container
@@ -48,6 +50,8 @@ def _group_key_for_plan(plan: ServiceLaunchPlan, task_config: Dict[str, Any]) ->
     if instance_meta:
         if instance_meta.get("pd_group"):
             return str(instance_meta["pd_group"])
+        if instance_meta.get("service_group"):
+            return str(instance_meta["service_group"])
     if _is_pd_mode(task_config):
         raise ValueError(
             f"PD runtime instance {plan.instance_name!r} is missing pd_group; "
@@ -63,6 +67,7 @@ def group_instances_for_ranktable(
     """Group service plans for ranktable generation.
 
     - Non-PD multi-host: one group ``default`` with all instances.
+    - Service-routed: one group per independent ordinary service instance.
     - PD: group by the logical ``pd_group`` generated from ``pd_instances[].name``.
       A logical group maps to one P/D instance; its members are physical nodes.
     """
@@ -74,8 +79,13 @@ def group_instances_for_ranktable(
 
     groups: Dict[str, List[ServiceLaunchPlan]] = {}
     pd = _is_pd_mode(task_config)
+    service_routed = is_service_routed_deployment(task_config)
     for plan in plans:
-        key = _group_key_for_plan(plan, task_config) if pd else "default"
+        key = (
+            _group_key_for_plan(plan, task_config)
+            if (pd or service_routed)
+            else "default"
+        )
         groups.setdefault(key, []).append(plan)
 
     # Stable order within each group: rank_start, then original plan order.
@@ -268,29 +278,64 @@ def generate_and_merge_for_group(
         runtime.plan.instance_name: runtime for runtime in (runtimes or [])
     }
 
-    host_tables = []
+    members_by_host: Dict[str, List[ServiceLaunchPlan]] = {}
     for plan in members:
+        members_by_host.setdefault(str(plan.host), []).append(plan)
+
+    host_tables = []
+    for host_members in members_by_host.values():
+        representative = host_members[0]
+        device_ids = [
+            device_id
+            for member in host_members
+            for device_id in member.device_ids
+        ]
+        aggregate_plan = replace(representative, device_ids=device_ids)
         local_json = _remote_generate_host_table(
-            plan,
+            aggregate_plan,
             root,
             staging,
-            runtime=runtime_by_name.get(plan.instance_name),
+            runtime=runtime_by_name.get(representative.instance_name),
         )
-        host_tables.append(load_ranktable(local_json))
+        host_table = load_ranktable(local_json)
+        rank_by_device = {
+            int(device_id): member.rank_start + local_index
+            for member in host_members
+            for local_index, device_id in enumerate(member.device_ids)
+        }
+        generated_devices = [
+            device
+            for server in host_table.get("server_list") or []
+            for device in server.get("device") or []
+        ]
+        generated_ids = {int(device["device_id"]) for device in generated_devices}
+        if generated_ids != set(rank_by_device):
+            raise RanktableError(
+                f"generated ranktable devices for host {representative.host} "
+                f"do not match deployment: generated={sorted(generated_ids)}, "
+                f"expected={sorted(rank_by_device)}"
+            )
+        for device in generated_devices:
+            device["rank_id"] = str(rank_by_device[int(device["device_id"])])
+        host_tables.append(host_table)
 
-    merged = merge_ranktables(host_tables)
+    merged = merge_ranktables(host_tables, preserve_rank_ids=True)
     safe_name = group_name.replace("/", "_").replace(" ", "_") or "default"
     host_path = os.path.join(output_dir, f"{safe_name}_merged.json")
     write_ranktable(host_path, merged)
     logging.info(
         "Merged ranktable for group %s (%d hosts) -> %s",
         group_name,
-        len(members),
+        len(members_by_host),
         host_path,
     )
 
     # Ensure parent exists on each host, then upload (skip no-op on control host).
+    uploaded_hosts = set()
     for plan in members:
+        if plan.host in uploaded_hosts:
+            continue
+        uploaded_hosts.add(plan.host)
         if is_local_host(plan.host) and os.path.isfile(host_path):
             continue
         executor = create_host_executor(plan.host)

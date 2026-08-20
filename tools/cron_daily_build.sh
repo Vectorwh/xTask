@@ -1,14 +1,15 @@
 #!/bin/bash
 # 定时任务包装脚本：由 crontab 调用，负责日志记录、并发锁、分段任务编排。
-# 支持两个分段任务（stage），按入参顺序依次执行：
+# 支持 build、service_build、test 三个分段任务，按入参顺序依次执行：
 #   build : 编译 xllm，即执行 prepare_xllm.sh
+#   service_build : 编译并归档 xLLM-Service，即执行 prepare_xllm_service.sh
 #   test  : 运行用例测试，即执行 python main.py
 #
 # 用法：
 #   bash tools/cron_daily_build.sh                 # 不带参数：默认依次执行 build test
 #   bash tools/cron_daily_build.sh build           # 只编译
 #   bash tools/cron_daily_build.sh test            # 只测试
-#   bash tools/cron_daily_build.sh build test      # 先编译后测试（按入参顺序执行）
+#   bash tools/cron_daily_build.sh build service_build test  # 编译 xLLM、Service 后测试
 #   bash tools/cron_daily_build.sh test build      # 也可调整顺序
 #
 # test 阶段传给 main.py 的参数通过环境变量 MAIN_ARGS 指定（默认按用例组执行）：
@@ -33,6 +34,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PREPARE_SCRIPT="${SCRIPT_DIR}/prepare_xllm.sh"
+PREPARE_SERVICE_SCRIPT="${SCRIPT_DIR}/prepare_xllm_service.sh"
 MAIN_PY="${PROJECT_ROOT}/main.py"
 
 # test 阶段 python 解释器与 main.py 参数（可用环境变量覆）
@@ -60,6 +62,7 @@ mkdir -p "${LOG_DIR}"
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="${LOG_DIR}/case_framework_${TS}.log"
 BUILD_LOG="${LOG_DIR}/build_${TS}.log"
+SERVICE_BUILD_LOG="${LOG_DIR}/service_build_${TS}.log"
 
 # outputs/ 下始终指向最新一次运行的软链接，方便直接 tail -f，无需查时间戳
 # 使用相对路径 log/xxx，保证移动 outputs 目录后软链仍有效
@@ -79,6 +82,16 @@ run_build() {
   fi
   log "[stage:build] running: bash ${PREPARE_SCRIPT}  (log: ${BUILD_LOG})"
   bash "${PREPARE_SCRIPT}" 2>&1 | tee "${BUILD_LOG}"
+  return "${PIPESTATUS[0]}"
+}
+
+run_service_build() {
+  if [[ ! -f "${PREPARE_SERVICE_SCRIPT}" ]]; then
+    log "ERROR: '${PREPARE_SERVICE_SCRIPT}' not found."
+    return 1
+  fi
+  log "[stage:service_build] running: bash ${PREPARE_SERVICE_SCRIPT}  (log: ${SERVICE_BUILD_LOG})"
+  bash "${PREPARE_SERVICE_SCRIPT}" 2>&1 | tee "${SERVICE_BUILD_LOG}"
   return "${PIPESTATUS[0]}"
 }
 
@@ -159,9 +172,10 @@ run_test() {
   for stage in "${STAGES[@]}"; do
     case "${stage}" in
       build) run_build ;;
+      service_build) run_service_build ;;
       test)  run_test ;;
       *)
-        log "ERROR: unknown stage '${stage}' (allowed: build test)."
+        log "ERROR: unknown stage '${stage}' (allowed: build service_build test)."
         OVERALL_RC=2
         break
         ;;

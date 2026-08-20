@@ -60,6 +60,9 @@ mkdir -p $LOG_DIR
 if [ "{PD_ENABLED}" = "true" ]; then
   export no_proxy="{PD_NO_PROXY}"
   export NO_PROXY="$no_proxy"
+elif [ "{SERVICE_ROUTING}" = "true" ]; then
+  export no_proxy="{SERVICE_NO_PROXY}"
+  export NO_PROXY="$no_proxy"
 fi
 # ========================================
 

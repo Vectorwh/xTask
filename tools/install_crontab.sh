@@ -1,11 +1,12 @@
 #!/bin/bash
 # 一键安装/更新 xllm 每日定时任务到当前用户的 crontab。
-# 定时任务实际调用 cron_daily_build.sh，可指定要依次执行的分段任务（build/test）。
+# 定时任务实际调用 cron_daily_build.sh，可指定要依次执行的分段任务（build/service_build/test）。
 #
 # 用法：
 #   bash tools/install_crontab.sh                       # 默认每天 02:00 执行 build + test
 #   STAGES="build" bash tools/install_crontab.sh        # 只编译
 #   STAGES="build test" bash tools/install_crontab.sh   # 先编译后测试
+#   STAGES="build service_build test" bash tools/install_crontab.sh  # 编译 xLLM 与 Service 后测试
 #   CRON_TIME="30 3 * * *" bash tools/install_crontab.sh            # 自定义时间
 #   MAIN_ARGS="--case_group base_case_group" bash tools/install_crontab.sh   # 指定 main.py 参数
 #   # 定时依次执行多组用例（分号分隔，每组各跑一次 main.py）：
@@ -78,3 +79,4 @@ echo
 echo "查看当前 crontab： ${CRONTAB_CMD} -l"
 echo "框架日志（run+test）：${SCRIPT_DIR}/../outputs/case_framework.log"
 echo "编译日志：           ${SCRIPT_DIR}/../outputs/build.log"
+echo "Service编译日志：    ${SCRIPT_DIR}/../outputs/log/service_build_*.log"

@@ -226,10 +226,13 @@ def merge_ranktables(
     host_tables: Sequence[dict],
     *,
     super_pod_id: Optional[str] = None,
+    preserve_rank_ids: bool = False,
 ) -> dict:
     """Merge single-host ranktables into one interconnected multi-host table.
 
-    rank_id is renumbered globally in server_list order; device_id stays local.
+    By default rank_id is renumbered globally in server_list order. Set
+    ``preserve_rank_ids`` when callers have already assigned topology ranks.
+    device_id always stays local to its physical host.
     """
     if not host_tables:
         raise RanktableError("merge_ranktables requires at least one host table")
@@ -253,12 +256,36 @@ def merge_ranktables(
             devices = []
             for device in server_copy.get("device") or []:
                 device_copy = copy.deepcopy(device)
-                device_copy["rank_id"] = str(rank_offset)
+                if preserve_rank_ids:
+                    if device_copy.get("rank_id") is None:
+                        raise RanktableError(
+                            "ranktable device missing rank_id while preserving ranks"
+                        )
+                    try:
+                        device_copy["rank_id"] = str(int(device_copy["rank_id"]))
+                    except (TypeError, ValueError) as exc:
+                        raise RanktableError(
+                            f"invalid rank_id: {device_copy.get('rank_id')!r}"
+                        ) from exc
+                else:
+                    device_copy["rank_id"] = str(rank_offset)
                 rank_offset += 1
                 devices.append(device_copy)
             server_copy["device"] = devices
             merged_servers.append(server_copy)
             server_ids.append(str(server_copy.get("server_id") or server_copy.get("host_ip")))
+
+    if preserve_rank_ids:
+        ranks = [
+            int(device["rank_id"])
+            for server in merged_servers
+            for device in server.get("device") or []
+        ]
+        if sorted(ranks) != list(range(len(ranks))):
+            raise RanktableError(
+                "preserved rank_ids must cover 0..N-1 exactly; "
+                f"got {sorted(ranks)}"
+            )
 
     merged: Dict[str, Any] = {
         "version": "1.2",

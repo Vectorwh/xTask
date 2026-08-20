@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from xtask.core.ranktable_manager import (
+    generate_and_merge_for_group,
     group_instances_for_ranktable,
     inject_rank_tablefile,
     prepare_multihost_ranktables,
@@ -56,6 +58,72 @@ def _make_plan(
 
 
 class HcclRanktableMergeSplitTests(unittest.TestCase):
+    def test_generate_group_coalesces_same_host_members_and_preserves_ranks(self):
+        from xtask.core import ranktable_manager
+
+        members = [
+            _make_plan("node-0", "10.0.0.1", "master", 0, [0, 1]),
+            _make_plan("node-1", "10.0.0.1", "worker", 2, [2, 3]),
+        ]
+        generated_tables = {}
+
+        def generate(aggregate_plan, _root, staging, runtime=None):
+            self.assertIsNone(runtime)
+            path = os.path.join(staging, f"{aggregate_plan.instance_name}.json")
+            generated_tables[path] = {
+                "version": "1.2",
+                "server_count": "1",
+                "server_list": [
+                    {
+                        "server_id": aggregate_plan.host,
+                        "host_ip": aggregate_plan.host,
+                        "container_ip": aggregate_plan.host,
+                        "device": [
+                            {
+                                "device_id": str(device_id),
+                                "device_ip": f"192.0.2.{device_id + 1}",
+                                "rank_id": str(local_rank),
+                                "super_device_id": str(device_id),
+                            }
+                            for local_rank, device_id in enumerate(
+                                aggregate_plan.device_ids
+                            )
+                        ],
+                    }
+                ],
+                "status": "completed",
+            }
+            return path
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            ranktable_manager,
+            "_remote_generate_host_table",
+            side_effect=generate,
+        ) as generate_mock, mock.patch.object(
+            ranktable_manager,
+            "load_ranktable",
+            side_effect=lambda path: generated_tables[path],
+        ), mock.patch.object(ranktable_manager, "is_local_host", return_value=True):
+            host_path, _ = generate_and_merge_for_group(
+                members,
+                output_dir=tmp,
+                group_name="default",
+                workspace_root=str(ROOT),
+            )
+            merged = load_ranktable(host_path)
+
+        self.assertEqual(generate_mock.call_count, 1)
+        aggregate_plan = generate_mock.call_args.args[0]
+        self.assertEqual(aggregate_plan.device_ids, [0, 1, 2, 3])
+        self.assertEqual(merged["server_count"], "1")
+        self.assertEqual(
+            [
+                int(device["rank_id"])
+                for device in merged["server_list"][0]["device"]
+            ],
+            [0, 1, 2, 3],
+        )
+
     def test_copies_host_hccn_tool_when_runtime_image_does_not_have_it(self):
         from xtask.core import ranktable_manager
 
@@ -381,6 +449,42 @@ class RanktableGroupingTests(unittest.TestCase):
         self.assertEqual(len(groups["decode-0"]), 1)
         self.assertEqual(groups["prefill-0"][0].instance_name, "prefill-0")
         self.assertEqual(groups["decode-0"][0].instance_name, "decode-0")
+
+    def test_service_routed_groups_by_independent_default_instance(self):
+        task = {
+            "deployment": {
+                "mode": "service_routed",
+                "service_control": {"host": "10.0.0.1"},
+                "service_instances": [
+                    {
+                        "name": "default-0",
+                        "nodes": [
+                            {"host": "10.0.0.1", "device_ids": [0, 1], "local_port": 48000},
+                            {"host": "10.0.0.2", "device_ids": [0, 1], "local_port": 48000},
+                        ],
+                    },
+                    {
+                        "name": "default-1",
+                        "nodes": [
+                            {"host": "10.0.0.3", "device_ids": [0, 1], "local_port": 48000}
+                        ],
+                    },
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            plans = build_service_plans(task, tmp)
+            groups = group_instances_for_ranktable(task, plans)
+
+        self.assertEqual(list(groups), ["default-0", "default-1"])
+        self.assertEqual(
+            [plan.instance_name for plan in groups["default-0"]],
+            ["default-0-node-0", "default-0-node-1"],
+        )
+        self.assertEqual(
+            [plan.instance_name for plan in groups["default-1"]],
+            ["default-1-node-0"],
+        )
 
     def test_hierarchical_pd_groups_generate_ranktables_independently(self):
         task = {

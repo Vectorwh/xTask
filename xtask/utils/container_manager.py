@@ -32,6 +32,11 @@ class ContainerConfig:
     entrypoint: str = None
     command: str = None
     network_mode: str = "host"  # host, bridge, none
+    # Explicit IPC mode; when unset, preserve the historical network-mode
+    # fallback used by the scheduler.
+    ipc_mode: Optional[str] = None
+    # Size for the container-local /dev/shm tmpfs.
+    shm_size: Optional[str] = None
     privileged: bool = True
     auto_remove: bool = True
     detach: bool = True
@@ -394,7 +399,11 @@ class ContainerManager:
         # Add network mode
         if config.network_mode:
             cmd_parts.extend([f"--network={config.network_mode}"])
-            cmd_parts.extend([f"--ipc={config.network_mode}"])
+        ipc_mode = config.ipc_mode or config.network_mode
+        if ipc_mode:
+            cmd_parts.extend([f"--ipc={ipc_mode}"])
+        if config.shm_size:
+            cmd_parts.extend([f"--shm-size={config.shm_size}"])
         
         # Add environment variables
         # for key, value in config.environment.items():
@@ -405,6 +414,12 @@ class ContainerManager:
         for key, value in config.environment.items():
             if key == "http_proxy" or key == "https_proxy":
                 cmd_parts.extend(["-e", f"{key}={value}"])
+
+        # Add no_proxy to exclude local addresses when proxy is set
+        if "http_proxy" in config.environment or "https_proxy" in config.environment:
+            no_proxy = config.environment.get("no_proxy", "localhost,127.0.0.1,0.0.0.0,11.87.0.0/16,::1")
+            cmd_parts.extend(["-e", f"no_proxy={no_proxy}"])
+            cmd_parts.extend(["-e", f"NO_PROXY={no_proxy}"])
 
         # Add port mappings
         # for host_port, container_port in config.ports.items():

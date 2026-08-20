@@ -33,6 +33,180 @@ def _dependencies(events, failing=None):
 
 
 class TaskSchedulerTests(unittest.TestCase):
+    def test_same_host_runtime_dependencies_are_prepared_serially(self):
+        from xtask.core import scheduler
+
+        events = []
+
+        def make_runtime(instance_name, benchmark_runner):
+            manager = mock.Mock()
+
+            def execute(_container_name, command, timeout=None):
+                events.append((instance_name, command))
+                return SimpleNamespace(success=True, stdout="", stderr="")
+
+            manager.exec_in_container.side_effect = execute
+            return SimpleNamespace(
+                plan=SimpleNamespace(
+                    instance_name=instance_name,
+                    host="10.0.0.1",
+                    is_benchmark_runner=benchmark_runner,
+                ),
+                container_config=SimpleNamespace(
+                    container_name=f"{instance_name}-container"
+                ),
+                container_manager=manager,
+            )
+
+        runtimes = [
+            make_runtime("master-0", True),
+            make_runtime("worker-0", False),
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            model_path = Path(temporary_directory) / "model"
+            model_path.mkdir()
+            (model_path / "config.json").write_text(
+                '{"transformers_version": "4.51.0"}', encoding="utf-8"
+            )
+            context = TaskExecutionContext(
+                "task.yaml", temporary_directory, result={}
+            )
+            context.state.update(
+                task_config={
+                    "model_path": str(model_path),
+                    "benchmark": {"benchmark_type": "aisbench"},
+                },
+                engine_config={"startup_timeout": 30},
+                service_runtimes=runtimes,
+                service_plans=[],
+            )
+
+            with mock.patch(
+                "xtask.core.ranktable_manager.prepare_multihost_ranktables",
+                return_value={},
+            ), mock.patch.object(scheduler, "_clear_pre_benchmark_rst"):
+                scheduler._prepare_runtime_dependencies_multi_host(context)
+
+        self.assertEqual(
+            events,
+            [
+                (
+                    "master-0",
+                    "XLLM_INSTALL_SERVICE=0 bash /workspace/tools/download_xllm.sh;",
+                ),
+                ("master-0", "bash /workspace/tools/download_ais_bench.sh;"),
+                ("master-0", "pip install transformers==4.51.0 --upgrade"),
+                (
+                    "worker-0",
+                    "XLLM_INSTALL_SERVICE=0 bash /workspace/tools/download_xllm.sh;",
+                ),
+                ("worker-0", "pip install transformers==4.51.0 --upgrade"),
+            ],
+        )
+        self.assertFalse(context.complete)
+
+    def test_only_pd_control_runtime_installs_service_dependencies(self):
+        from xtask.core import scheduler
+
+        events = []
+
+        def make_runtime(instance_name):
+            manager = mock.Mock()
+
+            def execute(_container_name, command, timeout=None):
+                events.append((instance_name, command))
+                return SimpleNamespace(success=True, stdout="", stderr="")
+
+            manager.exec_in_container.side_effect = execute
+            return SimpleNamespace(
+                plan=SimpleNamespace(
+                    instance_name=instance_name,
+                    host="10.0.0.1",
+                    is_benchmark_runner=instance_name == "prefill-0",
+                ),
+                container_config=SimpleNamespace(
+                    container_name=f"{instance_name}-container"
+                ),
+                container_manager=manager,
+            )
+
+        runtimes = [make_runtime("prefill-0"), make_runtime("decode-0")]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            model_path = Path(temporary_directory) / "model"
+            model_path.mkdir()
+            (model_path / "config.json").write_text(
+                '{"transformers_version": "4.51.0"}', encoding="utf-8"
+            )
+            context = TaskExecutionContext(
+                "task.yaml", temporary_directory, result={}
+            )
+            context.state.update(
+                task_config={
+                    "model_path": str(model_path),
+                    "benchmark": {"benchmark_type": "aisbench"},
+                    "deployment": {
+                        "mode": "pd_disaggregated",
+                        "master_host": "10.0.0.1",
+                        "pd_control": {"host": "10.0.0.1"},
+                    },
+                },
+                engine_config={"startup_timeout": 30},
+                service_runtimes=runtimes,
+                service_plans=[],
+            )
+
+            with mock.patch(
+                "xtask.core.ranktable_manager.prepare_multihost_ranktables",
+                return_value={},
+            ), mock.patch.object(scheduler, "_clear_pre_benchmark_rst"):
+                scheduler._prepare_runtime_dependencies_multi_host(context)
+
+        download_commands = [
+            item for item in events if "download_xllm.sh" in item[1]
+        ]
+        self.assertEqual(
+            download_commands,
+            [
+                (
+                    "prefill-0",
+                    "XLLM_INSTALL_SERVICE=1 bash /workspace/tools/download_xllm.sh;",
+                ),
+                (
+                    "decode-0",
+                    "XLLM_INSTALL_SERVICE=0 bash /workspace/tools/download_xllm.sh;",
+                ),
+            ],
+        )
+        self.assertFalse(context.complete)
+
+    def test_single_runtime_download_xllm_failure_stops_dependency_prep(self):
+        from xtask.core import scheduler
+
+        manager = mock.Mock()
+        manager.exec_in_container.return_value = SimpleNamespace(
+            success=False,
+            stdout="",
+            stderr="service install failed",
+        )
+        context = TaskExecutionContext("task.yaml", "output", result={})
+        context.state.update(
+            task_config={"benchmark": {"benchmark_type": "aisbench"}},
+            engine_config={"startup_timeout": 30},
+            container_config=SimpleNamespace(container_name="single-container"),
+            container_manager=manager,
+        )
+
+        scheduler._prepare_runtime_dependencies(context)
+
+        self.assertTrue(context.complete)
+        self.assertIn("download_xllm failed", context.result["message"])
+        self.assertIn("service install failed", context.result["message"])
+        manager.exec_in_container.assert_called_once_with(
+            "single-container",
+            "XLLM_INSTALL_SERVICE=0 bash /workspace/tools/download_xllm.sh;",
+            timeout=30,
+        )
+
     def test_task_config_load_normalizes_hierarchical_pd_instances(self):
         from xtask.core.scheduler import TaskConfig
 
@@ -308,6 +482,7 @@ deployment:
             plan=SimpleNamespace(
                 role="decode",
                 host="10.0.0.2",
+                rank_start=2,
                 is_local=False,
                 output_dir="/tmp/decode-worker",
                 readiness={},
@@ -327,6 +502,34 @@ deployment:
             timeout=30,
         )
 
+    def test_service_routed_worker_rank_zero_waits_for_registration(self):
+        from xtask.core import scheduler
+
+        manager = mock.Mock()
+        manager.exec_in_container.return_value = SimpleNamespace(success=True)
+        runtime = SimpleNamespace(
+            plan=SimpleNamespace(
+                instance_name="default-0-node-0",
+                role="worker",
+                host="10.0.0.1",
+                rank_start=0,
+                is_local=True,
+                isolate_ipc=True,
+                output_dir="/tmp/default-0-node-0",
+                readiness={},
+                instance_config={
+                    "enable_disagg_pd": False,
+                    "enable_service_routing": True,
+                },
+            ),
+            container_config=SimpleNamespace(container_name="default-0"),
+            container_manager=manager,
+        )
+
+        self.assertTrue(scheduler._wait_instance_ready(runtime, 1, "xllm"))
+        command = manager.exec_in_container.call_args.args[1]
+        self.assertIn("Success register instance to etcd", command)
+
     def test_pd_group_master_readiness_waits_for_registration(self):
         from xtask.core import scheduler
 
@@ -336,6 +539,7 @@ deployment:
             plan=SimpleNamespace(
                 role="decode",
                 host="10.0.0.1",
+                rank_start=0,
                 is_local=False,
                 output_dir="/tmp/decode-master",
                 readiness={},
@@ -355,6 +559,35 @@ deployment:
         self.assertIn("Success register instance to etcd", command)
         self.assertIn("node_0.log", command)
         self.assertEqual(manager.exec_in_container.call_args.kwargs["timeout"], 350)
+
+    def test_same_host_pd_group_worker_readiness_checks_process_only(self):
+        from xtask.core import scheduler
+
+        manager = mock.Mock()
+        manager.exec_in_container.return_value = SimpleNamespace(success=True)
+        runtime = SimpleNamespace(
+            plan=SimpleNamespace(
+                role="decode",
+                host="10.0.0.1",
+                rank_start=2,
+                is_local=True,
+                output_dir="/tmp/decode-same-host-worker",
+                readiness={},
+                instance_config={
+                    "enable_disagg_pd": True,
+                    "master_host": "10.0.0.1",
+                },
+            ),
+            container_config=SimpleNamespace(container_name="decode-worker"),
+            container_manager=manager,
+        )
+
+        self.assertTrue(scheduler._wait_instance_ready(runtime, 1, "xllm"))
+        manager.exec_in_container.assert_called_once_with(
+            "decode-worker",
+            "pgrep -f '[x]llm'",
+            timeout=30,
+        )
 
     def test_local_master_readiness_waits_on_host_log(self):
         from xtask.core import scheduler
@@ -395,6 +628,53 @@ deployment:
             ],
         )
         manager.exec_in_container.assert_not_called()
+
+    def test_colocated_local_master_readiness_polls_inside_container(self):
+        from xtask.core import scheduler
+
+        manager = mock.Mock()
+        manager.exec_in_container.return_value = SimpleNamespace(
+            success=True,
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
+        runtime = SimpleNamespace(
+            plan=SimpleNamespace(
+                instance_name="prefill-0-node-0",
+                role="prefill",
+                host="10.0.0.1",
+                rank_start=0,
+                is_local=True,
+                isolate_ipc=True,
+                output_dir="/host/outputs/prefill-0-node-0",
+                readiness={},
+                instance_config={
+                    "enable_disagg_pd": True,
+                    "serving_ready_timeout": 320,
+                },
+            ),
+            container_config=SimpleNamespace(container_name="prefill-container"),
+            container_manager=manager,
+        )
+
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            return_value="/workspace/outputs/prefill-0-node-0/log/node_0.log",
+        ), mock.patch(
+            "xtask.serv_fmk.xllm_serv.generate_xllm_serv.wait_xllm_serv_start"
+        ) as wait_for_start:
+            self.assertTrue(scheduler._wait_instance_ready(runtime, 1, "xllm"))
+
+        wait_for_start.assert_not_called()
+        manager.exec_in_container.assert_called_once()
+        container_name, command = manager.exec_in_container.call_args.args
+        self.assertEqual(container_name, "prefill-container")
+        self.assertIn("Success register instance to etcd", command)
+        self.assertIn(
+            "/workspace/outputs/prefill-0-node-0/log/node_0.log", command
+        )
+        self.assertEqual(manager.exec_in_container.call_args.kwargs["timeout"], 350)
 
     def test_regular_multi_host_worker_readiness_waits_for_worker_log(self):
         from xtask.core import scheduler
@@ -444,6 +724,23 @@ deployment:
         ):
             scheduler._cleanup_scheduler(context)
         manager.cleanup.assert_called_once_with()
+
+    def test_cleanup_stage_preserves_single_runtime_when_disabled(self):
+        from xtask.core import scheduler
+
+        manager = mock.Mock()
+        context = TaskExecutionContext("task.yaml", "out")
+        context.state.update(
+            engine_config={"serving_container_name": ""},
+            container_manager=manager,
+        )
+        with mock.patch.object(
+            scheduler,
+            "get_xtask_config_data",
+            return_value={"ENV_CONFIG": {"CLEAN_RESULTS": False}},
+        ):
+            scheduler._cleanup_scheduler(context)
+        manager.cleanup.assert_not_called()
 
     def test_archives_service_group_logs_by_instance(self):
         from xtask.core import scheduler
@@ -993,6 +1290,46 @@ deployment:
         pd_control_service.stop.assert_called_once_with()
         cleanup_group.assert_called_once_with(
             [runtime], True, stop_timeout=3
+        )
+
+    def test_multi_host_cleanup_disabled_preserves_data_and_control_services(self):
+        from xtask.core import scheduler
+
+        runtime = SimpleNamespace(plan=SimpleNamespace(instance_name="prefill-0"))
+        control_service = mock.Mock()
+        context = TaskExecutionContext("task.yaml", "/tmp/output")
+        context.state.update(
+            multi_host=True,
+            service_runtimes=[runtime],
+            service_group_archive_paths=[],
+            engine_config={"serving_container_name": ""},
+            task_config={
+                "deployment": {"container_stop_timeout_seconds": 3}
+            },
+            xllm_control_service=control_service,
+        )
+
+        with mock.patch.object(
+            scheduler,
+            "get_xtask_config_data",
+            return_value={"ENV_CONFIG": {"CLEAN_RESULTS": False}},
+        ), mock.patch.object(
+            scheduler, "_freeze_service_group_logs", return_value={}
+        ) as freeze_logs, mock.patch.object(
+            scheduler, "_separate_shutdown_logs"
+        ) as separate_logs, mock.patch.object(
+            scheduler, "_wait_xllm_processes_exit"
+        ) as wait_exit, mock.patch(
+            "xtask.core.service_group.cleanup_service_group"
+        ) as cleanup_group:
+            scheduler._cleanup_scheduler(context)
+
+        freeze_logs.assert_not_called()
+        separate_logs.assert_not_called()
+        wait_exit.assert_not_called()
+        control_service.stop.assert_not_called()
+        cleanup_group.assert_called_once_with(
+            [runtime], False, stop_timeout=3
         )
 
     def test_run_scheduler_signature_and_stage_wiring(self):

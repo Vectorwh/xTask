@@ -139,8 +139,10 @@ def _execution_time_seconds(result):
 def _resolve_host_addr(task_config):
     deployment = task_config.get("deployment") or {}
     pd_control = deployment.get("pd_control") or {}
+    service_control = deployment.get("service_control") or {}
     candidates = (
         pd_control.get("host"),
+        service_control.get("host"),
         deployment.get("master_host"),
         task_config.get("host_addr"),
         os.getenv("LOCAL_HOST_IP"),
@@ -305,6 +307,7 @@ def _classify_failure(result, task_config):
             "service health check failed",
             "failed readiness check",
             "pd control service startup failed",
+            "xllm control service startup failed",
             "scheduler session has no benchmark runtime",
             "reused service health check failed",
         )
