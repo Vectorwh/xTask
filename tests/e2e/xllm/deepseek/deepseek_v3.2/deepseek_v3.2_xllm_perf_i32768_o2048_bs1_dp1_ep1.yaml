@@ -53,6 +53,7 @@ deployment:
     serving_extensiable_param:
       max_memory_utilization: 0.88
       max_seqs_per_batch: 10
+      max_tokens_per_chunk_for_prefill: 4096
       enable_chunked_prefill: true
       enable_schedule_overlap: true
       enable_prefix_cache: false
