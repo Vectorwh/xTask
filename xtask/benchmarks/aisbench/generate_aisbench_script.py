@@ -11,6 +11,8 @@ from xtask.utils.container_manager import path_mapping_in_container
 from xtask.datasets.dataset_downloader import download_dataset
 from xtask.datasets.dataset_manger import (
     get_sharegpt_fixed_output_path,
+    get_sharegpt_prefix_cache_output_path,
+    is_sharegpt_prefix_cache_enabled,
     is_sharegpt_fixed_length_enabled,
     preprocess_dataset,
 )
@@ -580,7 +582,20 @@ def generate_aisbench_script(
             # 随机合成数据集
             dataset_conf_type = "synthetic_gen"
 
-        if is_sharegpt_fixed_length_enabled(dataset_name, task_config):
+        if is_sharegpt_prefix_cache_enabled(dataset_name, task_config):
+            generated_dataset_path = get_sharegpt_prefix_cache_output_path(
+                task_config, output_file_path
+            )
+            dataset_conf_type = create_dataset_config_override(
+                dataset_conf_type,
+                generated_dataset_path,
+                output_file_path,
+                infer_mode=sharegpt_infer_mode,
+                use_xtask_last_inferencer=sharegpt_infer_mode == "last",
+            )
+            if sharegpt_infer_mode == "last":
+                append_xtask_pythonpath(shell_content)
+        elif is_sharegpt_fixed_length_enabled(dataset_name, task_config):
             generated_dataset_path = get_sharegpt_fixed_output_path(
                 task_config, output_file_path
             )

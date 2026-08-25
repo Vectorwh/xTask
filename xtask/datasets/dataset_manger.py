@@ -24,12 +24,37 @@ def is_sharegpt_fixed_length_enabled(dataset_name, task_config):
     )
 
 
+def is_sharegpt_prefix_cache_enabled(dataset_name, task_config):
+    """Return True only for the explicit ShareGPT prefix-cache opt-in."""
+    if str(dataset_name or "").lower() != "sharegpt":
+        return False
+    benchmark = task_config.get("benchmark") or {}
+    if benchmark.get("benchmark_type") != "aisbench":
+        return False
+    prefix_config = (benchmark.get("perf") or {}).get("prefix_cache")
+    return isinstance(prefix_config, dict) and prefix_config.get("enabled") is True
+
+
 def get_sharegpt_fixed_output_path(task_config, output_path):
     perf_config = _perf_config(task_config)
     input_len = perf_config.get("input_len")
     num_prompts = perf_config.get("num_prompts", perf_config.get("batch_size"))
     return os.path.join(
         output_path, f"ShareGPT-in{input_len}-n{num_prompts}-last.json"
+    )
+
+
+def get_sharegpt_prefix_cache_output_path(task_config, output_path):
+    perf_config = _perf_config(task_config)
+    prefix_config = perf_config.get("prefix_cache") or {}
+    input_len = perf_config.get("input_len")
+    prefix_len = prefix_config.get("prefix_len")
+    prefix_groups = prefix_config.get("prefix_groups", 4)
+    num_prompts = perf_config.get("num_prompts", perf_config.get("batch_size"))
+    return os.path.join(
+        output_path,
+        f"ShareGPT-prefix-cache-i{input_len}-p{prefix_len}-"
+        f"g{prefix_groups}-n{num_prompts}.json",
     )
 
 
@@ -47,6 +72,10 @@ def preprocess_dataset(dataset_name, task_config, output_path):
     dataset_name = str(dataset_name or "").lower()
     if dataset_name == "gsm8k" and benchmark_type == "aisbench":
         process_dataset_cmd, dataset_conf_type = preprocess_gsm8k(process_dataset_cmd, task_config, output_path)
+    elif is_sharegpt_prefix_cache_enabled(dataset_name, task_config):
+        process_dataset_cmd, dataset_conf_type = preprocess_sharegpt_prefix_cache(
+            process_dataset_cmd, task_config, output_path
+        )
     elif is_sharegpt_fixed_length_enabled(dataset_name, task_config):
         process_dataset_cmd, dataset_conf_type = preprocess_sharegpt(
             process_dataset_cmd, task_config, output_path
@@ -168,6 +197,130 @@ def preprocess_sharegpt(process_dataset_cmd, task_config, output_path):
 
     dataset_conf_type = perf_config.get("dataset_conf") or "sharegpt_gen"
     return process_dataset_cmd, dataset_conf_type
+
+
+def preprocess_sharegpt_prefix_cache(process_dataset_cmd, task_config, output_path):
+    """Generate a case-local ShareGPT dataset for prefix-cache measurements."""
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    perf_config = _perf_config(task_config)
+    prefix_config = perf_config.get("prefix_cache") or {}
+    infer_mode = str(perf_config.get("infer_mode", "")).lower()
+    input_len = perf_config.get("input_len")
+    prefix_len = prefix_config.get("prefix_len")
+    prefix_groups = prefix_config.get("prefix_groups", 4)
+    num_prompts = perf_config.get("num_prompts", perf_config.get("batch_size"))
+    seed_requests = prefix_config.get("seed_requests", True)
+    prefix_order = prefix_config.get("order", "grouped")
+    prefix_source = prefix_config.get("prefix_source", "dataset")
+
+    for name, value in (
+        ("perf.input_len", input_len),
+        ("prefix_cache.prefix_len", prefix_len),
+        ("prefix_cache.prefix_groups", prefix_groups),
+        ("perf.num_prompts", num_prompts),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"ShareGPT {name} must be a positive integer")
+    if infer_mode != "last":
+        raise ValueError(
+            "ShareGPT prefix-cache preprocessing only supports infer_mode=last"
+        )
+    if prefix_len >= input_len:
+        raise ValueError(
+            "ShareGPT prefix_cache.prefix_len must be smaller than perf.input_len"
+        )
+    if prefix_source != "dataset":
+        raise ValueError(
+            "ShareGPT prefix_cache.prefix_source currently supports only 'dataset'"
+        )
+    if prefix_groups > num_prompts:
+        raise ValueError("ShareGPT prefix_cache.prefix_groups cannot exceed num_prompts")
+    if not isinstance(seed_requests, bool):
+        raise ValueError("ShareGPT prefix_cache.seed_requests must be a boolean")
+    if prefix_order not in {"grouped", "interleaved"}:
+        raise ValueError("ShareGPT prefix_cache.order must be grouped or interleaved")
+    if seed_requests:
+        num_warmups = perf_config.get("num_warmups", 0)
+        if (
+            isinstance(num_warmups, bool)
+            or not isinstance(num_warmups, int)
+            or num_warmups < prefix_groups
+        ):
+            raise ValueError(
+                "ShareGPT prefix-cache seed_requests requires num_warmups >= "
+                "prefix_groups so every prefix group is warmed up"
+            )
+
+    model_path = path_mapping_in_container(task_config.get("model_path", ""))
+    configured_source = perf_config.get("dataset_path") or task_config.get(
+        "dataset_path", ""
+    )
+    output_path_in_container = path_mapping_in_container(output_path)
+    process_file = os.path.join(output_path_in_container, "process_dataset.py")
+    output_file = path_mapping_in_container(
+        get_sharegpt_prefix_cache_output_path(task_config, output_path)
+    )
+
+    process_dataset_cmd.append(
+        '\necho "开始生成 ShareGPT Prefix Cache 测试数据集"'
+    )
+    process_dataset_cmd.append(
+        "cp -f "
+        "/workspace/xtask/benchmarks/aisbench/run_benchmark/process_dataset.py "
+        f"{shlex.quote(process_file)}"
+    )
+    if configured_source:
+        source_path = path_mapping_in_container(str(configured_source))
+        process_dataset_cmd.append(
+            f"SHAREGPT_SOURCE={shlex.quote(source_path)}"
+        )
+    else:
+        process_dataset_cmd.append(f'SHAREGPT_SOURCE="{DEFAULT_SHAREGPT_DATASET}"')
+    process_dataset_cmd.extend(
+        [
+            'if [ ! -f "$SHAREGPT_SOURCE" ]; then',
+            '    echo "错误：ShareGPT数据集不存在 $SHAREGPT_SOURCE" >&2',
+            "    exit 1",
+            "fi",
+            'if ! python -c "import jinja2" >/dev/null 2>&1; then',
+            '    echo "安装ShareGPT chat template渲染依赖jinja2"',
+            "    if ! python -m pip install 'jinja2>=3.1,<4'; then",
+            '        echo "错误：安装jinja2失败，无法严格构造ShareGPT Prefix Cache数据集" >&2',
+            "        exit 1",
+            "    fi",
+            "fi",
+        ]
+    )
+    process_command = (
+        "python "
+        f"{shlex.quote(process_file)} "
+        f"--bs={num_prompts} "
+        f"--inputlen={input_len} "
+        f"--datasettype=SHAREGPT_PREFIX_CACHE "
+        f"--datapath={shlex.quote(output_path_in_container)} "
+        f"--modelpath={shlex.quote(model_path)} "
+        '--sourcepath="$SHAREGPT_SOURCE" '
+        f"--outputpath={shlex.quote(output_file)} "
+        f"--infermode={infer_mode} "
+        f"--prefix-len={prefix_len} "
+        f"--prefix-groups={prefix_groups} "
+        f"--prefix-source={shlex.quote(prefix_source)} "
+        f"--prefix-seed-requests={1 if seed_requests else 0} "
+        f"--prefix-order={shlex.quote(prefix_order)}"
+    )
+    process_dataset_cmd.extend(
+        [
+            f"if ! {process_command}; then",
+            '    echo "错误：ShareGPT Prefix Cache数据集生成失败" >&2',
+            "    exit 1",
+            "fi",
+        ]
+    )
+
+    # The generator creates the isolated AISBench config after this command is
+    # assembled, so the normal dataset_conf remains available to that layer.
+    return process_dataset_cmd, ""
 
 
 def preprocess_ceavl(process_dataset_cmd, task_config, output_path):

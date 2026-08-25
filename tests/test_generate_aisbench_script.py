@@ -322,6 +322,161 @@ class AisbenchScriptGenerationTests(unittest.TestCase):
         self.assertIn("--datasets future_gen", script)
         self.assertNotIn("xtask_future_gen.py", script)
 
+    def test_sharegpt_prefix_cache_uses_case_local_dataset_config(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            source_config = root / "sharegpt_gen.py"
+            source_config.write_text(
+                "from example import MultiTurnGenInferencer, ShareGPTDataset\n"
+                "sharegpt_infer_cfg = dict(\n"
+                "    inferencer=dict(type=MultiTurnGenInferencer, infer_mode='every')\n"
+                ")\n"
+                "sharegpt_datasets = [dict(\n"
+                "    abbr='sharegpt', type=ShareGPTDataset,\n"
+                "    path='ais_bench/datasets/sharegpt/default.json',\n"
+                "    infer_cfg=sharegpt_infer_cfg,\n"
+                ")]\n",
+                encoding="utf-8",
+            )
+            task_config = self._task_config()
+            task_config["dataset_name"] = "sharegpt"
+            task_config["benchmark"]["perf"].update(
+                {
+                    "api_type": "vllm_api_stream_chat_multiturn",
+                    "dataset_conf": "sharegpt_gen",
+                    "infer_mode": "last",
+                    "input_len": 2048,
+                    "num_prompts": 8,
+                    "num_warmups": 4,
+                    "prefix_cache": {
+                        "enabled": True,
+                        "prefix_source": "dataset",
+                        "prefix_len": 32,
+                        "prefix_groups": 4,
+                        "seed_requests": True,
+                    },
+                }
+            )
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator,
+                "preprocess_dataset",
+                return_value=(
+                    ["prepare-prefix-dataset"],
+                    "",
+                ),
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config", return_value=source_config
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+            dataset_config = (
+                output_dir
+                / "aisbench_configs"
+                / "datasets"
+                / "xtask_sharegpt_gen.py"
+            ).read_text(encoding="utf-8")
+
+        generated_path = output_dir / "ShareGPT-prefix-cache-i2048-p32-g4-n8.json"
+        self.assertIn("prepare-prefix-dataset", script)
+        self.assertIn("--datasets xtask_sharegpt_gen", script)
+        self.assertIn("--num-prompts 8", script)
+        self.assertIn("infer_mode='last'", dataset_config)
+        self.assertIn("type=XTaskShareGPTLastInferencer", dataset_config)
+        self.assertIn(f"path='{generated_path}'", dataset_config)
+
+    def test_prefix_cache_requires_warmup_for_each_seed_group(self):
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._task_config()
+        task_config["dataset_name"] = "sharegpt"
+        task_config["benchmark"]["perf"].update(
+            {
+                "infer_mode": "last",
+                "input_len": 2048,
+                "num_prompts": 8,
+                "num_warmups": 3,
+                "prefix_cache": {
+                    "enabled": True,
+                    "prefix_source": "dataset",
+                    "prefix_len": 512,
+                    "prefix_groups": 4,
+                },
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "num_warmups >= prefix_groups"):
+            preprocess_dataset("sharegpt", task_config, "/tmp/xtask-prefix-test")
+
+    def test_prefix_cache_preprocessor_passes_fixed_input_and_dataset_source(self):
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._task_config()
+        task_config["dataset_name"] = "sharegpt"
+        task_config["benchmark"]["perf"].update(
+            {
+                "infer_mode": "last",
+                "input_len": 2048,
+                "num_prompts": 8,
+                "num_warmups": 4,
+                "prefix_cache": {
+                    "enabled": True,
+                    "prefix_source": "dataset",
+                    "prefix_len": 512,
+                    "prefix_groups": 4,
+                    "seed_requests": True,
+                    "order": "grouped",
+                },
+            }
+        )
+
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            commands, dataset_conf = preprocess_dataset(
+                "sharegpt", task_config, "/tmp/xtask-prefix-test"
+            )
+
+        command_text = "\n".join(commands)
+        self.assertEqual(dataset_conf, "")
+        self.assertIn("--datasettype=SHAREGPT_PREFIX_CACHE", command_text)
+        self.assertIn("--infermode=last", command_text)
+        self.assertIn("--inputlen=2048", command_text)
+        self.assertIn("--prefix-len=512", command_text)
+        self.assertIn("--prefix-source=dataset", command_text)
+        self.assertNotIn("prefix-text", command_text)
+
+    def test_prefix_cache_rejects_non_last_mode(self):
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._task_config()
+        task_config["dataset_name"] = "sharegpt"
+        task_config["benchmark"]["perf"].update(
+            {
+                "infer_mode": "every_with_gt",
+                "input_len": 2048,
+                "num_prompts": 8,
+                "num_warmups": 4,
+                "prefix_cache": {
+                    "enabled": True,
+                    "prefix_source": "dataset",
+                    "prefix_len": 512,
+                    "prefix_groups": 4,
+                },
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "only supports infer_mode=last"):
+            preprocess_dataset("sharegpt", task_config, "/tmp/xtask-prefix-test")
+
     def test_preprocessed_dataset_keeps_specialized_path_handling(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             output_dir = Path(temporary_directory) / "output"

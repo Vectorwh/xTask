@@ -121,6 +121,167 @@ class ShareGPTDatasetProcessingTests(unittest.TestCase):
                 self.tokenizer, sample, target_len=5
             )
 
+    def test_prefix_cache_groups_are_shared_distinct_and_seeded(self):
+        source_data = [
+            sharegpt_sample(
+                "aurora",
+                [
+                    ("human", "Aurora deployment history begins with these details. "),
+                    ("gpt", "Aurora history response records the completed first turn. "),
+                    ("human", "What should the Aurora team verify before rollout?"),
+                    ("gpt", "Verify capacity, health checks, and rollback readiness."),
+                    ("human", "How should Aurora monitor the rollout?"),
+                    ("gpt", "Monitor latency, errors, and resource usage."),
+                ],
+            ),
+            sharegpt_sample(
+                "borealis",
+                [
+                    ("human", "Borealis research history starts with a different subject. "),
+                    ("gpt", "Borealis history response preserves the first completed turn. "),
+                    ("human", "What evidence supports the Borealis conclusion?"),
+                    ("gpt", "Use the reviewed experiment results and source records."),
+                    ("human", "How should Borealis present the results?"),
+                    ("gpt", "Present assumptions, results, and known limitations."),
+                ],
+            ),
+            sharegpt_sample(
+                "cirrus",
+                [
+                    ("human", "Cirrus source conversation provides additional suffix material. "),
+                    ("gpt", "Cirrus source response completes the first source turn. "),
+                    ("human", "What is the Cirrus follow-up question?"),
+                    ("gpt", "The Cirrus follow-up answer is recorded here."),
+                ],
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_path = root / "source.json"
+            output_path = root / "prefix.json"
+            source_path.write_text(json.dumps(source_data), encoding="utf-8")
+            original_source = source_path.read_text(encoding="utf-8")
+
+            process_dataset.process_sharegpt_prefix_cache_dataset(
+                self.tokenizer,
+                str(source_path),
+                str(output_path),
+                input_len=240,
+                prefix_len=32,
+                prefix_groups=2,
+                num_prompts=6,
+                seed_requests=True,
+            )
+            generated = json.loads(output_path.read_text(encoding="utf-8"))
+            source_unchanged = source_path.read_text(encoding="utf-8") == original_source
+
+        self.assertEqual(len(generated), 6)
+        self.assertTrue(source_unchanged)
+        self.assertEqual(
+            [sample["xtask_prefix_group"] for sample in generated[:2]], [0, 1]
+        )
+        self.assertTrue(all(sample["xtask_prefix_seed"] for sample in generated[:2]))
+        self.assertTrue(all(not sample["xtask_prefix_seed"] for sample in generated[2:]))
+        self.assertEqual(len({sample["id"] for sample in generated}), 6)
+        self.assertTrue(
+            all(sample["xtask_prefix_source"] == "dataset" for sample in generated)
+        )
+        self.assertTrue(
+            all(
+                process_dataset._sharegpt_prompt_length(
+                    self.tokenizer, sample["conversations"]
+                )
+                == 240
+                for sample in generated
+            )
+        )
+        self.assertTrue(
+            all(
+                sample["conversations"][-2]["from"] == "human"
+                and sample["conversations"][-1]["from"] == "gpt"
+                for sample in generated
+            )
+        )
+        self.assertTrue(
+            all(
+                "[xTask prefix group" not in message["value"]
+                for sample in generated
+                for message in sample["conversations"]
+            )
+        )
+        source_by_id = {sample["id"]: sample for sample in source_data}
+        for sample in generated:
+            history_source = source_by_id[sample["xtask_prefix_history_source_id"]]
+            history_messages = sample["xtask_prefix_history_turns"] * 2
+            self.assertEqual(
+                sample["conversations"][:history_messages],
+                history_source["conversations"][:history_messages],
+            )
+
+        grouped = {
+            group_id: [
+                process_dataset._sharegpt_prompt_token_ids(
+                    self.tokenizer, sample["conversations"]
+                )
+                for sample in generated
+                if sample["xtask_prefix_group"] == group_id
+            ]
+            for group_id in (0, 1)
+        }
+        self.assertGreaterEqual(
+            process_dataset._common_prefix_length(grouped[0]), 32
+        )
+        self.assertGreaterEqual(
+            process_dataset._common_prefix_length(grouped[1]), 32
+        )
+        self.assertLess(
+            process_dataset._common_prefix_length([grouped[0][0], grouped[1][0]]),
+            32,
+        )
+
+    def test_prefix_cache_rejects_prefix_not_smaller_than_input(self):
+        source = sharegpt_sample(
+            "only",
+            [
+                ("human", "A sufficiently long source history for validation."),
+                ("gpt", "A sufficiently long source response for validation."),
+                ("human", "final question"),
+                ("gpt", "final answer"),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_path = root / "source.json"
+            source_path.write_text(json.dumps([source]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "prefix_len must be smaller"):
+                process_dataset.process_sharegpt_prefix_cache_dataset(
+                    self.tokenizer,
+                    str(source_path),
+                    str(root / "prefix.json"),
+                    input_len=64,
+                    prefix_len=64,
+                    prefix_groups=1,
+                    num_prompts=1,
+                )
+
+    def test_prefix_cache_rejects_more_groups_than_requests(self):
+        source = sharegpt_sample("only", [("human", "question"), ("gpt", "answer")])
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_path = root / "source.json"
+            source_path.write_text(json.dumps([source]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "prefix_groups cannot exceed"):
+                process_dataset.process_sharegpt_prefix_cache_dataset(
+                    self.tokenizer,
+                    str(source_path),
+                    str(root / "prefix.json"),
+                    input_len=64,
+                    prefix_len=16,
+                    prefix_groups=3,
+                    num_prompts=2,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

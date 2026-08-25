@@ -19,6 +19,17 @@ def parse_arguments():
     parser.add_argument("--sourcepath", type=str, default="", help="source dataset path")
     parser.add_argument("--outputpath", type=str, default="", help="generated dataset path")
     parser.add_argument("--infermode", type=str, default="last", help="multi-turn inference mode")
+    parser.add_argument("--prefix-len", type=int, default=512,
+                        help="minimum shared prompt prefix length in tokens")
+    parser.add_argument("--prefix-groups", type=int, default=4,
+                        help="number of independent prefix groups")
+    parser.add_argument("--prefix-source", type=str, default="dataset",
+                        choices=("dataset",),
+                        help="source of the shared prefix")
+    parser.add_argument("--prefix-seed-requests", type=int, choices=(0, 1), default=1,
+                        help="put one seed request per group at the beginning")
+    parser.add_argument("--prefix-order", type=str, choices=("grouped", "interleaved"),
+                        default="grouped", help="request ordering between groups")
     return parser.parse_args()
 
 #########################################################################################
@@ -111,6 +122,10 @@ def _sharegpt_messages(conversations):
 
 
 def _sharegpt_prompt_length(tokenizer, conversations):
+    return len(_sharegpt_prompt_token_ids(tokenizer, conversations))
+
+
+def _sharegpt_prompt_token_ids(tokenizer, conversations):
     token_ids = tokenizer.apply_chat_template(
         _sharegpt_messages(conversations),
         tokenize=True,
@@ -118,7 +133,18 @@ def _sharegpt_prompt_length(tokenizer, conversations):
     )
     if hasattr(token_ids, "tolist"):
         token_ids = token_ids.tolist()
-    return len(token_ids)
+    return list(token_ids)
+
+
+def _common_prefix_length(token_id_lists):
+    if not token_id_lists:
+        return 0
+    common_length = min(len(token_ids) for token_ids in token_id_lists)
+    for index in range(common_length):
+        token = token_id_lists[0][index]
+        if any(token_ids[index] != token for token_ids in token_id_lists[1:]):
+            return index
+    return common_length
 
 
 def _decode_token_ids(tokenizer, token_ids):
@@ -325,6 +351,267 @@ def process_sharegpt_dataset(tokenizer, source_path, output_path, input_len, num
     )
     return output_path
 
+
+def _sharegpt_pair_sources(samples):
+    """Return unique user/assistant pairs that may become final turns."""
+    pair_sources = []
+    seen_questions = set()
+    for sample_index, sample in enumerate(samples):
+        conversations = sample["conversations"]
+        for turn_index in range(0, len(conversations), 2):
+            question = conversations[turn_index]["value"]
+            if question in seen_questions:
+                continue
+            seen_questions.add(question)
+            pair_sources.append(
+                {
+                    "source_index": sample_index,
+                    "source_id": sample.get("id", f"sharegpt-{sample_index}"),
+                    "turn_index": turn_index // 2,
+                    "question": question,
+                    "answer": conversations[turn_index + 1]["value"],
+                }
+            )
+    return pair_sources
+
+
+def _iter_sharegpt_prefix_candidates(tokenizer, samples, prefix_len, input_len):
+    """Yield complete histories that fit one last-mode request."""
+    for sample_index, sample in enumerate(samples):
+        conversations = sample["conversations"]
+        best_candidate = None
+        for history_end in range(2, len(conversations) + 1, 2):
+            history = copy.deepcopy(conversations[:history_end])
+            probe = history + [
+                {"from": "human", "value": ""},
+                {"from": "gpt", "value": ""},
+            ]
+            prompt_length = _sharegpt_prompt_length(tokenizer, probe)
+            if prompt_length >= input_len:
+                break
+            if prompt_length >= prefix_len:
+                best_candidate = {
+                    "source_index": sample_index,
+                    "source_id": sample.get("id", f"sharegpt-{sample_index}"),
+                    "history_turns": history_end // 2,
+                    "history": history,
+                    "probe_tokens": _sharegpt_prompt_token_ids(tokenizer, probe),
+                    "prefix_base_tokens": prompt_length,
+                }
+                break
+        if best_candidate is not None:
+            yield best_candidate
+
+
+def _sharegpt_prefix_candidates(tokenizer, samples, prefix_len, input_len):
+    """Return all complete histories that fit one last-mode request."""
+    return list(
+        _iter_sharegpt_prefix_candidates(tokenizer, samples, prefix_len, input_len)
+    )
+
+
+def _select_prefix_groups(candidates, prefix_groups, prefix_len):
+    """Choose histories that cannot share the configured cache prefix."""
+    selected = []
+    for candidate in candidates:
+        if all(
+            _common_prefix_length(
+                [candidate["probe_tokens"], other["probe_tokens"]]
+            ) < prefix_len
+            for other in selected
+        ):
+            selected.append(candidate)
+        if len(selected) == prefix_groups:
+            return selected
+    raise ValueError(
+        "ShareGPT source dataset does not contain enough distinct complete "
+        f"histories for {prefix_groups} prefix groups at prefix_len={prefix_len}"
+    )
+
+
+def _ordered_suffix_sources(pair_sources, group_candidate):
+    """Prefer later turns from the prefix dialogue before using global donors."""
+    own_source_index = group_candidate["source_index"]
+    own_history_turns = group_candidate["history_turns"]
+    related = [
+        source
+        for source in pair_sources
+        if source["source_index"] == own_source_index
+        and source["turn_index"] >= own_history_turns
+    ]
+    other = [
+        source
+        for source in pair_sources
+        if source["source_index"] != own_source_index
+    ]
+    return related + other
+
+
+def _build_dataset_prefix_entry(tokenizer, group_candidate, suffix_source, input_len):
+    conversations = copy.deepcopy(group_candidate["history"])
+    conversations.extend(
+        [
+            {"from": "human", "value": suffix_source["question"]},
+            {"from": "gpt", "value": suffix_source["answer"]},
+        ]
+    )
+    sample = {"conversations": conversations}
+    _fit_last_human_content(tokenizer, sample["conversations"], input_len)
+    if _sharegpt_prompt_length(tokenizer, sample["conversations"]) != input_len:
+        raise RuntimeError(
+            f"ShareGPT prefix-cache prompt length validation failed: expected "
+            f"{input_len}"
+        )
+    return sample
+
+
+def process_sharegpt_prefix_cache_dataset(
+    tokenizer,
+    source_path,
+    output_path,
+    input_len,
+    prefix_len,
+    prefix_groups,
+    num_prompts,
+    seed_requests=True,
+    prefix_order="grouped",
+    prefix_source="dataset",
+):
+    """Generate fixed-length last-mode requests with ShareGPT history prefixes.
+
+    Each group uses only complete human/gpt turns from one source conversation
+    as its common prefix.  The final human/gpt pair is selected from ShareGPT
+    data and the final human content is token-aware adjusted to input_len.
+    """
+    for name, value in (
+        ("input_len", input_len),
+        ("prefix_len", prefix_len),
+        ("prefix_groups", prefix_groups),
+        ("num_prompts", num_prompts),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if prefix_len >= input_len:
+        raise ValueError("prefix_len must be smaller than input_len")
+    if prefix_groups > num_prompts:
+        raise ValueError("prefix_groups cannot exceed num_prompts")
+    if prefix_order not in {"grouped", "interleaved"}:
+        raise ValueError("prefix_order must be grouped or interleaved")
+    if prefix_source != "dataset":
+        raise ValueError("prefix_source currently supports only 'dataset'")
+
+    with open(source_path, "r", encoding="utf-8") as source_file:
+        source_dataset = json.load(source_file)
+    if not isinstance(source_dataset, list):
+        raise ValueError("ShareGPT source dataset must be a JSON array")
+    valid_samples = [sample for sample in source_dataset if _validate_sharegpt_sample(sample)]
+    if not valid_samples:
+        raise ValueError("ShareGPT source dataset contains no valid conversations")
+    pair_sources = _sharegpt_pair_sources(valid_samples)
+    if not pair_sources:
+        raise ValueError("ShareGPT source dataset contains no usable conversation pairs")
+    selected_groups = _select_prefix_groups(
+        _iter_sharegpt_prefix_candidates(
+            tokenizer, valid_samples, prefix_len, input_len
+        ),
+        prefix_groups,
+        prefix_len,
+    )
+
+    base_count, remainder = divmod(num_prompts, prefix_groups)
+    group_counts = [base_count + (index < remainder) for index in range(prefix_groups)]
+    groups = []
+    for group_id, (group_count, group_candidate) in enumerate(
+        zip(group_counts, selected_groups)
+    ):
+        suffix_sources = _ordered_suffix_sources(pair_sources, group_candidate)
+        if len(suffix_sources) < group_count:
+            raise ValueError(
+                "ShareGPT source dataset does not contain enough distinct final "
+                f"turns for prefix group {group_id}"
+            )
+        group_entries = []
+        for offset, suffix_source in enumerate(suffix_sources[:group_count]):
+            entry = _build_dataset_prefix_entry(
+                tokenizer, group_candidate, suffix_source, input_len
+            )
+            entry["id"] = (
+                f"{group_candidate['source_id']}-s{group_candidate['source_index']}-"
+                f"xtask-prefix-"
+                f"{group_id}-{offset}"
+            )
+            entry["xtask_prefix_group"] = group_id
+            entry["xtask_prefix_seed"] = bool(seed_requests and offset == 0)
+            entry["xtask_prefix_source"] = prefix_source
+            entry["xtask_prefix_history_source_id"] = group_candidate["source_id"]
+            entry["xtask_prefix_history_source_index"] = group_candidate["source_index"]
+            entry["xtask_prefix_history_turns"] = group_candidate["history_turns"]
+            entry["xtask_prefix_suffix_source_id"] = suffix_source["source_id"]
+            entry["xtask_prefix_suffix_source_index"] = suffix_source["source_index"]
+            entry["xtask_prefix_suffix_turn"] = suffix_source["turn_index"]
+            group_entries.append(entry)
+        groups.append(group_entries)
+
+    if seed_requests:
+        generated = [group[0] for group in groups]
+        remaining_groups = [group[1:] for group in groups]
+    else:
+        generated = []
+        remaining_groups = groups
+
+    if prefix_order == "grouped":
+        generated.extend(entry for group in remaining_groups for entry in group)
+    else:
+        max_remaining = max((len(group) for group in remaining_groups), default=0)
+        for offset in range(max_remaining):
+            generated.extend(
+                group[offset]
+                for group in remaining_groups
+                if offset < len(group)
+            )
+
+    token_lists_by_group = {
+        group_id: [
+            _sharegpt_prompt_token_ids(tokenizer, entry["conversations"])
+            for entry in group
+        ]
+        for group_id, group in enumerate(groups)
+    }
+    for group_id, token_lists in token_lists_by_group.items():
+        actual_shared_length = _common_prefix_length(token_lists)
+        if actual_shared_length < prefix_len:
+            raise RuntimeError(
+                f"group {group_id} shared prefix is {actual_shared_length} tokens, "
+                f"below requested {prefix_len}"
+            )
+        for entry in groups[group_id]:
+            entry["xtask_prefix_tokens"] = actual_shared_length
+    for left_group in range(prefix_groups):
+        for right_group in range(left_group + 1, prefix_groups):
+            cross_length = _common_prefix_length(
+                [
+                    token_lists_by_group[left_group][0],
+                    token_lists_by_group[right_group][0],
+                ]
+            )
+            if cross_length >= prefix_len:
+                raise ValueError(
+                    "prefix groups are not distinguishable before the requested "
+                    f"prefix length ({prefix_len} tokens)"
+                )
+
+    output_directory = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_directory, exist_ok=True)
+    temporary_path = f"{output_path}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as output_file:
+        json.dump(generated, output_file, ensure_ascii=False)
+    os.replace(temporary_path, output_path)
+    print(
+        f"[process_dataset]: generated {len(generated)} ShareGPT prefix-cache "
+        f"requests in {prefix_groups} groups: {output_path}"
+    )
+    return output_path
+
 ################################自定义函数区域#############################################
 
 if __name__ == '__main__':
@@ -408,6 +695,31 @@ if __name__ == '__main__':
             batch_size,
         )
 
+    elif dataset_type == 'SHAREGPT_PREFIX_CACHE':
+        if args.infermode.lower() != "last":
+            raise ValueError(
+                "ShareGPT prefix-cache preprocessing only supports infer_mode=last"
+            )
+        if not args.sourcepath:
+            raise ValueError("--sourcepath is required for ShareGPT prefix-cache preprocessing")
+        output_path = args.outputpath or os.path.join(
+            data_path,
+            f"ShareGPT-prefix-cache-i{input_len}-p{args.prefix_len}-"
+            f"g{args.prefix_groups}-n{batch_size}.json",
+        )
+        process_sharegpt_prefix_cache_dataset(
+            tokenizer,
+            args.sourcepath,
+            output_path,
+            input_len=input_len,
+            prefix_len=args.prefix_len,
+            prefix_groups=args.prefix_groups,
+            num_prompts=batch_size,
+            seed_requests=bool(args.prefix_seed_requests),
+            prefix_order=args.prefix_order,
+            prefix_source=args.prefix_source,
+        )
+
 
 #数据集测试VID
     elif (dataset_type == 'VID' ):
@@ -487,6 +799,3 @@ if __name__ == '__main__':
         for i in range(number):
             audio_output.export(f'{concurrency_path}/m{length}_{i}_throatclearing.wav', format='wav')
         print(f"[process_dataset]: 已生成文件vocalsound测试文件，文件路径{concurrency_path}")
-
-
-
