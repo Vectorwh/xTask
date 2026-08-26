@@ -9,7 +9,7 @@
 
 ## 1. 可参考示例
 
-可直接参考的 21 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
+可直接参考的 22 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
 
 | 目的 | 示例 |
 | --- | --- |
@@ -32,6 +32,7 @@
 | 普通服务同节点多小实例混部 | `19_samehost_mixed_aisbench_perf.yaml` |
 | PD 多逻辑实例、同逻辑实例多 node 共节点部署 | `20_pd_samehost_multi_instance_perf.yaml` |
 | 多个普通独立实例通过 xllm-service 统一分发 | `21_service_routed_samehost_multi_instance_perf.yaml` |
+| 单机 AISBench ShareGPT 多组 Prefix Cache 性能测试 | `22_single_aisbench_sharegpt_prefix_cache_perf.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
 
@@ -613,7 +614,7 @@ deployment:
 
 注意：`deployment.benchmark.endpoint` 即使手工填写，当前服务组逻辑也不会把它作为权威地址；普通部署从 `master_host + local_port` 推导，PD 从 `pd_control.host + http_server_port` 推导。
 
-### PD 场景编译 xLLM-Service
+### PD / Service 路由场景编译 xLLM-Service
 
 PD 场景的 `xllm_master_serving` 可以由 xTask 单独自动编译和归档，不改变原有
 xLLM wheel 的编译、归档和加载流程：
@@ -650,7 +651,7 @@ bash tools/cron_daily_build.sh build service_build test
 ```
 
 默认 `build` 阶段仍只执行原有 `prepare_xllm.sh`，避免 Service 的 CMake/Rust 构建
-改变既有 xLLM 构建任务。
+改变既有 xLLM 构建任务。仓库、分支、提交号日志和定时任务的完整说明见第 7 节。
 
 ### `pd_instances` 和 `nodes` 字段
 
@@ -944,7 +945,222 @@ P/D 实例个数、每个实例的 node 数、每个 node 的卡数可以搜索�
 
 搜参不支持 `nodes[0]`、`device_ids[0]` 等任意深度列表路径，这属于搜索路径规则，详见第 5 节。
 
-## 7. 常用执行命令
+## 7. 编译与定时执行
+
+### 7.1 单独编译 xLLM
+
+在 xTask 工程根目录执行：
+
+```bash
+bash tools/prepare_xllm.sh
+```
+
+编译日志会打印到当前终端，也可以重定向：
+
+```bash
+bash tools/prepare_xllm.sh > outputs/xllm_compile.log 2>&1
+```
+
+编译成功后，xLLM wheel、Ascend `vendors/` 和运行时动态库会自动归档到
+`pkg/xllm/`，后续用例通过 `download_xllm.sh` 自动加载，不需要手工复制。
+脚本还会在启动 Docker 编译前打印本次实际使用的仓库、分支和完整 commit：
+
+```text
+[source-version] xLLM repo: ...
+[source-version] xLLM branch: ...
+[source-version] xLLM commit: <commit-sha>
+```
+
+编译源码的仓库和分支可以分别通过环境变量或位置参数指定：
+
+```bash
+# 位置参数优先于 XLLM_BRANCH
+bash tools/prepare_xllm.sh release/v0.11.0
+
+# 等价写法
+XLLM_BRANCH=release/v0.11.0 bash tools/prepare_xllm.sh
+```
+
+默认仓库地址为：
+
+```text
+git@coding.jd.com:xLLM_AI/xllm.git
+```
+
+需要使用其他仓库时，将下面的占位地址替换为实际存在且当前用户有权限访问的仓库：
+
+```bash
+# 仅示例，不能直接使用 team/xllm.git
+XLLM_REPO_URL=git@coding.jd.com:<组织>/<项目>.git \
+XLLM_BRANCH=release/v0.11.0 \
+bash tools/prepare_xllm.sh
+```
+
+未指定分支时，已有 checkout 更新当前分支；新目录 clone 远端默认分支。
+如果已有 `xllm/` 的 `origin` 与期望仓库地址不同，脚本会先校验目标仓库和
+分支，校验成功后删除当前工程下的旧 `xllm/` 并重新 clone，避免旧分支、子模块
+或未跟踪文件混入编译。目标仓库不可访问时会在删除前失败并保留旧目录。
+
+注意：本地存在未提交修改、分支与远端无法 `--ff-only` 快进，或子模块存在
+冲突性修改时，脚本会失败，不会强制覆盖本地代码。当前 xLLM 编译镜像在
+`tools/prepare_xllm.sh` 中定义；如需更换镜像，需要调整该脚本的 `IMAGE` 配置。
+
+### 7.2 单独编译 xLLM-Service
+
+在 xTask 工程根目录执行：
+
+```bash
+bash tools/prepare_xllm_service.sh
+```
+
+也可以按同样方式查看终端日志或重定向到文件：
+
+```bash
+bash tools/prepare_xllm_service.sh > outputs/xllm_service_compile.log 2>&1
+```
+
+成功后会自动归档并原子更新：
+
+```text
+pkg/xllm/service_binary/current/xllm_master_serving
+pkg/xllm/service_binary/current/librust_tokenizers.so
+```
+
+后续 PD 或 Service 路由用例会自动从 `current` 版本加载。Service 编译前会打印：
+
+```text
+[source-version] xLLM-Service repo: ...
+[source-version] xLLM-Service branch: ...
+[source-version] xLLM-Service commit: <commit-sha>
+[source-version] xLLM-Service third_party/xllm commit: <commit-sha>
+```
+
+默认 Service 仓库地址为：
+
+```text
+git@coding.jd.com:xLLM_AI/xllm-service.git
+```
+
+指定仓库和分支：
+
+```bash
+# 位置参数优先于 XLLM_SERVICE_BRANCH
+bash tools/prepare_xllm_service.sh release/v0.11.0
+
+# 等价写法
+# 仅示例，不能直接使用 <组织>/<项目>.git
+XLLM_SERVICE_REPO_URL=git@coding.jd.com:<组织>/<项目>.git \
+XLLM_SERVICE_BRANCH=release/v0.11.0 \
+bash tools/prepare_xllm_service.sh
+```
+
+Service 的 `XLLM_SERVICE_UPDATE_SOURCE` 默认是 `1`：已有仓库会按目标分支
+更新；仓库地址不一致时先校验再删除当前工程下的 `xllm-service/` 并重新 clone。
+设置为 `0` 时只使用现有 checkout，不拉取、不切换分支，也不允许更换仓库：
+
+```bash
+XLLM_SERVICE_UPDATE_SOURCE=0 \
+bash tools/prepare_xllm_service.sh release/v0.11.0
+```
+
+Service 的编译镜像可通过 `XLLM_SERVICE_BUILD_IMAGE` 覆盖；ETCD/etcdctl 不由
+Service 编译脚本生成，仍按运行时依赖流程准备。
+
+### 7.3 手动触发编译和用例执行
+
+`cron_daily_build.sh` 支持 `build`、`service_build`、`test` 三个阶段，按命令
+行顺序执行；任一阶段失败会停止后续阶段：
+
+```bash
+MAIN_ARGS="--case_name qwen3_8b_xllm_perf_i1024_o1024_bs1 --host_addr 11.87.191.75" \
+bash tools/cron_daily_build.sh build service_build test
+```
+
+`MAIN_ARGS` 是传给 `main.py` 的参数，可以是单用例、用例组或其他受支持的参数。
+也可以直接为两个编译阶段分别指定仓库和分支：
+
+```bash
+XLLM_REPO_URL=git@coding.jd.com:xLLM_AI/xllm.git \
+XLLM_BRANCH=release/v0.11.0 \
+XLLM_SERVICE_REPO_URL=git@coding.jd.com:xLLM_AI/xllm-service.git \
+XLLM_SERVICE_BRANCH=release/v0.11.0 \
+MAIN_ARGS="--case_name qwen3_8b_xllm_perf_i1024_o1024_bs1 --host_addr 11.87.191.75" \
+bash tools/cron_daily_build.sh build service_build test
+```
+
+阶段可以任意组合并调整顺序，例如：
+
+```bash
+bash tools/cron_daily_build.sh build
+bash tools/cron_daily_build.sh service_build
+bash tools/cron_daily_build.sh test
+bash tools/cron_daily_build.sh build test
+```
+
+### 7.4 定时编译和用例执行
+
+定时任务由 `install_crontab.sh` 安装到当前用户的 crontab。当前用户需要具备
+crontab 权限；脚本会优先使用普通用户 crontab，必要时尝试
+`sudo crontab -u <用户>`。
+
+只定时编译 xLLM 和 Service：
+
+```bash
+env CRON_TIME="01 22 * * *" \
+STAGES="build service_build" \
+bash tools/install_crontab.sh
+```
+
+只定时执行用例：
+
+```bash
+env CRON_TIME="01 22 * * *" \
+STAGES="test" \
+MAIN_ARGS="--case_name qwen3_8b_xllm_perf_i1024_o1024_bs1 --host_addr 11.87.191.75" \
+bash tools/install_crontab.sh
+```
+
+定时编译后执行用例，并固定两个源码分支：
+
+```bash
+env CRON_TIME="01 22 * * *" \
+STAGES="build service_build test" \
+XLLM_BRANCH="release/v0.11.0" \
+XLLM_SERVICE_BRANCH="release/v0.11.0" \
+MAIN_ARGS="--case_name qwen3_8b_xllm_perf_i1024_o1024_bs1 --host_addr 11.87.191.75" \
+bash tools/install_crontab.sh
+```
+
+`CRON_TIME` 使用标准五段格式“分 时 日 月 周”。例如 `01 22 * * *` 表示每天
+22:01 执行。`STAGES` 可以是 `build`、`service_build`、`test` 的任意组合；安装
+脚本会把 `XLLM_BRANCH`、`XLLM_SERVICE_BRANCH`、`MAIN_ARGS` 和
+`MAIN_ARGS_LIST` 固化到 cron 行中。需要在 cron 中使用自定义仓库地址时，应在
+安装后用 `crontab -e` 为任务行补充 `XLLM_REPO_URL` 和
+`XLLM_SERVICE_REPO_URL`，因为仓库地址不会被当前安装脚本自动固化。
+
+日志位置：
+
+- xLLM 编译：`outputs/build.log`，历史文件为 `outputs/log/build_<时间>.log`。
+- xLLM-Service 编译：`outputs/log/service_build_<时间>.log`。
+- 框架总日志：`outputs/case_framework.log`，历史文件为
+  `outputs/log/case_framework_<时间>.log`；包含阶段编排、编译输出和用例执行输出。
+- xLLM 的 commit 会出现在 `build.log` 和框架日志；xLLM-Service 的 commit 只出现在
+  Service 编译日志和框架日志。
+
+用例结果、xLLM 运行日志和 benchmark 产物仍按具体用例配置归档到 `outputs/` 下
+对应目录。查看当前定时任务：
+
+```bash
+sudo crontab -u <用户名> -l
+```
+
+取消本工具安装的定时任务：
+
+```bash
+bash tools/install_crontab.sh --uninstall
+```
+
+## 8. 常用执行命令
 
 普通单用例：
 
@@ -973,7 +1189,7 @@ python main.py --case_group 11_single_para_set_tpe \
 
 搜索完成后，重点查看 `outputs/<case_group>/search/<基础用例名>/search_summary.yaml` 和 `search_trials.csv`。前者汇总最佳组合和成功/失败数量，后者一行记录一次实际测试。
 
-## 8. 写完后的检查清单
+## 9. 写完后的检查清单
 
 - 先确认 `metrics`、`benchmark_type` 和对应的 `perf/acc` 块一致。
 - 确认模型路径在所有服务节点存在，数据资源路径在 benchmark runner 可见。

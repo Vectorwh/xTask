@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -180,6 +181,152 @@ class DownloadXllmScriptTests(unittest.TestCase):
         self.assertIn('if [ -z "$SERVICE_RUNTIME_DIR" ]; then', fallback)
 
 
+class PrepareXllmScriptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.script = (cls.root / "tools" / "prepare_xllm.sh").read_text(
+            encoding="utf-8"
+        )
+
+    def _git(self, *args, cwd=None):
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+
+    def _create_remote(self, root: Path, name: str, content: str) -> Path:
+        remote = root / f"{name}.git"
+        source = root / f"{name}-source"
+        self._git("init", "--bare", str(remote))
+        self._git("init", "-b", "main", str(source))
+        (source / "repository.txt").write_text(content, encoding="utf-8")
+        self._git("add", "repository.txt", cwd=source)
+        self._git(
+            "-c",
+            "user.name=xTask Test",
+            "-c",
+            "user.email=xtask@example.invalid",
+            "commit",
+            "-m",
+            "initial",
+            cwd=source,
+        )
+        self._git("remote", "add", "origin", str(remote), cwd=source)
+        self._git("push", "-u", "origin", "main", cwd=source)
+        self._git("symbolic-ref", "HEAD", "refs/heads/main", cwd=remote)
+        return remote
+
+    def _run_prepare(self, project: Path, repository: Path):
+        tools_dir = project / "tools"
+        tools_dir.mkdir(parents=True)
+        shutil.copy2(self.root / "tools" / "prepare_xllm.sh", tools_dir)
+        (tools_dir / "build_xllm_in_container.sh").write_text(
+            "#!/bin/bash\nexit 0\n", encoding="utf-8"
+        )
+        fake_bin = project / "fake-bin"
+        fake_bin.mkdir()
+        docker = fake_bin / "docker"
+        docker.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        docker.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            XLLM_REPO_URL=str(repository),
+            GIT_MAX_RETRIES="1",
+            GIT_RETRY_DELAY="0",
+            PATH=f"{fake_bin}:{env['PATH']}",
+        )
+        return subprocess.run(
+            ["bash", "tools/prepare_xllm.sh", "main"],
+            cwd=project,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+
+    def test_default_repository_is_internal_xllm_repository(self):
+        self.assertIn(
+            'XLLM_REPO_URL="${XLLM_REPO_URL:-git@coding.jd.com:xLLM_AI/xllm.git}"',
+            self.script,
+        )
+
+    def test_compile_source_version_is_logged_after_submodules(self):
+        commit = 'XLLM_COMPILE_COMMIT="$(git rev-parse HEAD)"'
+        self.assertIn(commit, self.script)
+        self.assertIn('echo "[source-version] xLLM commit: ${XLLM_COMPILE_COMMIT}"', self.script)
+        self.assertLess(
+            self.script.index('git submodule update --init --recursive'),
+            self.script.index(commit),
+        )
+
+    def test_different_origin_is_removed_and_recloned(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            old_remote = self._create_remote(root, "old", "old")
+            new_remote = self._create_remote(root, "new", "new")
+            project = root / "project"
+            project.mkdir()
+            self._git("clone", str(old_remote), str(project / "xllm"))
+            stale_file = project / "xllm" / "old-untracked-file"
+            stale_file.write_text("stale", encoding="utf-8")
+
+            result = self._run_prepare(project, new_remote)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("recloning source", result.stderr)
+            self.assertEqual(
+                (project / "xllm" / "repository.txt").read_text(), "new"
+            )
+            self.assertFalse(stale_file.exists())
+            origin = self._git(
+                "remote", "get-url", "origin", cwd=project / "xllm"
+            ).stdout.strip()
+            self.assertEqual(origin, str(new_remote))
+
+    def test_same_origin_preserves_existing_checkout(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            remote = self._create_remote(root, "same", "same")
+            project = root / "project"
+            project.mkdir()
+            self._git("clone", str(remote), str(project / "xllm"))
+            marker = project / "xllm" / "keep-untracked-file"
+            marker.write_text("keep", encoding="utf-8")
+
+            result = self._run_prepare(project, remote)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("recloning source", result.stderr)
+            self.assertTrue(marker.is_file())
+
+    def test_unreachable_new_origin_does_not_remove_existing_checkout(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            old_remote = self._create_remote(root, "old", "old")
+            missing_remote = root / "missing.git"
+            project = root / "project"
+            project.mkdir()
+            self._git("clone", str(old_remote), str(project / "xllm"))
+            marker = project / "xllm" / "keep-after-validation-error"
+            marker.write_text("keep", encoding="utf-8")
+
+            result = self._run_prepare(project, missing_remote)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("validate xLLM repository", result.stderr)
+            self.assertTrue(marker.is_file())
+            origin = self._git(
+                "remote", "get-url", "origin", cwd=project / "xllm"
+            ).stdout.strip()
+            self.assertEqual(origin, str(old_remote))
+
+
 class BuildXllmInContainerScriptTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -216,6 +363,195 @@ class BuildXllmInContainerScriptTests(unittest.TestCase):
         self.assertIn(replace, self.script)
         self.assertLess(self.script.index(stage), self.script.index(cleanup))
         self.assertLess(self.script.index(cleanup), self.script.index(replace))
+
+
+class PrepareXllmServiceScriptTests(unittest.TestCase):
+    _required_source_files = (
+        "CMakeLists.txt",
+        "prepare.sh",
+        "third_party/brpc/CMakeLists.txt",
+        "third_party/cpprestsdk/Release/CMakeLists.txt",
+        "third_party/etcd_cpp_apiv3/CMakeLists.txt",
+        "third_party/minja/CMakeLists.txt",
+        "third_party/sentencepiece/CMakeLists.txt",
+        "third_party/smhasher/src/CMakeLists.txt",
+        "third_party/xllm/CMakeLists.txt",
+        "third_party/xxHash/CMakeLists.txt",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.script = (cls.root / "tools" / "prepare_xllm_service.sh").read_text(
+            encoding="utf-8"
+        )
+
+    def _git(self, *args, cwd=None):
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+
+    def _create_remote(self, root: Path, name: str, content: str) -> Path:
+        remote = root / f"{name}.git"
+        source = root / f"{name}-source"
+        self._git("init", "--bare", str(remote))
+        self._git("init", "-b", "main", str(source))
+        for relative_path in self._required_source_files:
+            path = source / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        self._git("add", ".", cwd=source)
+        self._git(
+            "-c",
+            "user.name=xTask Test",
+            "-c",
+            "user.email=xtask@example.invalid",
+            "commit",
+            "-m",
+            "initial",
+            cwd=source,
+        )
+        self._git("remote", "add", "origin", str(remote), cwd=source)
+        self._git("push", "-u", "origin", "main", cwd=source)
+        self._git("symbolic-ref", "HEAD", "refs/heads/main", cwd=remote)
+        return remote
+
+    def _run_prepare(
+        self, project: Path, repository: Path, update_source: str = "1"
+    ):
+        tools_dir = project / "tools"
+        tools_dir.mkdir(parents=True)
+        shutil.copy2(self.root / "tools" / "prepare_xllm_service.sh", tools_dir)
+        (tools_dir / "build_xllm_service_in_container.sh").write_text(
+            "#!/bin/bash\nexit 0\n", encoding="utf-8"
+        )
+        fake_bin = project / "fake-bin"
+        fake_bin.mkdir()
+        docker = fake_bin / "docker"
+        docker.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        docker.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            XLLM_SERVICE_REPO_URL=str(repository),
+            XLLM_SERVICE_UPDATE_SOURCE=update_source,
+            GIT_MAX_RETRIES="1",
+            GIT_RETRY_DELAY="0",
+            PATH=f"{fake_bin}:{env['PATH']}",
+        )
+        return subprocess.run(
+            ["bash", "tools/prepare_xllm_service.sh", "main"],
+            cwd=project,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+
+    def _temporary_root(self):
+        # The production script intentionally requires build sources under
+        # /export/home because that exact tree is mounted into its container.
+        return tempfile.TemporaryDirectory(
+            prefix=".prepare-xllm-service-test-", dir=self.root
+        )
+
+    def test_default_repository_is_internal_service_repository(self):
+        self.assertIn(
+            'SERVICE_REPO_URL="${XLLM_SERVICE_REPO_URL:-git@coding.jd.com:xLLM_AI/xllm-service.git}"',
+            self.script,
+        )
+
+    def test_compile_source_version_is_logged_after_source_validation(self):
+        commit = 'SERVICE_COMPILE_COMMIT="$(git -C "${SERVICE_SOURCE_DIR}" rev-parse HEAD)"'
+        self.assertIn(commit, self.script)
+        self.assertIn(
+            'echo "[source-version] xLLM-Service commit: ${SERVICE_COMPILE_COMMIT}"',
+            self.script,
+        )
+        self.assertIn("third_party/xllm commit", self.script)
+        self.assertLess(
+            self.script.index("REQUIRED_SOURCE_FILES=("),
+            self.script.index(commit),
+        )
+
+    def test_different_origin_is_removed_and_recloned(self):
+        with self._temporary_root() as temporary_directory:
+            root = Path(temporary_directory)
+            old_remote = self._create_remote(root, "old", "old")
+            new_remote = self._create_remote(root, "new", "new")
+            project = root / "project"
+            project.mkdir()
+            self._git("clone", str(old_remote), str(project / "xllm-service"))
+            stale_file = project / "xllm-service" / "old-untracked-file"
+            stale_file.write_text("stale", encoding="utf-8")
+
+            result = self._run_prepare(project, new_remote)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("recloning source", result.stderr)
+            self.assertEqual(
+                (project / "xllm-service" / "CMakeLists.txt").read_text(), "new"
+            )
+            self.assertFalse(stale_file.exists())
+            origin = self._git(
+                "remote", "get-url", "origin", cwd=project / "xllm-service"
+            ).stdout.strip()
+            self.assertEqual(origin, str(new_remote))
+
+    def test_same_origin_preserves_existing_checkout(self):
+        with self._temporary_root() as temporary_directory:
+            root = Path(temporary_directory)
+            remote = self._create_remote(root, "same", "same")
+            project = root / "project"
+            project.mkdir()
+            self._git("clone", str(remote), str(project / "xllm-service"))
+            marker = project / "xllm-service" / "keep-untracked-file"
+            marker.write_text("keep", encoding="utf-8")
+
+            result = self._run_prepare(project, remote)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("recloning source", result.stderr)
+            self.assertTrue(marker.is_file())
+
+    def test_unreachable_new_origin_does_not_remove_existing_checkout(self):
+        with self._temporary_root() as temporary_directory:
+            root = Path(temporary_directory)
+            old_remote = self._create_remote(root, "old", "old")
+            missing_remote = root / "missing.git"
+            project = root / "project"
+            project.mkdir()
+            self._git("clone", str(old_remote), str(project / "xllm-service"))
+            marker = project / "xllm-service" / "keep-after-validation-error"
+            marker.write_text("keep", encoding="utf-8")
+
+            result = self._run_prepare(project, missing_remote)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("validate xLLM-Service repository", result.stderr)
+            self.assertTrue(marker.is_file())
+
+    def test_update_source_disabled_does_not_replace_existing_checkout(self):
+        with self._temporary_root() as temporary_directory:
+            root = Path(temporary_directory)
+            old_remote = self._create_remote(root, "old", "old")
+            new_remote = self._create_remote(root, "new", "new")
+            project = root / "project"
+            project.mkdir()
+            self._git("clone", str(old_remote), str(project / "xllm-service"))
+            marker = project / "xllm-service" / "keep-with-updates-disabled"
+            marker.write_text("keep", encoding="utf-8")
+
+            result = self._run_prepare(project, new_remote, update_source="0")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("XLLM_SERVICE_UPDATE_SOURCE=0", result.stderr)
+            self.assertTrue(marker.is_file())
 
 
 class BuildXllmServiceScriptTests(unittest.TestCase):

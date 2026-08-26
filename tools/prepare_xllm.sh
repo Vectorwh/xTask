@@ -9,6 +9,25 @@ WORK_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 XLLM_DIR="${WORK_ROOT}/xllm"
 IMAGE="quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605"
 
+# 分支可由第一个位置参数或 XLLM_BRANCH 指定，位置参数优先。
+# 不指定时保持历史行为：已有仓库更新当前分支，新仓库克隆远端默认分支。
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: bash tools/prepare_xllm.sh [branch]"
+  echo "Environment: XLLM_BRANCH, XLLM_REPO_URL"
+  exit 0
+fi
+if [[ $# -gt 1 ]]; then
+  echo "ERROR: expected at most one branch argument, got $# arguments." >&2
+  exit 2
+fi
+XLLM_TARGET_BRANCH="${1:-${XLLM_BRANCH:-}}"
+XLLM_REPO_URL="${XLLM_REPO_URL:-git@coding.jd.com:xLLM_AI/xllm.git}"
+if [[ -n "${XLLM_TARGET_BRANCH}" ]] \
+  && ! git check-ref-format --branch "${XLLM_TARGET_BRANCH}" >/dev/null 2>&1; then
+  echo "ERROR: invalid xLLM branch name: '${XLLM_TARGET_BRANCH}'." >&2
+  exit 2
+fi
+
 export http_proxy="http://bamboo-proxy.jd.com:80"
 export https_proxy="http://bamboo-proxy.jd.com:80"
 export no_proxy=".jd.com,.jd.local,.local"
@@ -41,15 +60,71 @@ retry() {
   done
 }
 
+update_xllm_checkout() {
+  if [[ -z "${XLLM_TARGET_BRANCH}" ]]; then
+    echo "xLLM already exists at '${XLLM_DIR}', pulling its current branch..."
+    retry "git pull" git -C "${XLLM_DIR}" pull --ff-only
+    return
+  fi
+
+  echo "Updating xLLM branch '${XLLM_TARGET_BRANCH}' in '${XLLM_DIR}'..."
+  if git -C "${XLLM_DIR}" show-ref --verify --quiet \
+    "refs/heads/${XLLM_TARGET_BRANCH}"; then
+    git -C "${XLLM_DIR}" checkout "${XLLM_TARGET_BRANCH}"
+    retry "git pull branch ${XLLM_TARGET_BRANCH}" \
+      git -C "${XLLM_DIR}" pull --ff-only origin "${XLLM_TARGET_BRANCH}"
+  else
+    retry "git fetch branch ${XLLM_TARGET_BRANCH}" \
+      git -C "${XLLM_DIR}" fetch origin \
+      "refs/heads/${XLLM_TARGET_BRANCH}:refs/remotes/origin/${XLLM_TARGET_BRANCH}"
+    git -C "${XLLM_DIR}" checkout -b "${XLLM_TARGET_BRANCH}" \
+      --track "origin/${XLLM_TARGET_BRANCH}"
+  fi
+}
+
+validate_xllm_repository() {
+  local target_ref="HEAD"
+  if [[ -n "${XLLM_TARGET_BRANCH}" ]]; then
+    target_ref="refs/heads/${XLLM_TARGET_BRANCH}"
+  fi
+  echo "Validating requested xLLM repository before removing the existing checkout..."
+  retry "validate xLLM repository and ref ${target_ref}" \
+    git ls-remote --exit-code "${XLLM_REPO_URL}" "${target_ref}" >/dev/null
+}
+
+# 仓库地址切换时不复用旧目录，避免旧分支、对象、子模块和未跟踪文件
+# 混入新仓库的构建。这里只允许删除当前 xTask 工程根目录下固定的 xllm 路径。
+if [[ -d "${XLLM_DIR}/.git" ]]; then
+  CURRENT_XLLM_REPO_URL="$(git -C "${XLLM_DIR}" remote get-url origin 2>/dev/null || true)"
+  if [[ "${CURRENT_XLLM_REPO_URL}" != "${XLLM_REPO_URL}" ]]; then
+    echo "WARN: existing xLLM origin differs from the requested repository; recloning source." >&2
+    echo "  existing: ${CURRENT_XLLM_REPO_URL:-<missing origin>}" >&2
+    echo "  requested: ${XLLM_REPO_URL}" >&2
+    # 先确认目标仓库（及指定分支）可访问，避免错误 URL 导致旧源码被删后无法重建。
+    validate_xllm_repository
+    if [[ "${XLLM_DIR}" != "${WORK_ROOT}/xllm" || "${XLLM_DIR}" == "/" ]]; then
+      echo "ERROR: refusing to remove unexpected xLLM path: '${XLLM_DIR}'." >&2
+      exit 1
+    fi
+    rm -rf -- "${XLLM_DIR}"
+  fi
+fi
+
 # 若 xLLM 已存在则仅更新（git pull），否则克隆
 if [[ -d "${XLLM_DIR}/.git" ]]; then
-  echo "xLLM already exists at '${XLLM_DIR}', pulling latest changes..."
-  retry "git pull" git -C "${XLLM_DIR}" pull --ff-only
+  update_xllm_checkout
 elif [[ -d "${XLLM_DIR}" ]]; then
   echo "ERROR: '${XLLM_DIR}' exists but is not a git repository." && exit 1
 else
-  echo "Cloning xLLM into '${XLLM_DIR}'..."
-  retry "git clone" git clone https://github.com/jd-opensource/xllm "${XLLM_DIR}"
+  if [[ -n "${XLLM_TARGET_BRANCH}" ]]; then
+    echo "Cloning xLLM branch '${XLLM_TARGET_BRANCH}' into '${XLLM_DIR}'..."
+    retry "git clone branch ${XLLM_TARGET_BRANCH}" \
+      git clone --branch "${XLLM_TARGET_BRANCH}" --single-branch \
+      "${XLLM_REPO_URL}" "${XLLM_DIR}"
+  else
+    echo "Cloning xLLM default branch into '${XLLM_DIR}'..."
+    retry "git clone" git clone "${XLLM_REPO_URL}" "${XLLM_DIR}"
+  fi
 fi
 
 cd "${XLLM_DIR}"
@@ -66,6 +141,14 @@ done
 
 # 初始化并递归更新所有子模块
 retry "git submodule update" git submodule update --init --recursive
+
+# 记录实际进入容器编译的源码版本。该输出会由 cron 同时写入 build.log
+# 和 case_framework.log，便于将归档产物与源码提交精确对应。
+XLLM_COMPILE_COMMIT="$(git rev-parse HEAD)"
+XLLM_COMPILE_BRANCH="$(git symbolic-ref --quiet --short HEAD || echo detached-HEAD)"
+echo "[source-version] xLLM repo: ${XLLM_REPO_URL}"
+echo "[source-version] xLLM branch: ${XLLM_COMPILE_BRANCH}"
+echo "[source-version] xLLM commit: ${XLLM_COMPILE_COMMIT}"
 
 # 容器内执行脚本（与本脚本同目录）
 IN_CONTAINER_SCRIPT="${SCRIPT_DIR}/build_xllm_in_container.sh"

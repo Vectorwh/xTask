@@ -28,3 +28,4 @@
 | `19` | 普通服务在同一节点拆分为多个小 runtime |
 | `20` | 多个 P/D 逻辑实例及同一逻辑实例的多个 node 共节点部署 |
 | `21` | 多个普通独立实例共用一组 xllm-service + etcd 做统一请求分发 |
+| `22` | 单机 AISBench ShareGPT `last` 模式多组 Prefix Cache 性能测试 |

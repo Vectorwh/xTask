@@ -15,6 +15,9 @@
 # test 阶段传给 main.py 的参数通过环境变量 MAIN_ARGS 指定（默认按用例组执行）：
 #   MAIN_ARGS="--case_group base_case_group" bash tools/cron_daily_build.sh test
 #   MAIN_ARGS="--case_name qwen3_8b_xllm_001"  bash tools/cron_daily_build.sh build test
+# 编译指定分支（两个构建阶段互相独立）：
+#   XLLM_BRANCH=main XLLM_SERVICE_BRANCH=main \
+#     bash tools/cron_daily_build.sh build service_build test
 #
 # 一次命令依次执行多组用例：通过 MAIN_ARGS_LIST 指定，用分号 ; 分隔各组参数，
 # 每组会单独执行一次 python main.py，按顺序先后执行（某组失败不影响后续组，最终返回非0）：
@@ -44,6 +47,9 @@ MAIN_ARGS="${MAIN_ARGS:-}"
 MAIN_ARGS_LIST="${MAIN_ARGS_LIST:-}"
 # 多组之间的等待秒数（仅 MAIN_ARGS_LIST 多组执行时生效，最后一组后不等待），默认 30s
 GROUP_INTERVAL="${GROUP_INTERVAL:-30}"
+# build/service_build 阶段的源码分支；为空时由 prepare 脚本保持历史默认行为。
+XLLM_BRANCH="${XLLM_BRANCH:-}"
+XLLM_SERVICE_BRANCH="${XLLM_SERVICE_BRANCH:-}"
 
 # 入参即需要依次执行的分段任务；未指定时默认 build + test
 STAGES=("$@")
@@ -80,8 +86,12 @@ run_build() {
     log "ERROR: '${PREPARE_SCRIPT}' not found."
     return 1
   fi
-  log "[stage:build] running: bash ${PREPARE_SCRIPT}  (log: ${BUILD_LOG})"
-  bash "${PREPARE_SCRIPT}" 2>&1 | tee "${BUILD_LOG}"
+  local build_args=()
+  if [[ -n "${XLLM_BRANCH}" ]]; then
+    build_args+=("${XLLM_BRANCH}")
+  fi
+  log "[stage:build] running: bash ${PREPARE_SCRIPT} ${build_args[*]} (branch: ${XLLM_BRANCH:-current/default}, log: ${BUILD_LOG})"
+  bash "${PREPARE_SCRIPT}" "${build_args[@]}" 2>&1 | tee "${BUILD_LOG}"
   return "${PIPESTATUS[0]}"
 }
 
@@ -90,8 +100,12 @@ run_service_build() {
     log "ERROR: '${PREPARE_SERVICE_SCRIPT}' not found."
     return 1
   fi
-  log "[stage:service_build] running: bash ${PREPARE_SERVICE_SCRIPT}  (log: ${SERVICE_BUILD_LOG})"
-  bash "${PREPARE_SERVICE_SCRIPT}" 2>&1 | tee "${SERVICE_BUILD_LOG}"
+  local build_args=()
+  if [[ -n "${XLLM_SERVICE_BRANCH}" ]]; then
+    build_args+=("${XLLM_SERVICE_BRANCH}")
+  fi
+  log "[stage:service_build] running: bash ${PREPARE_SERVICE_SCRIPT} ${build_args[*]} (branch: ${XLLM_SERVICE_BRANCH:-current/default}, log: ${SERVICE_BUILD_LOG})"
+  bash "${PREPARE_SERVICE_SCRIPT}" "${build_args[@]}" 2>&1 | tee "${SERVICE_BUILD_LOG}"
   return "${PIPESTATUS[0]}"
 }
 

@@ -14,6 +14,24 @@ IMAGE="${XLLM_SERVICE_BUILD_IMAGE:-quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9
 IN_CONTAINER_SCRIPT="${SCRIPT_DIR}/build_xllm_service_in_container.sh"
 UPDATE_SOURCE="${XLLM_SERVICE_UPDATE_SOURCE:-1}"
 
+# 分支可由第一个位置参数或 XLLM_SERVICE_BRANCH 指定，位置参数优先。
+# 不指定时保持历史行为：已有仓库更新当前分支，新仓库克隆远端默认分支。
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: bash tools/prepare_xllm_service.sh [branch]"
+  echo "Environment: XLLM_SERVICE_BRANCH, XLLM_SERVICE_REPO_URL"
+  exit 0
+fi
+if [[ $# -gt 1 ]]; then
+  echo "ERROR: expected at most one branch argument, got $# arguments." >&2
+  exit 2
+fi
+SERVICE_TARGET_BRANCH="${1:-${XLLM_SERVICE_BRANCH:-}}"
+if [[ -n "${SERVICE_TARGET_BRANCH}" ]] \
+  && ! git check-ref-format --branch "${SERVICE_TARGET_BRANCH}" >/dev/null 2>&1; then
+  echo "ERROR: invalid xLLM-Service branch name: '${SERVICE_TARGET_BRANCH}'." >&2
+  exit 2
+fi
+
 case "${UPDATE_SOURCE}" in
   0|1) ;;
   *)
@@ -26,8 +44,8 @@ export http_proxy="${http_proxy:-http://bamboo-proxy.jd.com:80}"
 export https_proxy="${https_proxy:-http://bamboo-proxy.jd.com:80}"
 export no_proxy="${no_proxy:-.jd.com,.jd.local,.local}"
 
-GIT_MAX_RETRIES="${GIT_MAX_RETRIES:-5}"
-GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-10}"
+GIT_MAX_RETRIES="${GIT_MAX_RETRIES:-50}"
+GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-30}"
 retry() {
   local description="$1"
   shift
@@ -42,6 +60,59 @@ retry() {
     ((attempt++))
   done
 }
+
+update_service_checkout() {
+  if [[ -z "${SERVICE_TARGET_BRANCH}" ]]; then
+    echo "xLLM-Service already exists at '${SERVICE_SOURCE_DIR}', pulling its current branch..."
+    retry "xLLM-Service git pull" git -C "${SERVICE_SOURCE_DIR}" pull --ff-only
+    return
+  fi
+
+  echo "Updating xLLM-Service branch '${SERVICE_TARGET_BRANCH}' in '${SERVICE_SOURCE_DIR}'..."
+  if git -C "${SERVICE_SOURCE_DIR}" show-ref --verify --quiet \
+    "refs/heads/${SERVICE_TARGET_BRANCH}"; then
+    git -C "${SERVICE_SOURCE_DIR}" checkout "${SERVICE_TARGET_BRANCH}"
+    retry "xLLM-Service git pull branch ${SERVICE_TARGET_BRANCH}" \
+      git -C "${SERVICE_SOURCE_DIR}" pull --ff-only origin "${SERVICE_TARGET_BRANCH}"
+  else
+    retry "xLLM-Service git fetch branch ${SERVICE_TARGET_BRANCH}" \
+      git -C "${SERVICE_SOURCE_DIR}" fetch origin \
+      "refs/heads/${SERVICE_TARGET_BRANCH}:refs/remotes/origin/${SERVICE_TARGET_BRANCH}"
+    git -C "${SERVICE_SOURCE_DIR}" checkout -b "${SERVICE_TARGET_BRANCH}" \
+      --track "origin/${SERVICE_TARGET_BRANCH}"
+  fi
+}
+
+validate_service_repository() {
+  local target_ref="HEAD"
+  if [[ -n "${SERVICE_TARGET_BRANCH}" ]]; then
+    target_ref="refs/heads/${SERVICE_TARGET_BRANCH}"
+  fi
+  echo "Validating requested xLLM-Service repository before removing the existing checkout..."
+  retry "validate xLLM-Service repository and ref ${target_ref}" \
+    git ls-remote --exit-code "${SERVICE_REPO_URL}" "${target_ref}" >/dev/null
+}
+
+# 仓库地址切换时不复用旧目录，避免旧分支、对象、子模块和未跟踪文件
+# 混入新仓库的构建。这里只允许删除当前 xTask 工程根目录下固定的 xllm-service 路径。
+if [[ -d "${SERVICE_SOURCE_DIR}/.git" ]]; then
+  CURRENT_SERVICE_REPO_URL="$(git -C "${SERVICE_SOURCE_DIR}" remote get-url origin 2>/dev/null || true)"
+  if [[ "${CURRENT_SERVICE_REPO_URL}" != "${SERVICE_REPO_URL}" ]]; then
+    echo "WARN: existing xLLM-Service origin differs from the requested repository; recloning source." >&2
+    echo "  existing: ${CURRENT_SERVICE_REPO_URL:-<missing origin>}" >&2
+    echo "  requested: ${SERVICE_REPO_URL}" >&2
+    if [[ "${UPDATE_SOURCE}" != "1" ]]; then
+      echo "ERROR: XLLM_SERVICE_UPDATE_SOURCE=0 cannot replace the existing xLLM-Service checkout." >&2
+      exit 1
+    fi
+    validate_service_repository
+    if [[ "${SERVICE_SOURCE_DIR}" != "${WORK_ROOT}/xllm-service" || "${SERVICE_SOURCE_DIR}" == "/" ]]; then
+      echo "ERROR: refusing to remove unexpected xLLM-Service path: '${SERVICE_SOURCE_DIR}'." >&2
+      exit 1
+    fi
+    rm -rf -- "${SERVICE_SOURCE_DIR}"
+  fi
+fi
 
 if [[ -d "${SERVICE_SOURCE_DIR}/.git" ]]; then
   git config --global --add safe.directory "${SERVICE_SOURCE_DIR}" 2>/dev/null || true
@@ -64,9 +135,15 @@ if [[ -d "${SERVICE_SOURCE_DIR}/.git" ]]; then
         exit 1
       fi
     fi
-    echo "xLLM-Service already exists at '${SERVICE_SOURCE_DIR}', pulling latest changes..."
-    retry "xLLM-Service git pull" git -C "${SERVICE_SOURCE_DIR}" pull --ff-only
+    update_service_checkout
   else
+    if [[ -n "${SERVICE_TARGET_BRANCH}" ]]; then
+      CURRENT_SERVICE_BRANCH="$(git -C "${SERVICE_SOURCE_DIR}" symbolic-ref --quiet --short HEAD || true)"
+      if [[ "${CURRENT_SERVICE_BRANCH}" != "${SERVICE_TARGET_BRANCH}" ]]; then
+        echo "ERROR: XLLM_SERVICE_UPDATE_SOURCE=0 cannot switch from branch '${CURRENT_SERVICE_BRANCH:-detached HEAD}' to '${SERVICE_TARGET_BRANCH}'." >&2
+        exit 1
+      fi
+    fi
     echo "Using existing xLLM-Service checkout without pulling: ${SERVICE_SOURCE_DIR}"
   fi
 elif [[ -e "${SERVICE_SOURCE_DIR}" ]]; then
@@ -74,8 +151,15 @@ elif [[ -e "${SERVICE_SOURCE_DIR}" ]]; then
   exit 1
 else
   mkdir -p "$(dirname "${SERVICE_SOURCE_DIR}")"
-  echo "Cloning xLLM-Service into '${SERVICE_SOURCE_DIR}'..."
-  retry "xLLM-Service git clone" git clone "${SERVICE_REPO_URL}" "${SERVICE_SOURCE_DIR}"
+  if [[ -n "${SERVICE_TARGET_BRANCH}" ]]; then
+    echo "Cloning xLLM-Service branch '${SERVICE_TARGET_BRANCH}' into '${SERVICE_SOURCE_DIR}'..."
+    retry "xLLM-Service git clone branch ${SERVICE_TARGET_BRANCH}" \
+      git clone --branch "${SERVICE_TARGET_BRANCH}" --single-branch \
+      "${SERVICE_REPO_URL}" "${SERVICE_SOURCE_DIR}"
+  else
+    echo "Cloning xLLM-Service default branch into '${SERVICE_SOURCE_DIR}'..."
+    retry "xLLM-Service git clone" git clone "${SERVICE_REPO_URL}" "${SERVICE_SOURCE_DIR}"
+  fi
 fi
 
 git config --global --add safe.directory "${SERVICE_SOURCE_DIR}" 2>/dev/null || true
@@ -105,6 +189,19 @@ for source_file in "${REQUIRED_SOURCE_FILES[@]}"; do
     exit 1
   fi
 done
+
+# 记录实际进入容器编译的源码版本。该输出会由 cron 写入 Service 编译日志
+# 和 case_framework.log，便于将归档产物与源码提交精确对应。
+SERVICE_COMPILE_COMMIT="$(git -C "${SERVICE_SOURCE_DIR}" rev-parse HEAD)"
+SERVICE_COMPILE_BRANCH="$(git -C "${SERVICE_SOURCE_DIR}" symbolic-ref --quiet --short HEAD || echo detached-HEAD)"
+echo "[source-version] xLLM-Service repo: ${SERVICE_REPO_URL}"
+echo "[source-version] xLLM-Service branch: ${SERVICE_COMPILE_BRANCH}"
+echo "[source-version] xLLM-Service commit: ${SERVICE_COMPILE_COMMIT}"
+if git -C "${SERVICE_SOURCE_DIR}/third_party/xllm" rev-parse HEAD >/dev/null 2>&1; then
+  SERVICE_XLLM_COMPILE_COMMIT="$(git -C "${SERVICE_SOURCE_DIR}/third_party/xllm" rev-parse HEAD)"
+  echo "[source-version] xLLM-Service third_party/xllm commit: ${SERVICE_XLLM_COMPILE_COMMIT}"
+fi
+
 if [[ ! -f "${IN_CONTAINER_SCRIPT}" ]]; then
   echo "ERROR: '${IN_CONTAINER_SCRIPT}' not found." >&2
   exit 1
