@@ -7,7 +7,6 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 XLLM_DIR="${WORK_ROOT}/xllm"
-IMAGE="quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605"
 
 # 分支可由第一个位置参数或 XLLM_BRANCH 指定，位置参数优先。
 # 不指定时保持历史行为：已有仓库更新当前分支，新仓库克隆远端默认分支。
@@ -27,6 +26,14 @@ if [[ -n "${XLLM_TARGET_BRANCH}" ]] \
   echo "ERROR: invalid xLLM branch name: '${XLLM_TARGET_BRANCH}'." >&2
   exit 2
 fi
+
+IMAGE="${XLLM_BUILD_IMAGE:-}"
+if [[ -z "${IMAGE}" ]]; then
+  IMAGE="$("${PYTHON_EXEC:-python}" -c \
+    'import json, sys; cfg = json.load(open(sys.argv[1], encoding="utf-8"))["XLLM_CONFIG"]; print("{}:{}".format(cfg["image_home"], cfg["default_image_name"]))' \
+    "${WORK_ROOT}/config/xllm_config.json")"
+fi
+echo "[build-image] xLLM image: ${IMAGE}"
 
 export http_proxy="http://bamboo-proxy.jd.com:80"
 export https_proxy="http://bamboo-proxy.jd.com:80"

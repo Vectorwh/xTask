@@ -94,7 +94,7 @@ class Json_Reader:
             "startup_command": "",  # 启动命令（根据任务动态生成）
             "startup_timeout": 300,
             "benchmark_command": "",  # 基准测试命令（根据任务动态生成）
-            "benchmark_timeout": 7200,
+            "benchmark_timeout": cfg_data.get("benchmark_timeout", 7200),
             "network_mode": "host",
             "privileged": True,
             "auto_remove": False,  # 默认不自动删除，便于调试

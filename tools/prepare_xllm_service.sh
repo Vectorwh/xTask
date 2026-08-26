@@ -10,7 +10,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SERVICE_SOURCE_DIR="${XLLM_SERVICE_SOURCE_DIR:-${WORK_ROOT}/xllm-service}"
 SERVICE_REPO_URL="${XLLM_SERVICE_REPO_URL:-git@coding.jd.com:xLLM_AI/xllm-service.git}"
-IMAGE="${XLLM_SERVICE_BUILD_IMAGE:-quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605}"
 IN_CONTAINER_SCRIPT="${SCRIPT_DIR}/build_xllm_service_in_container.sh"
 UPDATE_SOURCE="${XLLM_SERVICE_UPDATE_SOURCE:-1}"
 
@@ -31,6 +30,14 @@ if [[ -n "${SERVICE_TARGET_BRANCH}" ]] \
   echo "ERROR: invalid xLLM-Service branch name: '${SERVICE_TARGET_BRANCH}'." >&2
   exit 2
 fi
+
+IMAGE="${XLLM_SERVICE_BUILD_IMAGE:-}"
+if [[ -z "${IMAGE}" ]]; then
+  IMAGE="$("${PYTHON_EXEC:-python}" -c \
+    'import json, sys; cfg = json.load(open(sys.argv[1], encoding="utf-8"))["XLLM_CONFIG"]; print("{}:{}".format(cfg["image_home"], cfg["default_image_name"]))' \
+    "${WORK_ROOT}/config/xllm_config.json")"
+fi
+echo "[build-image] xLLM-Service image: ${IMAGE}"
 
 case "${UPDATE_SOURCE}" in
   0|1) ;;
