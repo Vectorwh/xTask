@@ -92,6 +92,8 @@ def _build_script_params(config):
         ),
         'LOG_DIR': 'log',
         'COMMUNICATION_BACKEND': config.get('communication_backend', 'hccl'),
+        'XLLM_BINARY': config.get('xllm_binary', 'xllm'),
+        'TRITON_BINARY_PATH': config.get('triton_binary_path', ''),
         'DP_SIZE': config.get("dp_size", ""),
         'EP_SIZE': config.get("tp_size", ""),
         # xTask reads local serving logs from the host. Use the process owner

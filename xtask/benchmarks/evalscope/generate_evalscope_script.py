@@ -54,6 +54,9 @@ def generate_evalscope_script(
     shell_content = []
     # 基础配置：shebang、出错退出、日志输出
     shell_content.append("#!/bin/bash")
+    shell_content.append("unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY")
+    shell_content.append('export NO_PROXY="localhost,127.0.0.1,0.0.0.0"')
+    shell_content.append('export no_proxy="$NO_PROXY"')
     shell_content.append('echo "===== 开始执行evalscope测试脚本 ====="')
 
     # ========== 3. 构造精度测试脚本配置 ==========
@@ -93,7 +96,7 @@ def generate_evalscope_script(
     
     # ========== 4. 构造性能测试脚本配置 ==========
     if "perf" in task_config.get("metrics"):
-        request_rate = perf_cfg.get("request_rate", 0)
+        request_rate = perf_cfg.get("request_rate", -1)
         number_requests = perf_cfg.get("num_prompts", 1)
         min_prompt_length = perf_cfg.get("min_prompt_length", 698)
         max_prompt_length = perf_cfg.get("max_prompt_length", 698)
@@ -107,6 +110,10 @@ def generate_evalscope_script(
         batch_size = perf_cfg.get("batch_size", 32)
         tokenizer_path = path_mapping_in_container(model_path)
         seed = perf_cfg.get("seed", 42)
+        warmup_num = perf_cfg.get("warmup_num")
+        temperature = perf_cfg.get("temperature")
+        stream = bool(perf_cfg.get("stream", False))
+        tokenize_prompt = bool(perf_cfg.get("tokenize_prompt", False))
         
         perf_cmd = (
             f'evalscope perf --model {model_name} '
@@ -129,6 +136,15 @@ def generate_evalscope_script(
             f'--outputs-dir {output_file_path_incontainer} '
             f'--extra-args \'{{"ignore_eos": true}}\''
         )
+
+        if warmup_num is not None:
+            perf_cmd += f" --warmup-num {warmup_num}"
+        if temperature is not None:
+            perf_cmd += f" --temperature {temperature}"
+        if stream:
+            perf_cmd += " --stream"
+        if tokenize_prompt:
+            perf_cmd += " --tokenize-prompt"
 
         shell_content.append(f'echo "执行性能测试命令：{perf_cmd}"')
         append_checked_command(

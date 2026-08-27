@@ -211,17 +211,50 @@ class EvalscopeResultParser:
             TIME_MS = 1000
             # n_bs = float(summary_metrics.get('Number of concurrency', 1))
             # div_bs = float(1 / n_bs) if n_bs > 0.0 else 0.0
-            n_count = summary_metrics.get('Total requests', 1)
+            n_count = summary_metrics.get(
+                'Total Requests', summary_metrics.get('Total requests', 1)
+            )
             rawdata_fields = {
-                'E2EL': [('Latency (s)', TIME_MS), ('Average latency (s)', TIME_MS)],
-                'TTFT': [('TTFT (s)', TIME_MS), ('Average time to first token (s)', TIME_MS)], 
-                'TPOT': [('TPOT (s)', TIME_MS), ('Average time per output token (s)', TIME_MS)],
-                'ITL': [('ITL (s)', TIME_MS), ('Average inter-token latency (s)', TIME_MS)],
-                'InputTokens': [('Input tokens', 1), ('Average input tokens per request', 1)], 
-                'OutputTokens': [('Output tokens', 1), ('Average output tokens per request', 1)],
-                'OutputTokenThroughput': [('Output (tok/s)', 1), ('Output token throughput (tok/s)', 1)]
+                'E2EL': (
+                    [('Latency (s)', TIME_MS)],
+                    [('Avg Latency (s)', TIME_MS), ('Average latency (s)', TIME_MS)],
+                ),
+                'TTFT': (
+                    [('TTFT (ms)', 1), ('TTFT (s)', TIME_MS)],
+                    [('TTFT (ms)', 1), ('Average time to first token (s)', TIME_MS)],
+                ),
+                'TPOT': (
+                    [('TPOT (ms)', 1), ('TPOT (s)', TIME_MS)],
+                    [('TPOT (ms)', 1), ('Average time per output token (s)', TIME_MS)],
+                ),
+                'ITL': (
+                    [('ITL (ms)', 1), ('ITL (s)', TIME_MS)],
+                    [('ITL (ms)', 1), ('Average inter-token latency (s)', TIME_MS)],
+                ),
+                'InputTokens': (
+                    [('Input tokens', 1)],
+                    [('Avg Input Tokens', 1), ('Average input tokens per request', 1)],
+                ),
+                'OutputTokens': (
+                    [('Output tokens', 1)],
+                    [('Avg Output Tokens', 1), ('Average output tokens per request', 1)],
+                ),
+                'OutputTokenThroughput': (
+                    [('Output (tok/s)', 1)],
+                    [('Output Throughput (tok/s)', 1), ('Output token throughput (tok/s)', 1)],
+                ),
                 # 'OutputTokenThroughput': [('Output (tok/s)', div_bs), ('Output token throughput (tok/s)', div_bs)]
             }
+
+            def read_metric(metrics, candidates):
+                for metric_name, multiplier in candidates:
+                    value = metrics.get(metric_name)
+                    if value is not None:
+                        return float(value) * multiplier
+                raise KeyError(
+                    f"None of the EvalScope metrics are present: "
+                    f"{[name for name, _ in candidates]}"
+                )
 
             for key, value in rawdata_fields.items():
                 param_name = key.strip()
@@ -229,13 +262,13 @@ class EvalscopeResultParser:
                 
                 # 创建指标对象
                 metrics = PerformanceMetrics(
-                    average=float(summary_metrics.get(value[1][0])) * value[1][1],
+                    average=read_metric(summary_metrics, value[1]),
                     min=0.0,
                     max=0.0,
                     median=0.0,
-                    p75=float(p75_metrics.get(value[0][0])) * value[0][1],
-                    p90=float(p90_metrics.get(value[0][0])) * value[0][1],
-                    p99=float(p99_metrics.get(value[0][0])) * value[0][1],
+                    p75=read_metric(p75_metrics, value[0]),
+                    p90=read_metric(p90_metrics, value[0]),
+                    p99=read_metric(p99_metrics, value[0]),
                     n=n_count
                 )
 
@@ -243,6 +276,20 @@ class EvalscopeResultParser:
                 result.add_parameter(param_name, stage, metrics)
             
             result.metadata = dict(summary_metrics)
+            # Normalize EvalScope 1.8 title-cased summary keys to the names
+            # consumed by xTask's historical ResultSummary adapter.
+            aliases = {
+                'Failed Requests': 'Failed requests',
+                'Concurrency': 'Number of concurrency',
+                'Req Throughput (req/s)': 'Request throughput (req/s)',
+                'Total Throughput (tok/s)': 'Total token throughput (tok/s)',
+            }
+            for source_name, target_name in aliases.items():
+                if (
+                    source_name in summary_metrics
+                    and target_name not in result.metadata
+                ):
+                    result.metadata[target_name] = summary_metrics[source_name]
             
         # 计算摘要
         result.calculate_summary()

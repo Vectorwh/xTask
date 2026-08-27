@@ -7,7 +7,12 @@ export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_paths; print(get
 #export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/
 export PYTORCH_INSTALL_PATH="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
 export LIBTORCH_ROOT="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
-export TRITON_BINARY_PATH="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(next(iter(importlib.util.find_spec("xllm").submodule_search_locations))) / "triton_npu" / "binary")')"
+TRITON_BINARY_PATH_CONFIG="{TRITON_BINARY_PATH}"
+if [ -n "$TRITON_BINARY_PATH_CONFIG" ]; then
+  export TRITON_BINARY_PATH="$TRITON_BINARY_PATH_CONFIG"
+else
+  export TRITON_BINARY_PATH="$(python3 -c 'import importlib.util, pathlib; spec=importlib.util.find_spec("xllm"); print(pathlib.Path(next(iter(spec.submodule_search_locations))) / "triton_npu" / "binary")')"
+fi
 #export LD_LIBRARY_PATH=/usr/local/libtorch_npu/lib:$LD_LIBRARY_PATH
 
 export ASCEND_RT_VISIBLE_DEVICES={VISIBLE_DEVICES}
@@ -25,6 +30,9 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export NPU_MEMORY_FRACTION=0.98
 export ATB_WORKSPACE_MEM_ALLOC_ALG_TYPE=3
 export ATB_WORKSPACE_MEM_ALLOC_GLOBAL=1
+export INF_NAN_MODE_ENABLE=0
+export INF_NAN_MODE_FORCE_DISABLE=1
+export PROFILING_MODE="dynamic"
 
 # 并行配置
 export OMP_NUM_THREADS=12
@@ -56,6 +64,7 @@ LOG_DIR={LOG_DIR}
 COMMUNICATION_BACKEND={COMMUNICATION_BACKEND}
 SERVING_EXTENSIABLE_PARAM={SERVING_EXTENSIABLE_PARAM}
 USERID={USERID}
+XLLM_BINARY="{XLLM_BINARY}"
 mkdir -p $LOG_DIR
 if [ "{PD_ENABLED}" = "true" ]; then
   export no_proxy="{PD_NO_PROXY}"
@@ -89,7 +98,7 @@ do
   touch "$LOG_FILE"
   chown "$USERID" "$LOG_FILE"
   xllm_command=(
-  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) xllm \
+  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) "$XLLM_BINARY" \
 #   xllm \
     --model "$MODEL_PATH" \
     --port "$PORT" \
