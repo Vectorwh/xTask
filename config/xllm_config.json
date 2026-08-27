@@ -3,10 +3,10 @@
         "xllm_version": "main",
         "image_home": "quay.io/jd_xllm/xllm-ai",
         "default_image_name": "xllm-dev-a3-arm-cann9-20260605",
-        "enable_proxy": true,
+        "enable_proxy": false,
         "https_proxy_url": "http://bamboo-proxy.jd.com:80",
         "http_proxy_url": "http://bamboo-proxy.jd.com:80",
-        "sering_container_name": "",
+        "serving_container_name": "verl-011",
         "serving_script_path": "",
         "serving_wait_time": 30
     }
