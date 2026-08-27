@@ -453,7 +453,30 @@ class AisbenchScriptGenerationTests(unittest.TestCase):
         self.assertIn("--inputlen=2048", command_text)
         self.assertIn("--prefix-len=512", command_text)
         self.assertIn("--prefix-source=dataset", command_text)
+        self.assertIn("--prefix-assembly=single", command_text)
         self.assertNotIn("prefix-text", command_text)
+
+        task_config["benchmark"]["perf"]["prefix_cache"][
+            "prefix_assembly"
+        ] = "packed"
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            packed_commands, _ = preprocess_dataset(
+                "sharegpt", task_config, "/tmp/xtask-prefix-test"
+            )
+        packed_command_text = "\n".join(packed_commands)
+        self.assertIn("--prefix-assembly=packed", packed_command_text)
+        self.assertIn("-p512-apacked-g4-n8.json", packed_command_text)
+
+        task_config["benchmark"]["perf"]["prefix_cache"][
+            "prefix_assembly"
+        ] = "invalid"
+        with self.assertRaisesRegex(ValueError, "must be single or packed"):
+            preprocess_dataset(
+                "sharegpt", task_config, "/tmp/xtask-prefix-test"
+            )
 
     def test_prefix_cache_rejects_non_last_mode(self):
         from xtask.datasets.dataset_manger import preprocess_dataset

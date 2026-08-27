@@ -2,6 +2,7 @@ import json
 from transformers import AutoTokenizer
 import argparse
 import copy
+import heapq
 import os
 import sys
 import time
@@ -26,6 +27,9 @@ def parse_arguments():
     parser.add_argument("--prefix-source", type=str, default="dataset",
                         choices=("dataset",),
                         help="source of the shared prefix")
+    parser.add_argument("--prefix-assembly", type=str, default="single",
+                        choices=("single", "packed"),
+                        help="build the prefix from one or multiple conversations")
     parser.add_argument("--prefix-seed-requests", type=int, choices=(0, 1), default=1,
                         help="put one seed request per group at the beginning")
     parser.add_argument("--prefix-order", type=str, choices=("grouped", "interleaved"),
@@ -429,8 +433,373 @@ def _select_prefix_groups(candidates, prefix_groups, prefix_len):
     )
 
 
+def _packed_history_prefix_probe(tokenizer, history):
+    """Measure the prefix before request-specific final-user content."""
+    probes = []
+    for marker in ("0", "1"):
+        conversations = copy.deepcopy(history)
+        conversations.extend(
+            [
+                {"from": "human", "value": marker},
+                {"from": "gpt", "value": ""},
+            ]
+        )
+        probes.append(_sharegpt_prompt_token_ids(tokenizer, conversations))
+    return _common_prefix_length(probes), probes[0]
+
+
+def _packed_source_history(tokenizer, conversations, input_len):
+    """Return the longest complete source history that leaves suffix room."""
+    shared_length, probe_tokens = _packed_history_prefix_probe(
+        tokenizer, conversations
+    )
+    if shared_length < input_len:
+        return conversations, shared_length, probe_tokens
+
+    best = None
+    for history_end in range(2, len(conversations) + 1, 2):
+        history = conversations[:history_end]
+        shared_length, probe_tokens = _packed_history_prefix_probe(
+            tokenizer, history
+        )
+        if shared_length >= input_len:
+            break
+        best = (history, shared_length, probe_tokens)
+    return best
+
+
+def _packed_prefix_units(tokenizer, samples, prefix_len, input_len, prefix_groups):
+    """Tokenize a longest-first source pool large enough for all groups."""
+    ranked_samples = sorted(
+        enumerate(samples),
+        key=lambda item: sum(
+            len(message["value"]) for message in item[1]["conversations"]
+        ),
+        reverse=True,
+    )
+    empty_prefix_length, _ = _packed_history_prefix_probe(tokenizer, [])
+    required_capacity = prefix_len * prefix_groups
+    target_capacity = (required_capacity * 5 + 3) // 4
+    minimum_units = max(prefix_groups * 4, prefix_groups)
+    capacity = 0
+    units = []
+
+    for sample_index, sample in ranked_samples:
+        source_history = _packed_source_history(
+            tokenizer, sample["conversations"], input_len
+        )
+        if source_history is None:
+            continue
+        history, shared_length, probe_tokens = source_history
+        contribution = max(1, shared_length - empty_prefix_length)
+        units.append(
+            {
+                "source_index": sample_index,
+                "source_id": sample.get("id", f"sharegpt-{sample_index}"),
+                "history": history,
+                "history_turns": len(history) // 2,
+                "probe_tokens": probe_tokens,
+                "prefix_base_tokens": shared_length,
+                "contribution_tokens": contribution,
+            }
+        )
+        capacity += min(contribution, prefix_len)
+        if len(units) >= minimum_units and capacity >= target_capacity:
+            break
+
+    if len(units) < prefix_groups or capacity < required_capacity:
+        raise ValueError(
+            "ShareGPT source dataset does not contain enough aggregate complete "
+            f"history for {prefix_groups} packed prefix groups at "
+            f"prefix_len={prefix_len}"
+        )
+    return units
+
+
+def _select_packed_anchors(units, prefix_groups, prefix_len):
+    """Reserve one longest, distinct under-target anchor for every group."""
+    ordered = sorted(
+        units,
+        key=lambda unit: (
+            0 if unit["prefix_base_tokens"] <= prefix_len else 1,
+            abs(prefix_len - unit["prefix_base_tokens"]),
+        ),
+    )
+    selected = []
+    for unit in ordered:
+        if all(
+            _common_prefix_length([unit["probe_tokens"], other["probe_tokens"]])
+            < prefix_len
+            for other in selected
+        ):
+            selected.append(unit)
+        if len(selected) == prefix_groups:
+            return selected
+    raise ValueError(
+        "ShareGPT source dataset does not contain enough distinct anchors for "
+        f"{prefix_groups} packed prefix groups at prefix_len={prefix_len}"
+    )
+
+
+def _packed_unit_order(units, current_length, prefix_len):
+    def sort_key(unit):
+        estimated_length = current_length + unit["contribution_tokens"]
+        if estimated_length <= prefix_len:
+            return 0, prefix_len - estimated_length
+        return 1, estimated_length - prefix_len
+
+    return sorted(units, key=sort_key)
+
+
+def _best_packed_fragment(tokenizer, history, units, prefix_len, input_len):
+    """Use complete turns from one final source when its full history is too large."""
+    below_target = []
+    reached_target = []
+    for unit in units:
+        for history_end in range(2, len(unit["history"]) + 1, 2):
+            combined = history + unit["history"][:history_end]
+            shared_length, _ = _packed_history_prefix_probe(tokenizer, combined)
+            if shared_length >= input_len:
+                break
+            candidate = (shared_length, unit, history_end)
+            if shared_length >= prefix_len:
+                reached_target.append(candidate)
+                break
+            below_target.append(candidate)
+
+    if reached_target:
+        return min(reached_target, key=lambda item: item[0] - prefix_len)
+    if below_target:
+        return max(below_target, key=lambda item: item[0])
+    return None
+
+
+def _fit_packed_message_prefix(tokenizer, history, message_index, prefix_len):
+    """Truncate one shared message to the smallest prefix at or above target."""
+    original_text = history[message_index]["value"]
+    source_token_ids = tokenizer.encode(original_text, add_special_tokens=False)
+    cache = {}
+
+    def candidate_for(size):
+        if size not in cache:
+            history[message_index]["value"] = _decode_token_ids(
+                tokenizer, source_token_ids[:size]
+            )
+            cache[size] = _packed_history_prefix_probe(tokenizer, history)
+        return cache[size]
+
+    empty_length, _ = candidate_for(0)
+    full_length, _ = candidate_for(len(source_token_ids))
+    if empty_length > prefix_len or full_length < prefix_len:
+        history[message_index]["value"] = original_text
+        return None
+
+    guessed_size = max(
+        0,
+        min(
+            len(source_token_ids),
+            len(source_token_ids) - (full_length - prefix_len),
+        ),
+    )
+    for _ in range(8):
+        guessed_length, guessed_probe = candidate_for(guessed_size)
+        if guessed_length == prefix_len:
+            history[message_index]["value"] = _decode_token_ids(
+                tokenizer, source_token_ids[:guessed_size]
+            )
+            return guessed_length, guessed_probe
+        next_size = max(
+            0,
+            min(
+                len(source_token_ids),
+                guessed_size + (prefix_len - guessed_length),
+            ),
+        )
+        if next_size == guessed_size:
+            break
+        guessed_size = next_size
+
+    low = 0
+    high = len(source_token_ids)
+    while low < high:
+        middle = (low + high) // 2
+        candidate_length, _ = candidate_for(middle)
+        if candidate_length < prefix_len:
+            low = middle + 1
+        else:
+            high = middle
+
+    candidate_sizes = {0, len(source_token_ids), low}
+    candidate_sizes.update(
+        range(max(0, low - 32), min(len(source_token_ids), low + 32) + 1)
+    )
+    fitted = []
+    for size in sorted(candidate_sizes):
+        candidate_length, probe_tokens = candidate_for(size)
+        if candidate_length >= prefix_len:
+            fitted.append((candidate_length, size, probe_tokens))
+    if not fitted:
+        history[message_index]["value"] = original_text
+        return None
+
+    fitted_length, fitted_size, probe_tokens = min(
+        fitted, key=lambda item: (item[0] - prefix_len, item[1])
+    )
+    history[message_index]["value"] = _decode_token_ids(
+        tokenizer, source_token_ids[:fitted_size]
+    )
+    return fitted_length, probe_tokens
+
+
+def _fit_packed_history_prefix(
+    tokenizer, history, source_units, prefix_len, input_len
+):
+    """Remove excess packed tail content and fit the shared prefix boundary."""
+    history = copy.deepcopy(history)
+    source_units = list(source_units)
+    tail_truncated = False
+
+    while len(history) >= 2:
+        shorter_history = history[:-2]
+        shorter_length, _ = _packed_history_prefix_probe(
+            tokenizer, shorter_history
+        )
+        if shorter_length < prefix_len:
+            break
+        history = shorter_history
+        tail_truncated = True
+        source_unit, source_turns = source_units[-1]
+        if source_turns == 1:
+            source_units.pop()
+        else:
+            source_units[-1] = (source_unit, source_turns - 1)
+
+    shared_length, probe_tokens = _packed_history_prefix_probe(tokenizer, history)
+    if shared_length > prefix_len:
+        fitted = _fit_packed_message_prefix(
+            tokenizer, history, -1, prefix_len
+        )
+        if fitted is None:
+            history[-1]["value"] = ""
+            fitted = _fit_packed_message_prefix(
+                tokenizer, history, -2, prefix_len
+            )
+        if fitted is None:
+            raise RuntimeError(
+                "ShareGPT packed prefix tail cannot be token-fitted to "
+                f"prefix_len={prefix_len}"
+            )
+        shared_length, probe_tokens = fitted
+        tail_truncated = True
+
+    if shared_length < prefix_len or shared_length >= input_len:
+        raise RuntimeError(
+            "ShareGPT packed prefix validation failed after token fitting: "
+            f"prefix={shared_length}, requested={prefix_len}, input_len={input_len}"
+        )
+    return history, source_units, shared_length, probe_tokens, tail_truncated
+
+
+def _build_packed_prefix_groups(
+    tokenizer, samples, prefix_len, input_len, prefix_groups
+):
+    units = _packed_prefix_units(
+        tokenizer, samples, prefix_len, input_len, prefix_groups
+    )
+    anchors = _select_packed_anchors(units, prefix_groups, prefix_len)
+    anchor_indices = {anchor["source_index"] for anchor in anchors}
+    available = [
+        unit for unit in units if unit["source_index"] not in anchor_indices
+    ]
+    groups = []
+
+    for anchor in anchors:
+        history = copy.deepcopy(anchor["history"])
+        shared_length, probe_tokens = _packed_history_prefix_probe(
+            tokenizer, history
+        )
+        source_units = [(anchor, anchor["history_turns"])]
+
+        while shared_length < prefix_len:
+            selected = None
+            for unit in _packed_unit_order(available, shared_length, prefix_len):
+                combined = history + unit["history"]
+                candidate_length, candidate_probe = _packed_history_prefix_probe(
+                    tokenizer, combined
+                )
+                if candidate_length < input_len:
+                    selected = (unit, candidate_length, candidate_probe)
+                    break
+
+            if selected is not None:
+                unit, shared_length, probe_tokens = selected
+                history.extend(copy.deepcopy(unit["history"]))
+                source_units.append((unit, unit["history_turns"]))
+                available.remove(unit)
+                continue
+
+            fragment = _best_packed_fragment(
+                tokenizer, history, available, prefix_len, input_len
+            )
+            if fragment is None:
+                raise ValueError(
+                    "ShareGPT packed prefix cannot reach prefix_len without "
+                    f"exceeding input_len={input_len}"
+                )
+            shared_length, unit, history_end = fragment
+            history.extend(copy.deepcopy(unit["history"][:history_end]))
+            source_units.append((unit, history_end // 2))
+            available.remove(unit)
+            shared_length, probe_tokens = _packed_history_prefix_probe(
+                tokenizer, history
+            )
+
+        (
+            history,
+            source_units,
+            shared_length,
+            probe_tokens,
+            tail_truncated,
+        ) = _fit_packed_history_prefix(
+            tokenizer, history, source_units, prefix_len, input_len
+        )
+        source_ids = [unit["source_id"] for unit, _ in source_units]
+        source_indices = [unit["source_index"] for unit, _ in source_units]
+        source_turns = [turns for _, turns in source_units]
+        groups.append(
+            {
+                "source_index": anchor["source_index"],
+                "source_id": anchor["source_id"],
+                "history_turns": len(history) // 2,
+                "history": history,
+                "probe_tokens": probe_tokens,
+                "prefix_base_tokens": shared_length,
+                "prefix_assembly": "packed",
+                "source_ids": source_ids,
+                "source_indices": source_indices,
+                "source_turns": source_turns,
+                "tail_truncated": tail_truncated,
+            }
+        )
+    return groups
+
+
 def _ordered_suffix_sources(pair_sources, group_candidate):
     """Prefer later turns from the prefix dialogue before using global donors."""
+    if group_candidate.get("prefix_assembly") == "packed":
+        prefix_sources = set(group_candidate["source_indices"])
+        other = [
+            source
+            for source in pair_sources
+            if source["source_index"] not in prefix_sources
+        ]
+        packed = [
+            source
+            for source in pair_sources
+            if source["source_index"] in prefix_sources
+        ]
+        return other + packed
+
     own_source_index = group_candidate["source_index"]
     own_history_turns = group_candidate["history_turns"]
     related = [
@@ -445,6 +814,169 @@ def _ordered_suffix_sources(pair_sources, group_candidate):
         if source["source_index"] != own_source_index
     ]
     return related + other
+
+
+def _fit_packed_last_human_content(tokenizer, conversations, target_len):
+    """Fit a packed request directly, with the existing fitter as fallback."""
+    original_text = conversations[-2]["value"]
+    conversations[-2]["value"] = ""
+    empty_prompt_len = _sharegpt_prompt_length(tokenizer, conversations)
+    if empty_prompt_len > target_len:
+        conversations[-2]["value"] = original_text
+        raise ValueError(
+            f"packed suffix leaves {empty_prompt_len} prompt tokens, above "
+            f"input_len={target_len}"
+        )
+    if empty_prompt_len == target_len:
+        return
+
+    source_token_ids = tokenizer.encode(original_text, add_special_tokens=False)
+    if not source_token_ids:
+        source_token_ids = tokenizer.encode(
+            "ShareGPT conversation", add_special_tokens=False
+        )
+    guessed_size = target_len - empty_prompt_len
+    for _ in range(8):
+        conversations[-2]["value"] = _decode_token_ids(
+            tokenizer, _repeat_token_prefix(source_token_ids, guessed_size)
+        )
+        prompt_len = _sharegpt_prompt_length(tokenizer, conversations)
+        if prompt_len == target_len:
+            return
+        next_size = max(0, guessed_size + target_len - prompt_len)
+        if next_size == guessed_size:
+            break
+        guessed_size = next_size
+
+    conversations[-2]["value"] = original_text
+    _fit_last_human_content(tokenizer, conversations, target_len)
+
+
+def _packed_suffix_units(
+    tokenizer, suffix_sources, minimum_units, max_contribution
+):
+    pool_size = max(128, minimum_units * 8)
+
+    def content_length(source):
+        return len(source["question"]) + len(source["answer"])
+
+    longest_sources = heapq.nlargest(
+        pool_size // 2, suffix_sources, key=content_length
+    )
+    budget_sources = heapq.nlargest(
+        pool_size,
+        (
+            source
+            for source in suffix_sources
+            if content_length(source) <= max_contribution
+        ),
+        key=content_length,
+    )
+    selected_sources = []
+    selected_keys = set()
+    for source in longest_sources + budget_sources:
+        source_key = (source["source_index"], source["turn_index"])
+        if source_key not in selected_keys:
+            selected_keys.add(source_key)
+            selected_sources.append(source)
+    empty_prompt_len = _sharegpt_prompt_length(
+        tokenizer,
+        [{"from": "human", "value": ""}, {"from": "gpt", "value": ""}],
+    )
+    units = []
+    for source in selected_sources:
+        history = [
+            {"from": "human", "value": source["question"]},
+            {"from": "gpt", "value": source["answer"]},
+        ]
+        prompt_len = _sharegpt_prompt_length(
+            tokenizer,
+            history
+            + [
+                {"from": "human", "value": ""},
+                {"from": "gpt", "value": ""},
+            ],
+        )
+        units.append(
+            {
+                "source": source,
+                "history": history,
+                "contribution_tokens": max(1, prompt_len - empty_prompt_len),
+            }
+        )
+    return units
+
+
+def _build_packed_dataset_prefix_entry(
+    tokenizer, group_candidate, suffix_units, entry_offset, input_len
+):
+    conversations = copy.deepcopy(group_candidate["history"])
+    used_units = []
+
+    empty_final_pair = [
+        {"from": "human", "value": ""},
+        {"from": "gpt", "value": ""},
+    ]
+    current_len = _sharegpt_prompt_length(
+        tokenizer, conversations + empty_final_pair
+    )
+
+    fitting_units = [
+        unit
+        for unit in suffix_units
+        if current_len + unit["contribution_tokens"] < input_len
+    ]
+    oversized_units = [unit for unit in suffix_units if unit not in fitting_units]
+    anchor_units = fitting_units + oversized_units
+    forced_unit = anchor_units[entry_offset]
+    ordered_units = [forced_unit] + [
+        unit for unit in suffix_units if unit is not forced_unit
+    ]
+
+    if forced_unit in oversized_units:
+        conversations.extend(copy.deepcopy(forced_unit["history"]))
+        _fit_packed_last_human_content(tokenizer, conversations, input_len)
+        if _sharegpt_prompt_length(tokenizer, conversations) != input_len:
+            raise RuntimeError(
+                f"ShareGPT packed suffix validation failed: expected {input_len}"
+            )
+        return {"conversations": conversations}, [forced_unit]
+
+    conversations.extend(copy.deepcopy(forced_unit["history"]))
+    used_units.append(forced_unit)
+    current_len = _sharegpt_prompt_length(
+        tokenizer, conversations + empty_final_pair
+    )
+
+    remaining_units = [
+        unit for unit in ordered_units if unit is not forced_unit
+    ]
+    while len(used_units) < 64:
+        available = [
+            unit
+            for unit in remaining_units
+            if unit not in used_units
+            and current_len + unit["contribution_tokens"] < input_len
+        ]
+        if not available:
+            break
+        selected = max(available, key=lambda unit: unit["contribution_tokens"])
+        conversations.extend(copy.deepcopy(selected["history"]))
+        used_units.append(selected)
+        current_len = _sharegpt_prompt_length(
+            tokenizer, conversations + empty_final_pair
+        )
+
+    final_unit = next(
+        (unit for unit in ordered_units if unit not in used_units), forced_unit
+    )
+    conversations.extend(copy.deepcopy(final_unit["history"]))
+    _fit_packed_last_human_content(tokenizer, conversations, input_len)
+    if _sharegpt_prompt_length(tokenizer, conversations) != input_len:
+        raise RuntimeError(
+            f"ShareGPT packed suffix validation failed: expected {input_len}"
+        )
+    return {"conversations": conversations}, used_units + [final_unit]
 
 
 def _build_dataset_prefix_entry(tokenizer, group_candidate, suffix_source, input_len):
@@ -476,12 +1008,13 @@ def process_sharegpt_prefix_cache_dataset(
     seed_requests=True,
     prefix_order="grouped",
     prefix_source="dataset",
+    prefix_assembly="single",
 ):
     """Generate fixed-length last-mode requests with ShareGPT history prefixes.
 
-    Each group uses only complete human/gpt turns from one source conversation
-    as its common prefix.  The final human/gpt pair is selected from ShareGPT
-    data and the final human content is token-aware adjusted to input_len.
+    The default single assembly preserves one source conversation per prefix.
+    Packed assembly combines long complete histories and request-specific suffix
+    turns, then token-fits only the final shared and final-user messages.
     """
     for name, value in (
         ("input_len", input_len),
@@ -499,6 +1032,8 @@ def process_sharegpt_prefix_cache_dataset(
         raise ValueError("prefix_order must be grouped or interleaved")
     if prefix_source != "dataset":
         raise ValueError("prefix_source currently supports only 'dataset'")
+    if prefix_assembly not in {"single", "packed"}:
+        raise ValueError("prefix_assembly must be single or packed")
 
     with open(source_path, "r", encoding="utf-8") as source_file:
         source_dataset = json.load(source_file)
@@ -510,13 +1045,18 @@ def process_sharegpt_prefix_cache_dataset(
     pair_sources = _sharegpt_pair_sources(valid_samples)
     if not pair_sources:
         raise ValueError("ShareGPT source dataset contains no usable conversation pairs")
-    selected_groups = _select_prefix_groups(
-        _iter_sharegpt_prefix_candidates(
-            tokenizer, valid_samples, prefix_len, input_len
-        ),
-        prefix_groups,
-        prefix_len,
-    )
+    if prefix_assembly == "packed":
+        selected_groups = _build_packed_prefix_groups(
+            tokenizer, valid_samples, prefix_len, input_len, prefix_groups
+        )
+    else:
+        selected_groups = _select_prefix_groups(
+            _iter_sharegpt_prefix_candidates(
+                tokenizer, valid_samples, prefix_len, input_len
+            ),
+            prefix_groups,
+            prefix_len,
+        )
 
     base_count, remainder = divmod(num_prompts, prefix_groups)
     group_counts = [base_count + (index < remainder) for index in range(prefix_groups)]
@@ -530,11 +1070,26 @@ def process_sharegpt_prefix_cache_dataset(
                 "ShareGPT source dataset does not contain enough distinct final "
                 f"turns for prefix group {group_id}"
             )
-        group_entries = []
-        for offset, suffix_source in enumerate(suffix_sources[:group_count]):
-            entry = _build_dataset_prefix_entry(
-                tokenizer, group_candidate, suffix_source, input_len
+        suffix_units = None
+        if prefix_assembly == "packed":
+            suffix_units = _packed_suffix_units(
+                tokenizer,
+                suffix_sources,
+                group_count,
+                input_len - group_candidate["prefix_base_tokens"],
             )
+        group_entries = []
+        for offset in range(group_count):
+            if prefix_assembly == "packed":
+                entry, packed_suffix_units = _build_packed_dataset_prefix_entry(
+                    tokenizer, group_candidate, suffix_units, offset, input_len
+                )
+                suffix_source = packed_suffix_units[-1]["source"]
+            else:
+                suffix_source = suffix_sources[offset]
+                entry = _build_dataset_prefix_entry(
+                    tokenizer, group_candidate, suffix_source, input_len
+                )
             entry["id"] = (
                 f"{group_candidate['source_id']}-s{group_candidate['source_index']}-"
                 f"xtask-prefix-"
@@ -549,6 +1104,30 @@ def process_sharegpt_prefix_cache_dataset(
             entry["xtask_prefix_suffix_source_id"] = suffix_source["source_id"]
             entry["xtask_prefix_suffix_source_index"] = suffix_source["source_index"]
             entry["xtask_prefix_suffix_turn"] = suffix_source["turn_index"]
+            if prefix_assembly == "packed":
+                entry["xtask_prefix_assembly"] = "packed"
+                entry["xtask_prefix_history_source_ids"] = group_candidate[
+                    "source_ids"
+                ]
+                entry["xtask_prefix_history_source_indices"] = group_candidate[
+                    "source_indices"
+                ]
+                entry["xtask_prefix_history_source_turns"] = group_candidate[
+                    "source_turns"
+                ]
+                entry["xtask_prefix_tail_truncated"] = group_candidate[
+                    "tail_truncated"
+                ]
+                entry["xtask_prefix_suffix_source_ids"] = [
+                    unit["source"]["source_id"] for unit in packed_suffix_units
+                ]
+                entry["xtask_prefix_suffix_source_indices"] = [
+                    unit["source"]["source_index"]
+                    for unit in packed_suffix_units
+                ]
+                entry["xtask_prefix_suffix_source_turns"] = [
+                    unit["source"]["turn_index"] for unit in packed_suffix_units
+                ]
             group_entries.append(entry)
         groups.append(group_entries)
 
@@ -718,6 +1297,7 @@ if __name__ == '__main__':
             seed_requests=bool(args.prefix_seed_requests),
             prefix_order=args.prefix_order,
             prefix_source=args.prefix_source,
+            prefix_assembly=args.prefix_assembly,
         )
 
 

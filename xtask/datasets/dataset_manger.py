@@ -50,10 +50,12 @@ def get_sharegpt_prefix_cache_output_path(task_config, output_path):
     input_len = perf_config.get("input_len")
     prefix_len = prefix_config.get("prefix_len")
     prefix_groups = prefix_config.get("prefix_groups", 4)
+    prefix_assembly = prefix_config.get("prefix_assembly", "single")
     num_prompts = perf_config.get("num_prompts", perf_config.get("batch_size"))
+    assembly_suffix = "" if prefix_assembly == "single" else f"-a{prefix_assembly}"
     return os.path.join(
         output_path,
-        f"ShareGPT-prefix-cache-i{input_len}-p{prefix_len}-"
+        f"ShareGPT-prefix-cache-i{input_len}-p{prefix_len}{assembly_suffix}-"
         f"g{prefix_groups}-n{num_prompts}.json",
     )
 
@@ -213,6 +215,7 @@ def preprocess_sharegpt_prefix_cache(process_dataset_cmd, task_config, output_pa
     seed_requests = prefix_config.get("seed_requests", True)
     prefix_order = prefix_config.get("order", "grouped")
     prefix_source = prefix_config.get("prefix_source", "dataset")
+    prefix_assembly = prefix_config.get("prefix_assembly", "single")
 
     for name, value in (
         ("perf.input_len", input_len),
@@ -233,6 +236,10 @@ def preprocess_sharegpt_prefix_cache(process_dataset_cmd, task_config, output_pa
     if prefix_source != "dataset":
         raise ValueError(
             "ShareGPT prefix_cache.prefix_source currently supports only 'dataset'"
+        )
+    if prefix_assembly not in {"single", "packed"}:
+        raise ValueError(
+            "ShareGPT prefix_cache.prefix_assembly must be single or packed"
         )
     if prefix_groups > num_prompts:
         raise ValueError("ShareGPT prefix_cache.prefix_groups cannot exceed num_prompts")
@@ -306,6 +313,7 @@ def preprocess_sharegpt_prefix_cache(process_dataset_cmd, task_config, output_pa
         f"--prefix-len={prefix_len} "
         f"--prefix-groups={prefix_groups} "
         f"--prefix-source={shlex.quote(prefix_source)} "
+        f"--prefix-assembly={shlex.quote(prefix_assembly)} "
         f"--prefix-seed-requests={1 if seed_requests else 0} "
         f"--prefix-order={shlex.quote(prefix_order)}"
     )

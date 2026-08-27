@@ -9,7 +9,7 @@
 
 ## 1. 可参考示例
 
-可直接参考的 22 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
+可直接参考的 23 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
 
 | 目的 | 示例 |
 | --- | --- |
@@ -33,6 +33,7 @@
 | PD 多逻辑实例、同逻辑实例多 node 共节点部署 | `20_pd_samehost_multi_instance_perf.yaml` |
 | 多个普通独立实例通过 xllm-service 统一分发 | `21_service_routed_samehost_multi_instance_perf.yaml` |
 | 单机 AISBench ShareGPT 多组 Prefix Cache 性能测试 | `22_single_aisbench_sharegpt_prefix_cache_perf.yaml` |
+| 单机 AISBench ShareGPT `packed` 多组 Prefix Cache 长上下文性能测试 | `23_single_aisbench_sharegpt_prefix_cache_packed_perf.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
 
@@ -210,6 +211,60 @@ tokenizer/chat template，服务端上报的 `prompt_tokens` 才能与 `input_le
 
 如果不同时配置 `infer_mode: last` 和 `input_len`，ShareGPT 继续使用原始数据，不执行固定
 长度预处理。只配置 `infer_mode` 时，xTask 仅生成用例级配置来切换 AISBench 推理模式。
+
+### ShareGPT Prefix Cache
+
+`22_single_aisbench_sharegpt_prefix_cache_perf.yaml` 展示了默认的单会话公共前缀模式；
+需要跨多条 ShareGPT 会话拼接长公共前缀时，可参考
+`23_single_aisbench_sharegpt_prefix_cache_packed_perf.yaml`。
+Prefix Cache 数据构造必须显式配置 `prefix_cache.enabled: true`，并使用
+`infer_mode: last`。`prefix_len` 表示同组请求最少共享的 prompt token 数，xTask 会记录
+实际共享长度；`prefix_groups` 控制相互独立的公共前缀组数。
+
+默认的 `prefix_assembly: single` 只从一条 ShareGPT 会话的完整历史轮次构造每组前缀，
+保持现有用例行为。当原始数据没有足够长的单条会话时，可显式使用 `packed`：
+
+```yaml
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    infer_mode: last
+    input_len: 153600
+    output_len: 512
+    max_out_len: 512
+    num_prompts: 40
+    num_warmups: 4
+    prefix_cache:
+      enabled: true
+      prefix_source: dataset
+      prefix_assembly: packed
+      prefix_len: 131072
+      prefix_groups: 4
+      seed_requests: true
+      order: grouped
+```
+
+`packed` 模式先按文本规模筛选较长会话，再使用模型实际 tokenizer/chat template 计算
+token 长度。xTask 会先为每个组预留不同的、最接近但不超过 `prefix_len` 的长会话作为
+anchor，再按 best-fit 顺序补充较长的完整会话；只有整条补充会话无法放入
+`input_len` 时，最后一个来源才按完整 human/gpt 轮次截取。达到目标后，仅对最后一条
+共享消息做 token 级裁剪，使实际公共前缀尽量精确落在 `prefix_len`；原始 ShareGPT 文件
+不会被修改，处理结果仍写入当前 case 输出目录。
+
+每个请求在公共前缀之后的差异化部分也会优先拼入多条较长的 ShareGPT 完整问答，并为
+同组请求选择不同的第一条后缀内容；最后一条 human 消息只负责把总 prompt 精确补齐或
+截断到 `input_len`，避免用一个很短的问题重复填满全部后缀空间。
+
+生成数据中的 `xtask_prefix_history_source_ids`、
+`xtask_prefix_history_source_turns` 和 `xtask_prefix_tokens` 分别记录每组拼接来源、使用轮数
+和最终实际共享 token 数。不同组不会复用已选中的 anchor/补充来源，并会在写文件前验证：
+同组共享长度不小于 `prefix_len`、组间在 `prefix_len` 之前已分叉、每条最终输入严格等于
+`input_len`。
+
+长上下文用例还必须保证模型最大上下文不小于 `input_len + output_len`，并确保 xLLM 的
+KV Cache 能同时容纳所有预热前缀和活动请求。配置 `seed_requests: true` 时，
+`num_warmups` 必须不小于 `prefix_groups`；`order: grouped` 可降低多组前缀在正式请求期间
+被频繁淘汰的概率。
 
 对于后续 AISBench 内置数据集，只要其配置是标准的单数据集配置，通常填写 `dataset_name`、`dataset_conf` 和可选的本地 `dataset_path` 即可，无需增加 xTask 数据集分支。包含多个子数据集或动态构造多个路径的 AISBench 配置，应沿用官方目录布局并省略 `dataset_path`，避免把多个子路径统一覆盖成同一个值。
 

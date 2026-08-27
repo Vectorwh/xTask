@@ -240,6 +240,112 @@ class ShareGPTDatasetProcessingTests(unittest.TestCase):
             32,
         )
 
+    def test_packed_prefix_uses_longest_distinct_anchors_and_multiple_sources(self):
+        source_data = []
+        content_lengths = [70, 64, 58, 52, 46, 40, 34, 28, 22, 16, 14, 12]
+        for index, content_length in enumerate(content_lengths):
+            source_data.append(
+                sharegpt_sample(
+                    f"source-{index}",
+                    [
+                        ("human", chr(65 + index) * content_length),
+                        ("gpt", chr(97 + index) * content_length),
+                    ],
+                )
+            )
+
+        self.assertTrue(
+            all(
+                process_dataset._packed_history_prefix_probe(
+                    self.tokenizer, sample["conversations"]
+                )[0]
+                < 250
+                for sample in source_data
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_path = root / "source.json"
+            output_path = root / "packed-prefix.json"
+            source_path.write_text(json.dumps(source_data), encoding="utf-8")
+            original_source = source_path.read_text(encoding="utf-8")
+
+            process_dataset.process_sharegpt_prefix_cache_dataset(
+                self.tokenizer,
+                str(source_path),
+                str(output_path),
+                input_len=500,
+                prefix_len=250,
+                prefix_groups=2,
+                num_prompts=6,
+                seed_requests=True,
+                prefix_assembly="packed",
+            )
+            generated = json.loads(output_path.read_text(encoding="utf-8"))
+            source_unchanged = (
+                source_path.read_text(encoding="utf-8") == original_source
+            )
+
+        self.assertTrue(source_unchanged)
+        self.assertEqual(len(generated), 6)
+        self.assertEqual(
+            [entry["xtask_prefix_group"] for entry in generated[:2]], [0, 1]
+        )
+        self.assertEqual(
+            [entry["xtask_prefix_history_source_ids"][0] for entry in generated[:2]],
+            ["source-0", "source-1"],
+        )
+        self.assertTrue(
+            all(entry["xtask_prefix_assembly"] == "packed" for entry in generated)
+        )
+        self.assertTrue(
+            all(
+                len(entry["xtask_prefix_history_source_ids"]) > 1
+                for entry in generated
+            )
+        )
+        self.assertTrue(
+            all(
+                process_dataset._sharegpt_prompt_length(
+                    self.tokenizer, entry["conversations"]
+                )
+                == 500
+                for entry in generated
+            )
+        )
+
+        grouped = {
+            group_id: [
+                process_dataset._sharegpt_prompt_token_ids(
+                    self.tokenizer, entry["conversations"]
+                )
+                for entry in generated
+                if entry["xtask_prefix_group"] == group_id
+            ]
+            for group_id in (0, 1)
+        }
+        self.assertEqual(process_dataset._common_prefix_length(grouped[0]), 250)
+        self.assertEqual(process_dataset._common_prefix_length(grouped[1]), 250)
+        self.assertTrue(
+            all(entry["xtask_prefix_tail_truncated"] for entry in generated)
+        )
+        self.assertLess(
+            process_dataset._common_prefix_length([grouped[0][0], grouped[1][0]]),
+            250,
+        )
+        self.assertTrue(
+            set(generated[0]["xtask_prefix_history_source_ids"]).isdisjoint(
+                generated[1]["xtask_prefix_history_source_ids"]
+            )
+        )
+        self.assertTrue(
+            all(
+                len(entry["xtask_prefix_suffix_source_ids"]) > 1
+                for entry in generated
+            )
+        )
+
     def test_prefix_cache_rejects_prefix_not_smaller_than_input(self):
         source = sharegpt_sample(
             "only",
