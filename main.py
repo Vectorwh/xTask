@@ -21,6 +21,36 @@ from xtask.core.scheduler import (
     start_scheduler_session,
 )
 
+def report_benchmark_if_available(result):
+    """Invoke the optional bench-reporter without changing xTask behavior.
+
+    Upload is opt-in via XTASK_BENCH_REPORT (default off) so routine debug
+    runs never reach the dashboard. Enable with XTASK_BENCH_REPORT=1 for
+    daily or release executions.
+    """
+    import os
+    enabled = os.environ.get("XTASK_BENCH_REPORT", "").strip().lower()
+    if enabled not in ("1", "true", "on", "yes"):
+        return
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    plugin_roots = [
+        os.path.join(project_root, "third_party", "bench-reporter"),
+        os.path.join(project_root, "bench-reporter"),
+    ]
+    plugin_root = next((p for p in plugin_roots if os.path.isdir(p)), None)
+    if plugin_root is None:
+        return
+    if not os.path.isfile(os.path.join(plugin_root, "reporter.py")):
+        logging.warning("bench-reporter directory exists but reporter.py is missing: %s", plugin_root)
+        return
+    try:
+        if plugin_root not in sys.path:
+            sys.path.insert(0, plugin_root)
+        from bench_reporter.integration import report_xtask_result
+        task_config = result.get("task_config", {}) if isinstance(result, dict) else {}
+        report_xtask_result(result, task_config)
+    except Exception as exc:
+        logging.warning("Optional bench-reporter integration failed: %s", exc)
 
 def run_task(current_task_key, output_path, args, scheduler_session=None):
     """Run one task, reusing the service lifecycle only for auto_assess."""
@@ -49,6 +79,7 @@ def run_task_workflow(args, xtask_config, openme_client, para_strategy=None):
         auto_assessor=process_auto_assessment,
         reporter_factory=create_assessment_reporter,
         session_closer=close_scheduler_session,
+        report_benchmark=report_benchmark_if_available,
     )
     return workflow.run()
 

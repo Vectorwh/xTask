@@ -1,0 +1,55 @@
+case_name: 24_single_aisbench_gpqa_acc
+engine_type: xllm
+model_path: /export/home/models/Qwen3-8B
+served_model_name: Qwen3-8B
+metrics: acc
+dataset_name: gpqa
+dataset_path: ''
+dataset_format: csv
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+# GPQA 数据文件需提前放在 AISBench 默认目录：
+# /export/home/models/xllm_test_060/benchmark/ais_bench/datasets/gpqa/gpqa_diamond.csv
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: vllm_api_general_chat
+    dataset_conf: gpqa_gen_0_shot_cot_chat_prompt
+    dataset_path: null
+    # 调试样例只评测前 20 条；删除该字段即可评测 GPQA Diamond 全量样本。
+    num_prompts: 20
+    batch_size: 4
+    output_len: 32768
+    request_rate: 0
+    # GPQA 的结果量纲是百分数；正式回归测试前请替换为实测基线。
+    baseline: 30.0
+    threshold: 0.20
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: false
+
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_seqs_per_batch: 16
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true

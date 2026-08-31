@@ -9,7 +9,7 @@
 
 ## 1. 可参考示例
 
-可直接参考的 23 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
+可直接参考的 24 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
 
 | 目的 | 示例 |
 | --- | --- |
@@ -34,6 +34,7 @@
 | 多个普通独立实例通过 xllm-service 统一分发 | `21_service_routed_samehost_multi_instance_perf.yaml` |
 | 单机 AISBench ShareGPT 多组 Prefix Cache 性能测试 | `22_single_aisbench_sharegpt_prefix_cache_perf.yaml` |
 | 单机 AISBench ShareGPT `packed` 多组 Prefix Cache 长上下文性能测试 | `23_single_aisbench_sharegpt_prefix_cache_packed_perf.yaml` |
+| 单机 AISBench GPQA Diamond 精度测试 | `24_single_aisbench_gpqa_acc.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
 
@@ -307,6 +308,13 @@ AISBench 精度字段如下：
 | `threshold` | 是 | 基线上下允许浮动比例 | 同样按 `baseline * (1 ± threshold)` 校验。 |
 
 `dump_eval_details` 有一个容易踩坑的当前限制：AISBench 脚本生成器从 YAML 顶层读取它，即应写成顶层 `dump_eval_details: true`；写在 `benchmark.acc` 里目前不会生效。
+
+GPQA Diamond 可以直接复用 AISBench 内置的 `gpqa_gen_0_shot_cot_chat_prompt` 配置。使用者需提前准备
+`gpqa_diamond.csv`，放到宿主机
+`/export/home/models/xllm_test_060/benchmark/ais_bench/datasets/gpqa/`；xTask 保持
+`dataset_path` 为空时，会沿用 AISBench 默认的相对路径。参考用例为
+`24_single_aisbench_gpqa_acc.yaml`。GPQA 评测结果按百分数记录，`baseline` 应使用实测百分数，
+不要写成 0 到 1 的小数。
 
 ### EvalScope 性能
 

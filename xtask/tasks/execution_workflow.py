@@ -20,6 +20,7 @@ class TaskExecutionWorkflow:
         auto_assessor,
         reporter_factory,
         session_closer,
+        report_benchmark=None,
     ):
         self.args = args
         self.xtask_config = xtask_config
@@ -30,6 +31,7 @@ class TaskExecutionWorkflow:
         self.auto_assessor = auto_assessor
         self.reporter_factory = reporter_factory
         self.session_closer = session_closer
+        self.report_benchmark = report_benchmark
 
         self.config_para = {}
         self.auto_assess_threshold = {"lower": 0, "curr": 0, "upper": 0}
@@ -96,6 +98,10 @@ class TaskExecutionWorkflow:
             self.openme_client.AddCaseResult(
                 result, task_path=current_task_key
             )
+
+            # Report benchmark results to visual board if available
+            if self.report_benchmark is not None:
+                self.report_benchmark(result)
 
             action = self.auto_assessor(
                 args=self.args,

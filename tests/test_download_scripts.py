@@ -236,6 +236,7 @@ class PrepareXllmScriptTests(unittest.TestCase):
         env = os.environ.copy()
         env.update(
             XLLM_REPO_URL=str(repository),
+            XLLM_BUILD_IMAGE="xtask-test/xllm-build:latest",
             GIT_MAX_RETRIES="1",
             GIT_RETRY_DELAY="0",
             PATH=f"{fake_bin}:{env['PATH']}",
@@ -439,6 +440,7 @@ class PrepareXllmServiceScriptTests(unittest.TestCase):
         env.update(
             XLLM_SERVICE_REPO_URL=str(repository),
             XLLM_SERVICE_UPDATE_SOURCE=update_source,
+            XLLM_SERVICE_BUILD_IMAGE="xtask-test/xllm-service-build:latest",
             GIT_MAX_RETRIES="1",
             GIT_RETRY_DELAY="0",
             PATH=f"{fake_bin}:{env['PATH']}",
