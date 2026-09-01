@@ -51,6 +51,7 @@ def get_sharegpt_prefix_cache_output_path(task_config, output_path):
     prefix_len = prefix_config.get("prefix_len")
     prefix_groups = prefix_config.get("prefix_groups", 4)
     prefix_assembly = prefix_config.get("prefix_assembly", "single")
+    prefix_min_units = prefix_config.get("prefix_min_units")
     num_prompts = perf_config.get("num_prompts", perf_config.get("batch_size"))
     assembly_suffix = "" if prefix_assembly == "single" else f"-a{prefix_assembly}"
     return os.path.join(
@@ -216,6 +217,7 @@ def preprocess_sharegpt_prefix_cache(process_dataset_cmd, task_config, output_pa
     prefix_order = prefix_config.get("order", "grouped")
     prefix_source = prefix_config.get("prefix_source", "dataset")
     prefix_assembly = prefix_config.get("prefix_assembly", "single")
+    prefix_min_units = prefix_config.get("prefix_min_units")
 
     for name, value in (
         ("perf.input_len", input_len),
@@ -317,6 +319,8 @@ def preprocess_sharegpt_prefix_cache(process_dataset_cmd, task_config, output_pa
         f"--prefix-seed-requests={1 if seed_requests else 0} "
         f"--prefix-order={shlex.quote(prefix_order)}"
     )
+    if prefix_min_units is not None:
+        process_command += f" --prefix-min-units={prefix_min_units}"
     process_dataset_cmd.extend(
         [
             f"if ! {process_command}; then",
