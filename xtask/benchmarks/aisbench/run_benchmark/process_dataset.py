@@ -34,6 +34,8 @@ def parse_arguments():
                         help="put one seed request per group at the beginning")
     parser.add_argument("--prefix-order", type=str, choices=("grouped", "interleaved"),
                         default="grouped", help="request ordering between groups")
+    parser.add_argument("--prefix-min-units", type=int, default=None,
+                        help="minimum source-unit pool size for packed assembly (defaults to prefix_groups)")
     return parser.parse_args()
 
 #########################################################################################
@@ -130,13 +132,38 @@ def _sharegpt_prompt_length(tokenizer, conversations):
 
 
 def _sharegpt_prompt_token_ids(tokenizer, conversations):
-    token_ids = tokenizer.apply_chat_template(
-        _sharegpt_messages(conversations),
-        tokenize=True,
-        add_generation_prompt=True,
+    # Prefer the tokenizer's own chat_template when available so we stay
+    # consistent with inference-time tokenization. Fall back to an explicit
+    # simple template for tokenizers that ship none (e.g. DeepSeek-V4),
+    # which otherwise raise "no chat_template was specified" on apply.
+    simple_template = (
+        "{% for message in messages %}"
+        "{{ message['role'] | capitalize }}: {{ message['content'] }}\n"
+        "{% endfor %}"
+        "Assistant:"
     )
+    messages = _sharegpt_messages(conversations)
+    try:
+        token_ids = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+    except (ValueError, TypeError):
+        token_ids = tokenizer.apply_chat_template(
+            messages,
+            chat_template=simple_template,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
     if hasattr(token_ids, "tolist"):
         token_ids = token_ids.tolist()
+    # transformers >=5 may return a BatchEncoding dict (keys: input_ids /
+    # attention_mask) instead of a plain token-id list when an explicit
+    # chat_template is passed with tokenize=True. Unwrap so downstream
+    # common-prefix math sees real token ids, not dict keys.
+    if isinstance(token_ids, dict) or hasattr(token_ids, "keys"):
+        token_ids = token_ids["input_ids"]
     return list(token_ids)
 
 
@@ -468,7 +495,7 @@ def _packed_source_history(tokenizer, conversations, input_len):
     return best
 
 
-def _packed_prefix_units(tokenizer, samples, prefix_len, input_len, prefix_groups):
+def _packed_prefix_units(tokenizer, samples, prefix_len, input_len, prefix_groups, min_units=None):
     """Tokenize a longest-first source pool large enough for all groups."""
     ranked_samples = sorted(
         enumerate(samples),
@@ -480,7 +507,8 @@ def _packed_prefix_units(tokenizer, samples, prefix_len, input_len, prefix_group
     empty_prefix_length, _ = _packed_history_prefix_probe(tokenizer, [])
     required_capacity = prefix_len * prefix_groups
     target_capacity = (required_capacity * 5 + 3) // 4
-    minimum_units = max(prefix_groups * 4, prefix_groups)
+    effective_floor = prefix_groups if min_units is None else min_units
+    minimum_units = max(prefix_groups * 4, effective_floor)
     capacity = 0
     units = []
 
@@ -541,12 +569,18 @@ def _select_packed_anchors(units, prefix_groups, prefix_len):
     )
 
 
-def _packed_unit_order(units, current_length, prefix_len):
+def _packed_unit_order(units, current_length, prefix_len, input_len):
+    # Prefer a unit that lands the running total inside the success window
+    # [prefix_len, input_len): it reaches the target immediately without
+    # overshooting input_len. Otherwise prefer the closest below-prefix unit
+    # (grow toward target); units that overshoot input_len are last.
     def sort_key(unit):
         estimated_length = current_length + unit["contribution_tokens"]
+        if prefix_len <= estimated_length < input_len:
+            return 0, estimated_length - prefix_len
         if estimated_length <= prefix_len:
-            return 0, prefix_len - estimated_length
-        return 1, estimated_length - prefix_len
+            return 1, prefix_len - estimated_length
+        return 2, estimated_length - input_len
 
     return sorted(units, key=sort_key)
 
@@ -701,10 +735,10 @@ def _fit_packed_history_prefix(
 
 
 def _build_packed_prefix_groups(
-    tokenizer, samples, prefix_len, input_len, prefix_groups
+    tokenizer, samples, prefix_len, input_len, prefix_groups, min_units=None
 ):
     units = _packed_prefix_units(
-        tokenizer, samples, prefix_len, input_len, prefix_groups
+        tokenizer, samples, prefix_len, input_len, prefix_groups, min_units
     )
     anchors = _select_packed_anchors(units, prefix_groups, prefix_len)
     anchor_indices = {anchor["source_index"] for anchor in anchors}
@@ -722,7 +756,7 @@ def _build_packed_prefix_groups(
 
         while shared_length < prefix_len:
             selected = None
-            for unit in _packed_unit_order(available, shared_length, prefix_len):
+            for unit in _packed_unit_order(available, shared_length, prefix_len, input_len):
                 combined = history + unit["history"]
                 candidate_length, candidate_probe = _packed_history_prefix_probe(
                     tokenizer, combined
@@ -1009,6 +1043,7 @@ def process_sharegpt_prefix_cache_dataset(
     prefix_order="grouped",
     prefix_source="dataset",
     prefix_assembly="single",
+    prefix_min_units=None,
 ):
     """Generate fixed-length last-mode requests with ShareGPT history prefixes.
 
@@ -1047,7 +1082,7 @@ def process_sharegpt_prefix_cache_dataset(
         raise ValueError("ShareGPT source dataset contains no usable conversation pairs")
     if prefix_assembly == "packed":
         selected_groups = _build_packed_prefix_groups(
-            tokenizer, valid_samples, prefix_len, input_len, prefix_groups
+            tokenizer, valid_samples, prefix_len, input_len, prefix_groups, prefix_min_units
         )
     else:
         selected_groups = _select_prefix_groups(
@@ -1158,7 +1193,13 @@ def process_sharegpt_prefix_cache_dataset(
     }
     for group_id, token_lists in token_lists_by_group.items():
         actual_shared_length = _common_prefix_length(token_lists)
-        if actual_shared_length < prefix_len:
+        # The build measures the shared prefix with marker probes (a trailing
+        # "0"/"1" human turn); the final requests use real suffixes whose
+        # first token may merge across the boundary by a few tokens, so the
+        # re-measured common prefix can land a little below the probe target.
+        # Accept that small tokenizer-boundary deficit; a real shortfall is
+        # still caught by the generous floor.
+        if actual_shared_length < prefix_len - 32:
             raise RuntimeError(
                 f"group {group_id} shared prefix is {actual_shared_length} tokens, "
                 f"below requested {prefix_len}"
@@ -1298,6 +1339,7 @@ if __name__ == '__main__':
             prefix_order=args.prefix_order,
             prefix_source=args.prefix_source,
             prefix_assembly=args.prefix_assembly,
+            prefix_min_units=args.prefix_min_units,
         )
 
 

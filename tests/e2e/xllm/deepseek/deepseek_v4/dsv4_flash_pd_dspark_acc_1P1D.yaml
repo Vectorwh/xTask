@@ -1,0 +1,96 @@
+# 拓扑: 66:pd_p1_dspark.sh(P) / 68:pd_d_dspark.sh(D). para_set 每档重启PD服务
+case_name: dsv4_flash_pd_dspark_acc_1P1D
+engine_type: xllm
+model_path: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
+served_model_name: DeepSeek-V4-Flash-0731-w8a8
+metrics: acc
+dataset_name: gpqa
+dataset_path: ''
+dataset_format: csv
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+hccl_if_port: 43432
+progress_conn_port: 8773
+
+benchmark:
+  benchmark_type: aisbench
+  # 准确度配置必须放在 benchmark.acc 下（generate_aisbench_script.py:363 读 benchmark_dict.get("acc")），
+  # 之前误放在 benchmark.perf 下导致 accuracy_cfg=None -> AttributeError。infer_mode/input_len 是 perf
+  # (ShareGPT 固定长度填充) 的概念，acc 走 gsm8k/gpqa 固定样本，无需也无可填 input_len。
+  # GPQA 数据文件需提前放在 AISBench 默认目录：
+  # /export/home/models/xllm_test_060/benchmark/ais_bench/datasets/gpqa/gpqa_diamond.csv
+  # （dataset_downloader.py 只有 gsm8k/ceval 的自动下载分支，gpqa 需手动部署）
+  acc:
+    case_type: accuracy
+    api_type: vllm_api_general_chat
+    dataset_conf: gpqa_gen_0_shot_cot_chat_prompt
+    # generate_aisbench_script.py 不读 acc_dataset_len，acc 样本数由 num_prompts 控制。
+    # GPQA Diamond 子集固定 198 题，删 num_prompts 或设 198 即跑全量。
+    num_prompts: 198
+    batch_size: 8
+    output_len: 32768
+    request_rate: 0
+    # GPQA 结果量纲是百分数。baseline=85.86（2026-09-01 实测，198题 diamond，bs8/CoT）；
+    # threshold 0.20 → 允许区间 68.69~103.03。
+    baseline: 85.86
+    threshold: 0.20
+    generation_kwargs: {temperature: 0, ignore_eos: false}
+
+deployment:
+  mode: pd_disaggregated
+  master_host: 11.87.191.66
+  sync_workspace: true
+  resource_sync:
+    enabled: true
+    source: /export/home/models/xllm_test_060
+    target: /export/home/models/xllm_test_060
+    max_workers: 4
+    timeout: 3600
+  pd_control:
+    host: 11.87.191.66
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 28888
+    rpc_server_port: 38889
+    transfer_port_base: 26000
+  benchmark: {runner_instance: prefill-0-node-0, health_path: /health}
+  pd_instances:
+  - name: prefill-0
+    role: prefill
+    group_master_host: 11.87.191.66
+    serving_extensiable_param: &pd_param
+      max_memory_utilization: 0.8
+      max_tokens_per_batch: 16384
+      max_seqs_per_batch: 10
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      max_tokens_per_chunk_for_prefill: 4096
+      enable_schedule_overlap: true
+      enable_graph: true
+      ep_size: 16
+      dp_size: 4
+      enable_disagg_pd: true
+      speculative_algorithm: DSpark
+      draft_model: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
+      num_speculative_tokens: 5
+      enable_flashcomm1: true
+      flashcomm1_min_prefill_tokens: 1000
+      tool_call_parser: deepseekv4
+      reasoning_parser: deepseek-v4
+      disagg_pd_port: 7777
+    nodes:
+    - name: prefill-0-node-0
+      host: 11.87.191.66
+      device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+      local_port: 18004
+  - name: decode-0
+    role: decode
+    group_master_host: 11.87.191.68
+    serving_extensiable_param: *pd_param
+    nodes:
+    - name: decode-0-node-0
+      host: 11.87.191.68
+      device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+      local_port: 18004

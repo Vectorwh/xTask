@@ -76,9 +76,15 @@ def find_aisbench_dataset_config(dataset_conf):
     relative_root = Path("ais_bench/benchmark/configs/datasets")
     for root in _aisbench_dataset_config_roots():
         config_root = root / relative_root
-        if not config_root.is_dir():
+        # Why: candidate root 可能是 root 属主且无读/进权限(如公共 models 目录 750)，
+        # is_dir()/rglob() 会抛 PermissionError 而非返回 False。捕获后跳到下一个 root，
+        # 避免一个无权限的 candidate 把整个 generate_aisbench_script 搞崩。
+        try:
+            if not config_root.is_dir():
+                continue
+            matches = sorted(config_root.rglob(f"{dataset_conf}.py"))
+        except PermissionError:
             continue
-        matches = sorted(config_root.rglob(f"{dataset_conf}.py"))
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:

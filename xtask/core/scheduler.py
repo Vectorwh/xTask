@@ -236,7 +236,7 @@ class ContainerConfigBuilder:
             "NODES": str(task_config.get("num_devices", 1)),
             "WORLD_SIZE": str(task_config.get("world_size", 1)),
             "NODE_ADDR": task_config.get("host_addr", "0.0.0.0"),
-            "NODE_PORT": str(task_config.get("port", 14830))
+            "NODE_PORT": str(task_config.get("port", 14830)),
         }
         
         # 添加框架配置中的环境变量
@@ -2371,6 +2371,92 @@ def _separate_shutdown_logs(runtimes, snapshots) -> None:
                 shutil.rmtree(snapshot_dir)
 
 
+def _wait_npu_hbm_released(runtime, timeout_s=None, baseline_mb=None, settle_s=None) -> None:
+    """轮询 npu-smi，等每卡 HBM 回落到 ~baseline，并在回基线后额外静置 settle_s 秒。
+
+    Why: HCCL communicator 和 HBM 由 NPU 驱动在引擎进程退出**之后**才释放，
+    不是进程一死就释放。teardown 杀掉 16 个 xllm 进程后若立即起下一档，
+    rank-0 构造 CollectiveService 时 HcclGetRootInfo 会在没释放干净的设备上
+    失败(status 7)→ 8773 永不绑 → master 28888 不开 → /health 失败。
+    累积型：低 batch 残留少够用，重负载档后下一档首次越阈值，之后毒化全档。
+
+    关键：HBM 先回到基线，但 HCCL communicator 释放**比 HBM 慢且 npu-smi 看不到**。
+    实测 acc sg3→sg4：HBM 已干净(max=3141MB)但 sg4 仍 HcclGetRootInfo status 7。
+    故 HBM 达到基线后必须再静置 settle_s 秒(默认 30s)，给 communicator 释放窗口，
+    否则 HBM 干净而 HCCL 仍脏 → 下一档起不来。
+    """
+    import os
+    if timeout_s is None:
+        try:
+            timeout_s = max(10, int(os.environ.get("XTASK_HBM_RELEASE_TIMEOUT", "60")))
+        except ValueError:
+            timeout_s = 60
+    if baseline_mb is None:
+        try:
+            baseline_mb = int(os.environ.get("XTASK_HBM_BASELINE_MB", "5000"))
+        except ValueError:
+            baseline_mb = 5000
+    if settle_s is None:
+        try:
+            settle_s = max(0, int(os.environ.get("XTASK_HBM_SETTLE_SECONDS", "30")))
+        except ValueError:
+            settle_s = 30
+    # 取 16 卡 HBM 占用最大值(MB)，npu-smi 形如 "3129 / 65536"。
+    cmd = (
+        "{ npu-smi info 2>/dev/null || /usr/local/bin/npu-smi info 2>/dev/null; } | "
+        "grep -oE '[0-9]+ / 65536' | awk '{print $1}' | sort -n | tail -1"
+    )
+    host = getattr(getattr(runtime, "plan", None), "host", "?")
+    deadline = time.monotonic() + timeout_s
+    last = None
+    settled_at = None  # HBM 首次回基线的时间戳；None=尚未回基线
+    while time.monotonic() < deadline:
+        try:
+            r = runtime.container_manager.executor.run(cmd, timeout=20)
+        except Exception as exc:
+            logging.warning("npu-smi poll error on %s: %s", host, exc)
+            return
+        out = (getattr(r, "stdout", None) or "").strip()
+        nums = [ln for ln in out.splitlines() if ln.strip().isdigit()]
+        cur_str = nums[-1] if nums else ""
+        if cur_str.isdigit():
+            cur = int(cur_str)
+            last = cur
+            if cur <= baseline_mb:
+                if settled_at is None:
+                    settled_at = time.monotonic()
+                    logging.info(
+                        "NPU HBM released on %s (max=%sMB <= %sMB); "
+                        "settling %ss for HCCL communicator release",
+                        host, cur, baseline_mb, settle_s,
+                    )
+                    if settle_s <= 0:
+                        return
+                    # 保证 settle 窗口不被总 deadline 截断。
+                    deadline = max(deadline, settled_at + settle_s)
+                if time.monotonic() - settled_at >= settle_s:
+                    logging.info(
+                        "NPU HBM settle window done on %s (max=%sMB); proceeding",
+                        host, cur,
+                    )
+                    return
+                time.sleep(3)
+                continue
+            # HBM 又涨回基线之上(异常，例如残留进程)：重新等回基线并重置 settle。
+            if settled_at is not None:
+                logging.warning(
+                    "NPU HBM rose above baseline again on %s (%sMB > %sMB); re-arming settle",
+                    host, cur, baseline_mb,
+                )
+                settled_at = None
+            time.sleep(3)
+            continue
+        # npu-smi 不可达或输出解析失败：不阻塞，直接放行(避免误卡死流程)。
+        logging.warning("npu-smi HBM unreadable on %s (stdout=%r); skipping release wait", host, out[:200])
+        return
+    logging.warning("NPU HBM not released on %s after %ss (max=%sMB); proceeding anyway", host, timeout_s, last)
+
+
 def _wait_xllm_processes_exit(runtimes, grace_s: int = 15) -> None:
     """Signal xllm on each runtime, then wait until processes are gone.
 
@@ -2453,6 +2539,12 @@ def _wait_xllm_processes_exit(runtimes, grace_s: int = 15) -> None:
         # before docker stop/rm runs.  Container removal remains the final
         # authority for any non-xLLM helper processes.
         time.sleep(0.2)
+
+    # NPU/HCCL 设备状态(HBM、communicator)由驱动在引擎进程退出后才释放。
+    # 并行等 66/68 两宿主 HBM 回基线，**再静置 30s settle 窗口**给 HCCL
+    # communicator 释放(HBM 先干净、HCCL 后释放且 npu-smi 看不到)，否则下一档
+    # rank-0 的 HcclGetRootInfo 会在脏设备上失败(status 7)→ 28888 不开 → /health 失败。
+    run_on_runtimes_parallel(runtimes, _wait_npu_hbm_released)
 
 
 def _cleanup_scheduler(context):
