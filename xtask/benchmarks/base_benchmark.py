@@ -55,6 +55,12 @@ def result_postprocess(benchmark_stdout, task_config, output_file_path, init_ent
         from xtask.benchmarks.evalscope.evalscope_postprocess import evalscope_perf_post_process
 
         post_processed_result, benchmark_outputdir  = evalscope_perf_post_process(task_config, output_file_path, init_entries)
+    elif benchmark_type == "vbench":
+        from xtask.benchmarks.vbench.vbench_postprocess import vbench_result_post_process
+
+        post_processed_result, benchmark_outputdir = vbench_result_post_process(
+            task_config, output_file_path, init_entries
+        )
     else:
         logging.error("benchmark_type: %s is invalid."% benchmark_type)
 
@@ -76,6 +82,12 @@ def acc_result_postprocess(task_config, output_file_path, init_entries):
         from xtask.benchmarks.evalscope.evalscope_postprocess import evalscope_acc_post_process
 
         post_processed_result, benchmark_outputdir = evalscope_acc_post_process(task_config, output_file_path, init_entries)
+    elif benchmark_type == "vbench":
+        from xtask.benchmarks.vbench.vbench_postprocess import vbench_result_post_process
+
+        post_processed_result, benchmark_outputdir = vbench_result_post_process(
+            task_config, output_file_path, init_entries
+        )
 
     else:
         logging.error("benchmark_type: %s is invalid."% benchmark_type)

@@ -623,6 +623,10 @@ class ServiceLaunchPlan:
     isolate_ipc: bool = False
     # True when a logical group needs shared memory across colocated containers.
     requires_shared_ipc: bool = False
+    # HBM occupancy (MB) sampled on this host before xLLM starts.  Cleanup
+    # waits for HBM to return to this level instead of a hardcoded threshold;
+    # 0 means "not sampled" (fall back to env/default baseline).
+    hbm_baseline_mb: int = 0
 
 
 @dataclass

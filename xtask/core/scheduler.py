@@ -3,6 +3,7 @@ import logging
 import os
 import json
 import time
+import types
 import yaml
 import copy
 import re
@@ -236,7 +237,7 @@ class ContainerConfigBuilder:
             "NODES": str(task_config.get("num_devices", 1)),
             "WORLD_SIZE": str(task_config.get("world_size", 1)),
             "NODE_ADDR": task_config.get("host_addr", "0.0.0.0"),
-            "NODE_PORT": str(task_config.get("port", 14830)),
+            "NODE_PORT": str(task_config.get("port", 14830))
         }
         
         # 添加框架配置中的环境变量
@@ -319,6 +320,15 @@ def generate_benchmark_command(
             output_file_path=output_file_path,
             output_shell_file="run_evalscope_test.sh",
             python_exec="python",
+        )
+    if benchmark_type == "vbench":
+        from xtask.benchmarks.vbench.generate_vbench_script import generate_vbench_script
+
+        return generate_vbench_script(
+            task_config=_bench_task_config_with_endpoint(),
+            output_file_path=output_file_path,
+            output_shell_file="run_vbench_test.sh",
+            python_exec="python3",
         )
 
     logging.error("benchmark_type: %s is not supported yet.", benchmark_type)
@@ -471,7 +481,9 @@ def _execute_warmup(container_manager, container_config, engine_config, warmup_c
 
 def _execute_benchmark_with_npu_guard(container_manager, container_config,
                                       task_config, engine_config, benchmark_cmd,
-                                      npu_card_ids=None, service_runtimes=None):
+                                      npu_card_ids=None, service_runtimes=None,
+                                      guard_container_manager=None,
+                                      guard_container_config=None):
     """执行 benchmark，并在执行期间守护 NPU 进程状态。
 
     单机时守护当前容器；多机时若传入 service_runtimes，则为每个实例容器
@@ -511,12 +523,20 @@ def _execute_benchmark_with_npu_guard(container_manager, container_config,
             npu_card_ids = [
                 (start_device + i) for i in range(0, task_config.get("num_devices", 1))
             ]
-        guard = NpuProcessGuard(
-            npu_card_ids=list(npu_card_ids),
-            check_interval=engine_config.get("npu_guard_interval", 180.0),
-            startup_grace=engine_config.get("npu_guard_startup_grace", 0.0),
-            container_name=container_config.container_name,
-        )
+        guard_manager = guard_container_manager or container_manager
+        guard_config = guard_container_config or container_config
+        guard_kwargs = {
+            "npu_card_ids": list(npu_card_ids),
+            "check_interval": engine_config.get("npu_guard_interval", 180.0),
+            "startup_grace": engine_config.get("npu_guard_startup_grace", 0.0),
+        }
+        if guard_container_manager is not None and guard_container_config is not None:
+            guard_kwargs["command_executor"] = lambda cmd: guard_manager.exec_in_container(
+                guard_config.container_name, cmd, timeout=10, capture_output=True
+            )
+        else:
+            guard_kwargs["container_name"] = guard_config.container_name
+        guard = NpuProcessGuard(**guard_kwargs)
         guards.append(guard)
         guard.start()
         abort_event = guard.abort_event
@@ -1313,6 +1333,148 @@ def _create_container(context, container_manager, container_config):
     return True
 
 
+def _is_vbench_task(task_config):
+    return str((task_config.get("benchmark") or {}).get("benchmark_type", "")).lower() == "vbench"
+
+
+def _vbench_container_config(context, service_manager, service_config):
+    """Build an isolated VBench runner config for the benchmark host.
+
+    The xLLM service container remains the owner of NPU processes.  The runner
+    only needs HTTP access and the shared workspace/data mounts, so it is kept
+    out of ``service_runtimes`` and has its own cleanup handle.
+    """
+    from xtask.utils.container_manager import path_mapping_in_container
+    from xtask.benchmarks.vbench.defaults import (
+        DEFAULT_AIS_THIRD_PARTY,
+        DEFAULT_VBENCH2_DATASETS,
+        default_cache_dir,
+    )
+
+    task_config = context.state["task_config"]
+    vbench = (task_config.get("benchmark") or {}).get("vbench") or {}
+    output_path = os.path.abspath(context.output_file_path)
+    case_name = str(task_config.get("case_name") or "vbench").replace("/", "-")
+    image_home = vbench.get("image_home") or vbench.get("container_home") or "quay.io/jd_xllm/xllm-ai"
+    image_name = vbench.get("image_name") or vbench.get("container_image") or "8.1.rc1-a3-openeuler22.03-py3.10"
+    volumes = dict(get_xtask_config_data().get("DOCKER_CONFIG", {}).get("volumes") or {})
+    # Keep an explicit case-output bind even when the workspace root is also
+    # mounted.  This makes the contract clear for remote runner containers.
+    output_inside = path_mapping_in_container(output_path)
+    volumes[output_path] = output_inside
+
+    # Paths outside the configured model/workspace mounts need an explicit
+    # bind.  Do not create missing dataset paths here; the generated script
+    # performs the user-facing existence checks.
+    config = vbench if isinstance(vbench, dict) else {}
+    for key in ("full_info", "dataset_path", "image_root", "cache_dir", "evaluation_script", "evaluate_script"):
+        value = config.get(key)
+        if not value:
+            continue
+        normalized_value = os.path.normpath(str(value))
+        # Values already expressed in the container namespace (the default
+        # evaluation script is one) must remain image/workspace paths.  Treating
+        # them as host paths would create a bind mount that hides image files.
+        if any(
+            normalized_value == prefix or normalized_value.startswith(prefix + "/")
+            for prefix in ("/workspace", "/xllm_test_060", "/models", "/outputs")
+        ):
+            continue
+        host_path = os.path.abspath(str(value))
+        mapped = path_mapping_in_container(host_path)
+        if mapped == host_path and host_path not in volumes:
+            volumes[host_path] = host_path
+
+    return ContainerConfig(
+        image_home=image_home,
+        image_name=image_name,
+        container_name=f"{case_name}-vbench-{int(time.time())}",
+        runtime=service_config.get("runtime", "docker"),
+        gpu_ids=[],
+        ports={},
+        volumes=volumes,
+        environment={
+            "VBENCH_CACHE_DIR": path_mapping_in_container(
+                str(config.get("cache_dir") or default_cache_dir())
+            ),
+            "WORKING_DIR": "/workspace",
+            # Evaluation-time code/data roots consumed by
+            # evaluate_vbench_i2v_bench.py.  Explicit benchmark.vbench
+            # env_* values win over these shared defaults.
+            "VBENCH2_DATASETS": str(
+                config.get("vbench2_datasets") or DEFAULT_VBENCH2_DATASETS
+            ),
+            "AIS_THIRD_PARTY": str(
+                config.get("ais_third_party") or DEFAULT_AIS_THIRD_PARTY
+            ),
+            # camera_motion / dino go through torch.hub.load, which resolves
+            # repos and checkpoints under TORCH_HOME.  Point it at the shared
+            # VBench cache so the runner stays fully offline.
+            "TORCH_HOME": path_mapping_in_container(
+                str(config.get("cache_dir") or default_cache_dir())
+            )
+            + "/torch",
+        },
+        working_dir="/workspace",
+        network_mode=service_config.get("network_mode", "host"),
+        ipc_mode=service_config.get("ipc_mode"),
+        shm_size=service_config.get("shm_size"),
+        privileged=service_config.get("privileged", True),
+        auto_remove=False,
+        detach=True,
+        stdin_open=True,
+        tty=True,
+    )
+
+
+def _prepare_vbench_container(context, service_manager, service_config):
+    """Create the optional VBench runner without changing service runtime state."""
+    manager = None
+    container_created = False
+    try:
+        vbench_config = _vbench_container_config(context, service_manager, service_config)
+        manager = ContainerManager(
+            vbench_config,
+            logging.getLogger(),
+            executor=getattr(service_manager, "executor", None),
+        )
+        image_url = f"{vbench_config.image_home}:{vbench_config.image_name}"
+        if not manager.image_exists(image_url) and not manager.pull_image(image_url):
+            _fail_stage(context, f"Failed to pull VBench image {image_url}")
+            return
+        success, container_id = manager.create_container()
+        if not success:
+            _fail_stage(context, f"Failed to create VBench runner: {container_id}")
+            return
+        container_created = True
+        if not manager.wait_for_container(vbench_config.container_name, timeout=60):
+            _fail_stage(context, "VBench runner failed to become ready")
+            return
+        context.state.update(
+            vbench_container_manager=manager,
+            vbench_container_config=vbench_config,
+            vbench_container_id=container_id,
+        )
+        context.result["benchmark_container_id"] = container_id
+        logging.info("VBench runner is ready: %s", vbench_config.container_name)
+    except Exception as exc:
+        _fail_stage(context, f"VBench runner preparation failed: {exc}")
+    finally:
+        # The scheduler cleanup stage cannot see a manager until preparation
+        # succeeds.  Remove a partially created runner here on every failure.
+        if manager is not None and container_created and not context.state.get(
+            "vbench_container_manager"
+        ):
+            try:
+                manager.cleanup()
+            except Exception:
+                logging.warning(
+                    "Failed to clean up incomplete VBench runner %s",
+                    getattr(getattr(manager, "config", None), "container_name", ""),
+                    exc_info=True,
+                )
+
+
 def _prepare_container(context):
     state = context.state
     if state.get("multi_host"):
@@ -1388,6 +1550,8 @@ def _prepare_container(context):
         )
         return
     state["init_entries"] = os.listdir(context.output_file_path)
+    if _is_vbench_task(task_config):
+        _prepare_vbench_container(context, container_manager, engine_config)
 
 
 def _prepare_container_multi_host(context):
@@ -1416,10 +1580,26 @@ def _prepare_container_multi_host(context):
 
     if deployment.get("sync_workspace", True):
         try:
+            # VBench output can contain hundreds of MP4 files and model
+            # caches.  Only its dedicated runner needs this case directory;
+            # xLLM service workers need the normal workspace, not the cache.
+            extra_paths = []
+            if not _is_vbench_task(task_config):
+                extra_paths = [context.output_file_path]
             sync_workspace_to_hosts(
                 [plan.host for plan in plans],
-                extra_paths=[context.output_file_path],
+                extra_paths=extra_paths,
             )
+            if _is_vbench_task(task_config):
+                runner_plan = next(
+                    (plan for plan in plans if plan.is_benchmark_runner),
+                    plans[0] if plans else None,
+                )
+                if runner_plan is not None:
+                    sync_workspace_to_hosts(
+                        [runner_plan.host],
+                        extra_paths=[context.output_file_path],
+                    )
         except Exception as exc:
             _fail_stage(context, f"Multi-host workspace sync failed: {exc}")
             return
@@ -1476,6 +1656,21 @@ def _prepare_container_multi_host(context):
             state["service_runtimes"] = runtimes
             return
 
+        # 容器就绪、xLLM 未启动：此刻宿主 HBM 即无引擎基线水位。
+        # 清理阶段据此判断"释放干净"（见 _wait_npu_hbm_released），
+        # 代替对硬件/驱动版本敏感的固定阈值。失败不阻塞（返回 0，
+        # 清理时回退环境变量）。
+        _sample_npu_hbm_baseline(runtime)
+
+        # 启动前预清理 stale SHM：别的任务（或上次崩溃）残留的
+        # xllm_<chip>_* 布局与本用例不同时，xLLM 启动即报
+        # "incompatible shared memory layout" 直接崩溃，事后清理救不回
+        # 本次启动。容器内以 root 删除（宿主用户删不掉 root 属主对象）；
+        # kill_xllm=False：本容器还没有 xllm 进程，且共享 PID 命名空间下
+        # pkill 可能误伤别人活着的 xllm 服务；rm 前逐个 fuser 检查，
+        # 只删无主对象。
+        _cleanup_xllm_shm_in_container(manager, kill_xllm=False)
+
         runtimes.append(runtime)
         instances_meta[plan.instance_name] = {
             "host": plan.host,
@@ -1497,6 +1692,9 @@ def _prepare_container_multi_host(context):
         context.result["container_id"] = runner.container_id
     context.result["instances"] = instances_meta
     state["init_entries"] = os.listdir(context.output_file_path)
+    if _is_vbench_task(task_config) and runner is not None:
+        state["vbench_runner_runtime"] = runner
+        _prepare_vbench_container(context, runner.container_manager, engine_config)
 
 
 def _uses_xllm_control_service(task_config):
@@ -1554,14 +1752,20 @@ def _prepare_runtime_dependencies(context):
         return
 
     benchmark_type = task_config.get("benchmark").get("benchmark_type")
+    down_benchmark_cmd = ""
     if benchmark_type == "aisbench":
         down_benchmark_cmd = "bash /workspace/tools/download_ais_bench.sh;"
     elif benchmark_type == "evalscope":
         down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
-    logging.info(f"Starting download the benchmark tool: {down_benchmark_cmd}")
-    container_manager.exec_in_container(
-        container_config.container_name, down_benchmark_cmd, timeout=timeout
-    )
+    if down_benchmark_cmd:
+        logging.info(f"Starting download the benchmark tool: {down_benchmark_cmd}")
+        benchmark_download_result = container_manager.exec_in_container(
+            container_config.container_name, down_benchmark_cmd, timeout=timeout
+        )
+        if not benchmark_download_result.success:
+            detail = benchmark_download_result.stderr or benchmark_download_result.stdout or "unknown error"
+            _fail_stage(context, f"benchmark dependency preparation failed: {detail}")
+            return
 
     model_config_path = os.path.join(task_config.get("model_path"), "config.json")
     if not os.path.exists(model_config_path):
@@ -1571,29 +1775,33 @@ def _prepare_runtime_dependencies(context):
 
     with open(model_config_path, "r") as config_file:
         transformers_version = json.load(config_file).get("transformers_version")
-    install_result = container_manager.exec_in_container(
-        container_config.container_name,
-        f"pip install transformers=={transformers_version} --upgrade",
-        timeout=timeout,
-    )
-    if not install_result.success:
-        logging.error(
-            "transformer upgrade to %s failed,stdout:%s,stderr:%s.",
-            transformers_version,
-            install_result.stdout,
-            install_result.stderr,
-        )
+    # Transformers is a text-LLM dependency; DiT-style multimodal models
+    # (Wan2.2 etc.) do not use it and pin no version in config.json.
+    # Skip the install instead of forcing an upgrade of the container env.
+    if transformers_version:
         install_result = container_manager.exec_in_container(
             container_config.container_name,
-            "pip install --upgrade transformers;",
+            f"pip install transformers=={transformers_version} --upgrade",
             timeout=timeout,
         )
         if not install_result.success:
             logging.error(
-                "transformer upgrade failed,stdout:%s,stderr:%s.",
+                "transformer upgrade to %s failed,stdout:%s,stderr:%s.",
+                transformers_version,
                 install_result.stdout,
                 install_result.stderr,
             )
+            install_result = container_manager.exec_in_container(
+                container_config.container_name,
+                "pip install --upgrade transformers;",
+                timeout=timeout,
+            )
+            if not install_result.success:
+                logging.error(
+                    "transformer upgrade failed,stdout:%s,stderr:%s.",
+                    install_result.stdout,
+                    install_result.stderr,
+                )
 
     _clear_pre_benchmark_rst(
         container_manager,
@@ -1704,14 +1912,25 @@ def _prepare_runtime_dependencies_multi_host(context):
                 raise RuntimeError(
                     f"download benchmark failed on {runtime.plan.host}: {result.stderr}"
                 )
-        install_result = manager.exec_in_container(
-            name,
-            f"pip install transformers=={transformers_version} --upgrade",
-            timeout=timeout,
-        )
-        if not install_result.success:
-            manager.exec_in_container(
-                name, "pip install --upgrade transformers;", timeout=timeout
+        # Same rationale as the single-host path: DiT-style multimodal models
+        # pin no transformers version; skip rather than upgrade the env.
+        if transformers_version:
+            install_result = manager.exec_in_container(
+                name,
+                f"pip install transformers=={transformers_version} --upgrade",
+                timeout=timeout,
+            )
+            if not install_result.success:
+                manager.exec_in_container(
+                    name, "pip install --upgrade transformers;", timeout=timeout
+                )
+        else:
+            # DiT-style multimodal models pin no transformers version; skipping
+            # keeps the image's preinstalled version intact.  Log so a missing
+            # field is visible instead of silently doing nothing.
+            logging.info(
+                "No transformers_version in %s; skip transformers install",
+                model_config_path,
             )
         return True
 
@@ -2132,6 +2351,8 @@ def _run_benchmark_and_process(context):
     container_manager = state["container_manager"]
     benchmark_cmd = state["benchmark_cmd"]
     init_entries = state["init_entries"]
+    benchmark_container_manager = state.get("vbench_container_manager") or container_manager
+    benchmark_container_config = state.get("vbench_container_config") or container_config
     logging.info(f"Executing benchmark command: {benchmark_cmd}")
 
     benchmark_result = None
@@ -2157,12 +2378,14 @@ def _run_benchmark_and_process(context):
         state["init_entries"] = init_entries
         service_runtimes = state.get("service_runtimes") if state.get("multi_host") else None
         benchmark_result = _execute_benchmark_with_npu_guard(
-            container_manager,
-            container_config,
+            benchmark_container_manager,
+            benchmark_container_config,
             task_config,
             engine_config,
             benchmark_cmd,
             service_runtimes=service_runtimes,
+            guard_container_manager=container_manager if _is_vbench_task(task_config) else None,
+            guard_container_config=container_config if _is_vbench_task(task_config) else None,
         )
         state["benchmark_result"] = benchmark_result
         context.result.update(
@@ -2184,9 +2407,53 @@ def _run_benchmark_and_process(context):
                     f"{remote_runner.plan.host}"
                 )
 
+        vbench_runner = state.get("vbench_runner_runtime")
+        if _is_vbench_task(task_config) and benchmark_container_manager is not None:
+            from xtask.utils.container_manager import path_mapping_in_container
+
+            # The VBench runner usually writes as root.  Make local output
+            # readable before host-side post-processing as well as download.
+            benchmark_container_manager.exec_in_container(
+                benchmark_container_config.container_name,
+                f"chmod -R a+rwX {shlex.quote(path_mapping_in_container(context.output_file_path))} 2>/dev/null || true",
+                timeout=60,
+            )
+            if (
+                vbench_runner is not None
+                and not vbench_runner.plan.is_local
+            ):
+                # The VBench container is separate from service_runtimes, so
+                # remote generated videos/results need an explicit download.
+                if not benchmark_container_manager.executor.download(
+                    context.output_file_path, context.output_file_path
+                ):
+                    raise RuntimeError(
+                        f"Failed to download VBench output from {vbench_runner.plan.host}"
+                    )
+
         if benchmark_result.success:
             logging.info("perf benchmark completed successfully.")
-            if "acc" in task_config.get("metrics"):
+            if _is_vbench_task(task_config):
+                from xtask.benchmarks.vbench.vbench_postprocess import (
+                    vbench_result_post_process,
+                )
+
+                try:
+                    context.result["benchmark_vbench_result"], output_dir = (
+                        vbench_result_post_process(
+                            task_config, context.output_file_path, init_entries
+                        )
+                    )
+                except Exception as exc:
+                    context.result["benchmark_vbench_result"] = None
+                    context.result["message"] = f"VBench result processing failed: {exc}"
+                    logging.error(context.result["message"], exc_info=True)
+                    output_dir = ""
+                if output_dir:
+                    context.result["benchmark_output_path"] = output_dir
+                if output_dir:
+                    _record_service_group_archive_path(state, output_dir)
+            elif "acc" in task_config.get("metrics"):
                 logging.info("Start to check acc benchmark result.")
                 from xtask.benchmarks.base_benchmark import acc_result_postprocess
 
@@ -2370,20 +2637,142 @@ def _separate_shutdown_logs(runtimes, snapshots) -> None:
             if snapshot_dir.exists():
                 shutil.rmtree(snapshot_dir)
 
+def _npu_hbm_probe_cmd(device_ids=None) -> str:
+    """npu-smi 命令：输出指定设备 HBM 已用量(MB)的最大值。
+
+    输出形如 "3129"。行结构 ``| NPU Chip | Bus-Id | ... Mem used/total HBM
+    used/total |``：Chip 列即 ASCEND_RT_VISIBLE_DEVICES 用的芯片(Phy-ID)
+    编号，与 YAML device_ids 同一编号空间。行内取**最后一个** ``N / M``
+    （前面还有 AICore 0/0、Memory 0/0），总量不硬编码（32G/64G/96G 各异）。
+
+    device_ids 为空时查全部设备（兼容旧行为/单机无 plan 场景）。只查
+    本用例占的卡：共享宿主上其他 xTask 实例/租户占用卡的水位起落不会
+    抬高基线或误判释放（全卡模式下，别人恰好在清理窗口退出会用自己的
+    低水位淹没本用例的残留）。
+    """
+    npu_smi = "{ npu-smi info 2>/dev/null || /usr/local/bin/npu-smi info 2>/dev/null; }"
+    # NOTE: npu-smi 的 "used/total" 是固定列宽右对齐，斜杠两侧空格随数值
+    # 位数变化：4 位数 "3149 / 65536"、5 位数 "59194/ 65536"。正则必须
+    # 写成 *\/ *（斜杠两侧零或多个空格），只匹配 " / " 会在高水位
+    # (>9999MB，恰是最需要等待释放的时刻)解析失败返回空。
+    # awk 正则字面量里 / 必须转义为 \/，否则被当作正则定界符截断。
+    if not device_ids:
+        # cut 去掉 "/total" 部分；紧贴格式 "59194/ 65536" 下 awk '{print $1}'
+        # 会带上斜杠("59194/")，导致 _read_npu_hbm_max_mb 的 isdigit 判假。
+        return (
+            f"{npu_smi} | grep -oE '[0-9]+ */ *[0-9]+' | cut -d'/' -f1"
+            " | tr -d ' ' | sort -n | tail -1"
+        )
+    devs = ",".join(str(int(d)) for d in device_ids)
+    awk_filter = (
+        "BEGIN { n=split(devs,D,\",\"); for(i=1;i<=n;i++) want[D[i]]=1 } "
+        "/\\/ *[0-9]+ +\\|/ { "
+        "  t=$0; gsub(/\\|/,\"\",t); sub(/^ +/,\"\",t); split(t,f,\" +\"); chip=f[2]; "
+        "  if (!(chip in want)) next; "
+        "  used=\"\"; line=$0; "
+        "  while (match(line, /[0-9]+ *\\/ *[0-9]+/)) { "
+        "    pair=substr(line,RSTART,RLENGTH); sub(/ *\\/ .*/, \"\", pair); used=pair; "
+        "    line=substr(line,RSTART+RLENGTH); "
+        "  } "
+        "  if (used != \"\") print used "
+        "}"
+    )
+    return (
+        f"{npu_smi} | awk -v devs='{devs}' '{awk_filter}' | sort -n | tail -1"
+    )
+
+
+def _runtime_device_ids(runtime) -> Optional[list]:
+    """本 runtime 占用的设备编号（= ASCEND_RT_VISIBLE_DEVICES 编号空间）。"""
+    plan = getattr(runtime, "plan", None)
+    devices = getattr(plan, "device_ids", None)
+    if isinstance(devices, (list, tuple)) and devices:
+        return list(devices)
+    return None
+
+
+def _read_npu_hbm_max_mb(runtime) -> Optional[int]:
+    """读取本 runtime 设备的 HBM 最大占用(MB)；失败返回 None。
+
+    与 _wait_npu_hbm_released 共用同一条宿主侧命令（npu-smi 反映宿主机
+    设备状态，不受容器生命周期影响）。device_ids 缺失时查全部设备。
+    """
+    cmd = _npu_hbm_probe_cmd(_runtime_device_ids(runtime))
+    host = getattr(getattr(runtime, "plan", None), "host", "?")
+    try:
+        r = runtime.container_manager.executor.run(cmd, timeout=20)
+    except Exception as exc:
+        logging.warning("npu-smi poll error on %s: %s", host, exc)
+        return None
+    out = (getattr(r, "stdout", None) or "").strip()
+    if not isinstance(out, str):
+        return None
+    # 命令输出已是单行数字；逐行过滤数字行兜底（防御输出末尾多空行/杂质）。
+    for ln in reversed(out.splitlines()):
+        ln = ln.strip()
+        if ln.isdigit():
+            return int(ln)
+    return None
+
+
+def _sample_npu_hbm_baseline(runtime) -> int:
+    """启动前采样本宿主 HBM 基线（驱动常驻水位），记到 plan 上。
+
+    "什么算干净"由这台机器自己定义，而不是代码里的常数：不同驱动版本/
+    固件常驻占用不同（实测本机约 3GB），共享集群上别的租户常驻任务也
+    会被如实计入。采样失败返回 0（=未采样），清理时回退到环境变量/默认值。
+    在容器创建后、xLLM 启动前调用：此时 HBM 恰为无引擎状态的基线。
+    """
+    try:
+        mb = _read_npu_hbm_max_mb(runtime)
+    except Exception:
+        mb = None
+    if mb is None:
+        logging.warning(
+            "HBM baseline sampling failed on %s; cleanup will use env/default",
+            getattr(getattr(runtime, "plan", None), "host", "?"),
+        )
+        return 0
+    runtime.plan.hbm_baseline_mb = mb
+    logging.info("HBM baseline sampled on %s: %sMB", runtime.plan.host, mb)
+    return mb
+
+
+def _single_host_device_ids(task_config) -> Optional[list]:
+    """单机路径的设备编号：优先 device_ids，回退 start_device_id/num_devices。
+
+    与 service_group 的 _device_ids_from_instance 语义一致（合并后的
+    task_config["device_ids"] 优先），编号空间同为 ASCEND_RT_VISIBLE_DEVICES。
+    返回 None 表示无信息（HBM 探测回退为全卡）。
+    """
+    devices = task_config.get("device_ids")
+    if isinstance(devices, (list, tuple)) and devices:
+        return [int(d) for d in devices]
+    try:
+        start = int(task_config.get("start_device_id", 0))
+        count = int(task_config.get("num_devices", 1))
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    return list(range(start, start + count))
+
 
 def _wait_npu_hbm_released(runtime, timeout_s=None, baseline_mb=None, settle_s=None) -> None:
     """轮询 npu-smi，等每卡 HBM 回落到 ~baseline，并在回基线后额外静置 settle_s 秒。
-
     Why: HCCL communicator 和 HBM 由 NPU 驱动在引擎进程退出**之后**才释放，
     不是进程一死就释放。teardown 杀掉 16 个 xllm 进程后若立即起下一档，
     rank-0 构造 CollectiveService 时 HcclGetRootInfo 会在没释放干净的设备上
     失败(status 7)→ 8773 永不绑 → master 28888 不开 → /health 失败。
     累积型：低 batch 残留少够用，重负载档后下一档首次越阈值，之后毒化全档。
-
     关键：HBM 先回到基线，但 HCCL communicator 释放**比 HBM 慢且 npu-smi 看不到**。
     实测 acc sg3→sg4：HBM 已干净(max=3141MB)但 sg4 仍 HcclGetRootInfo status 7。
     故 HBM 达到基线后必须再静置 settle_s 秒(默认 30s)，给 communicator 释放窗口，
     否则 HBM 干净而 HCCL 仍脏 → 下一档起不来。
+
+    baseline 优先级：显式参数 > 启动前采样值+容差(见 _sample_npu_hbm_baseline)
+    > 环境变量 XTASK_HBM_BASELINE_MB > 默认 5000。采样值容差
+    XTASK_HBM_BASELINE_SLACK_MB(默认 512) 覆盖轮询噪声与少量驱动抖动。
     """
     import os
     if timeout_s is None:
@@ -2391,70 +2780,288 @@ def _wait_npu_hbm_released(runtime, timeout_s=None, baseline_mb=None, settle_s=N
             timeout_s = max(10, int(os.environ.get("XTASK_HBM_RELEASE_TIMEOUT", "60")))
         except ValueError:
             timeout_s = 60
-    if baseline_mb is None:
-        try:
-            baseline_mb = int(os.environ.get("XTASK_HBM_BASELINE_MB", "5000"))
-        except ValueError:
-            baseline_mb = 5000
     if settle_s is None:
         try:
             settle_s = max(0, int(os.environ.get("XTASK_HBM_SETTLE_SECONDS", "30")))
         except ValueError:
             settle_s = 30
-    # 取 16 卡 HBM 占用最大值(MB)，npu-smi 形如 "3129 / 65536"。
-    cmd = (
-        "{ npu-smi info 2>/dev/null || /usr/local/bin/npu-smi info 2>/dev/null; } | "
-        "grep -oE '[0-9]+ / 65536' | awk '{print $1}' | sort -n | tail -1"
-    )
+
     host = getattr(getattr(runtime, "plan", None), "host", "?")
+    # npu-smi 瞬断重试次数：SIGKILL 大批进程后驱动可能短暂忙不过来，
+    # 输出为空并不代表设备真不可读。
+    try:
+        probe_retries = max(1, int(os.environ.get("XTASK_HBM_PROBE_RETRIES", "3")))
+    except ValueError:
+        probe_retries = 3
+    if baseline_mb is None:
+        baseline_mb = _resolve_hbm_baseline_mb(runtime)
+
     deadline = time.monotonic() + timeout_s
     last = None
     settled_at = None  # HBM 首次回基线的时间戳；None=尚未回基线
+    unreadable_streak = 0
     while time.monotonic() < deadline:
-        try:
-            r = runtime.container_manager.executor.run(cmd, timeout=20)
-        except Exception as exc:
-            logging.warning("npu-smi poll error on %s: %s", host, exc)
-            return
-        out = (getattr(r, "stdout", None) or "").strip()
-        nums = [ln for ln in out.splitlines() if ln.strip().isdigit()]
-        cur_str = nums[-1] if nums else ""
-        if cur_str.isdigit():
-            cur = int(cur_str)
-            last = cur
-            if cur <= baseline_mb:
-                if settled_at is None:
-                    settled_at = time.monotonic()
-                    logging.info(
-                        "NPU HBM released on %s (max=%sMB <= %sMB); "
-                        "settling %ss for HCCL communicator release",
-                        host, cur, baseline_mb, settle_s,
-                    )
-                    if settle_s <= 0:
-                        return
-                    # 保证 settle 窗口不被总 deadline 截断。
-                    deadline = max(deadline, settled_at + settle_s)
-                if time.monotonic() - settled_at >= settle_s:
-                    logging.info(
-                        "NPU HBM settle window done on %s (max=%sMB); proceeding",
-                        host, cur,
-                    )
-                    return
+        cur = _read_npu_hbm_max_mb(runtime)
+        if cur is None:
+            # npu-smi 瞬断(SIGKILL 大批进程后驱动忙、SSH 抖动)时输出为空，
+            # 立即放行会把"恰好没等到释放"伪装成"探测失败"。先重试；
+            # 连续失败才认定真不可读，放行兜底避免卡死流程。
+            unreadable_streak += 1
+            if unreadable_streak < probe_retries:
+                logging.warning(
+                    "npu-smi HBM unreadable on %s (attempt %d/%d); retrying",
+                    host, unreadable_streak, probe_retries,
+                )
                 time.sleep(3)
                 continue
-            # HBM 又涨回基线之上(异常，例如残留进程)：重新等回基线并重置 settle。
-            if settled_at is not None:
-                logging.warning(
-                    "NPU HBM rose above baseline again on %s (%sMB > %sMB); re-arming settle",
-                    host, cur, baseline_mb,
+            logging.warning("npu-smi HBM unreadable on %s; skipping release wait", host)
+            return
+        unreadable_streak = 0
+        last = cur
+        if cur <= baseline_mb:
+            if settled_at is None:
+                settled_at = time.monotonic()
+                logging.info(
+                    "NPU HBM released on %s (max=%sMB <= %sMB); "
+                    "settling %ss for HCCL communicator release",
+                    host, cur, baseline_mb, settle_s,
                 )
-                settled_at = None
-            time.sleep(3)
+                if settle_s <= 0:
+                    return
+                # 保证 settle 窗口不被总 deadline 截断。
+                deadline = max(deadline, settled_at + settle_s)
+            if time.monotonic() - settled_at >= settle_s:
+                logging.info(
+                    "NPU HBM settle window done on %s (max=%sMB); proceeding",
+                    host, cur,
+                )
+                return
+            # 距 settle 结束最多再睡 1s：最后一轮轮询若落在窗口尾部
+            # (如 29.7s)，sleep(3) 会越过 deadline，导致窗口明明走完
+            # 却在 while 条件处以"超时未释放"误报退出(实测 3149MB 低于
+            # 基线仍报 not released)。
+            time.sleep(min(3, max(0.2, settled_at + settle_s - time.monotonic())))
             continue
-        # npu-smi 不可达或输出解析失败：不阻塞，直接放行(避免误卡死流程)。
-        logging.warning("npu-smi HBM unreadable on %s (stdout=%r); skipping release wait", host, out[:200])
-        return
+        # HBM 又涨回基线之上(异常，例如残留进程)：重新等回基线并重置 settle。
+        if settled_at is not None:
+            logging.warning(
+                "NPU HBM rose above baseline again on %s (%sMB > %sMB); re-arming settle",
+                host, cur, baseline_mb,
+            )
+            settled_at = None
+        time.sleep(3)
     logging.warning("NPU HBM not released on %s after %ss (max=%sMB); proceeding anyway", host, timeout_s, last)
+
+
+def _resolve_hbm_baseline_mb(runtime) -> int:
+    """解析本 runtime 的 HBM 基线阈值(MB)：采样值+容差 > 环境变量 > 默认。"""
+    import os
+    try:
+        slack = max(0, int(os.environ.get("XTASK_HBM_BASELINE_SLACK_MB", "512")))
+    except ValueError:
+        slack = 512
+    sampled = getattr(getattr(runtime, "plan", None), "hbm_baseline_mb", 0) or 0
+    if sampled > 0:
+        return sampled + slack
+    try:
+        return int(os.environ.get("XTASK_HBM_BASELINE_MB", "5000"))
+    except ValueError:
+        return 5000
+
+
+def _cleanup_xllm_shm(runtimes) -> None:
+    """Remove stale xLLM POSIX shared-memory objects left by this case.
+
+    xLLM names its SHM objects ``xllm_<device>_<kind>`` (e.g.
+    ``xllm_9590_dpg_0_input`` where 9590 is the Atlas chip id, not a port)
+    and validates their size on startup ("incompatible shared memory
+    layout").  A previous crashed run therefore poisons the next start on the
+    same devices.  The runner uses ``--ipc=host``, so the objects live in the
+    host ``/dev/shm`` and must be removed there.
+
+    Called after ``_wait_xllm_processes_exit`` guarantees no xllm process is
+    alive, so every remaining ``xllm_*`` object on a local host is stale.
+    Remote hosts keep their stale objects; surface that instead of silently
+    missing them.  Unrelated namespaces (``xllm_expert_*`` from other teams'
+    MoE runs) are left untouched.
+
+    An independent xllm service (not managed by this xTask run) may coexist on
+    the same host; deleting its live SHM objects would crash it.  Each target
+    is therefore checked with ``fuser`` first and skipped when any process
+    still holds it open.
+
+    ``runtimes`` may be empty for the single-host path, where the local host
+    is the only cleanup target by definition.
+    """
+    import subprocess
+
+    # 每个实例容器(含远端宿主，经各自 manager 的 executor 执行)都已先跑过
+    # 容器内 root 清理 _cleanup_xllm_shm_in_container，宿主侧这层只是本地
+    # 兜底。多机场景下旧版无条件打的"远端可能残留"提示已过时(远端实际已
+    # 在容器内清干净)，已删除该误导性警告；本地兜底清理保留。
+    has_local = (not runtimes) or any(
+        getattr(getattr(r, "plan", None), "is_local", True) for r in runtimes
+    )
+    if not has_local:
+        return
+
+    try:
+        result = subprocess.run(
+            ["ls", "/dev/shm"], capture_output=True, text=True, timeout=10
+        )
+    except Exception:
+        logging.warning("Failed to list /dev/shm for xLLM SHM cleanup", exc_info=True)
+        return
+
+    # Per-case objects carry the chip id (``xllm_9590_dpg_0_input``).  The
+    # generation lock is a host-global xLLM lock shared across runs, so it
+    # must survive case cleanup.
+    targets = [
+        name
+        for name in result.stdout.split()
+        if name.startswith("xllm_")
+        and not name.startswith("xllm_expert_")
+        and name != "xllm_shm_generation_lock_v2"
+    ]
+    if not targets:
+        return
+
+    def _is_held(name: str) -> bool:
+        """True when some live process still has the SHM object open.
+
+        ``fuser`` prints PIDs to stdout (and the object path to stderr) when
+        the file is held; a non-zero exit means nothing holds it.  When
+        ``fuser`` is unavailable, fall back to deleting (historical behaviour)
+        rather than skipping cleanup entirely.
+        """
+        try:
+            probe = subprocess.run(
+                ["fuser", f"/dev/shm/{name}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return probe.returncode == 0
+
+    logging.info("Removing %d stale xLLM SHM objects: %s", len(targets), targets[:8])
+    for name in targets:
+        if _is_held(name):
+            # Skip live objects belonging to an xllm service this run does not
+            # own (e.g. another team's standalone deployment on shared hosts).
+            logging.info(
+                "Skipping /dev/shm/%s: still held by a live process", name
+            )
+            continue
+        try:
+            os.remove(f"/dev/shm/{name}")
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Root-owned objects from a container run cannot be removed by the
+            # current user; the next start still hits the layout error.  Log it
+            # so the operator knows to clean up manually.
+            logging.warning("Cannot remove /dev/shm/%s (permission?)", name)
+
+
+def _cleanup_xllm_shm_in_container(container_manager, kill_xllm: bool = True) -> None:
+    """Stop xLLM inside the container, then remove its SHM objects as root.
+
+    xLLM creates its POSIX SHM objects as the container user (root); the host
+    user running xTask cannot unlink them, and once the container is gone the
+    objects can only be removed manually.  The container shares the host IPC
+    namespace (``--ipc=host``), so removing them from inside the container
+    clears the host objects as well.
+
+    Sequence (mirrors the multi-host ``_wait_xllm_processes_exit`` flow):
+      1. pkill xllm inside the container and wait for it to exit, so the
+         objects are no longer held;
+      2. run tools/clean_xllm_shm.sh inside the container (as root), which
+         removes the stale objects while skipping any object still held by a
+         live process (a coexisting independent xllm service on the same host
+         must not be crashed by deleting its live SHM).
+
+    ``kill_xllm=False`` skips step 1: used for the pre-start cleanup where
+    this container has no xllm yet — pkill in a shared PID/IPC namespace
+    could hit another team's live xllm process.
+
+    Only per-case objects (``xllm_<chip_id>_*``) are targeted; the
+    ``xllm_expert_*`` namespace (other teams' MoE runs) and the host-global
+    ``xllm_shm_generation_lock_v2`` are left in place, matching
+    ``_cleanup_xllm_shm``.  Must run BEFORE ``container_manager.cleanup()``.
+    """
+    container_name = getattr(
+        getattr(container_manager, "container_config", None)
+        or getattr(container_manager, "config", None),
+        "container_name",
+        None,
+    )
+    if not container_name:
+        return
+
+    def _exec(cmd: str, timeout: int = 30):
+        try:
+            return container_manager.exec_in_container(
+                container_name, cmd, timeout=timeout
+            )
+        except Exception:
+            logging.warning(
+                "In-container xLLM cleanup step failed for %s",
+                container_name,
+                exc_info=True,
+            )
+            return None
+
+    # 1. Stop xllm and wait until it is gone (bounded by the timeout itself;
+    #    the loop exits early once no xllm process remains).  Skip entirely in
+    #    pre-start mode: the container's own xllm does not exist yet, and the
+    #    pkill pattern is not container-scoped on hosts sharing the PID
+    #    namespace — it could kill a coexisting foreign xllm process.
+    if kill_xllm:
+        _exec(
+            "sh -c 'pkill -TERM -x xllm 2>/dev/null || true; "
+            "for i in $(seq 1 30); do "
+            "pgrep -x xllm >/dev/null 2>&1 || exit 0; sleep 1; "
+            "done; pkill -KILL -x xllm 2>/dev/null || true'",
+            timeout=45,
+        )
+
+    # 2. Remove stale objects as root inside the container, skipping any
+    #    object still held by a live process (fuser exit 0 = held).  The
+    #    removal logic lives in tools/clean_xllm_shm.sh (mounted at
+    #    /workspace/tools/ inside the container) instead of an inline
+    #    `sh -c` string: exec_in_container wraps commands in sh -c "...",
+    #    and a `$f` inside that double-quoted layer is expanded to the empty
+    #    string by the HOST shell before docker sees it — the previous inline
+    #    while-loop therefore deleted nothing (observed on real runs).
+    #    The script reports "removed: N" / "skip(held): name" lines.
+    script = "/workspace/tools/clean_xllm_shm.sh"
+    result = _exec(f"sh {script} 2>&1", timeout=30)
+    out = getattr(result, "stdout", "") or ""
+    if not isinstance(out, str):
+        # Mock/fake exec results without a real stdout string
+        out = ""
+    out = out.strip()
+    if getattr(result, "success", False):
+        removed = 0
+        for line in out.splitlines():
+            if line.startswith("removed:"):
+                try:
+                    removed = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+        if "fail(rm):" in out:
+            logging.warning(
+                "In-container SHM cleanup reported failures for %s:\n%s",
+                container_name,
+                out,
+            )
+        logging.info(
+            "Cleaned %d stale xLLM SHM objects inside container %s",
+            removed,
+            container_name,
+        )
 
 
 def _wait_xllm_processes_exit(runtimes, grace_s: int = 15) -> None:
@@ -2546,10 +3153,10 @@ def _wait_xllm_processes_exit(runtimes, grace_s: int = 15) -> None:
     # rank-0 的 HcclGetRootInfo 会在脏设备上失败(status 7)→ 28888 不开 → /health 失败。
     run_on_runtimes_parallel(runtimes, _wait_npu_hbm_released)
 
-
 def _cleanup_scheduler(context):
     from xtask.core.service_group import cleanup_service_group
 
+    state = context.state
     # Archive into a dated directory while containers are still available so
     # root-owned aisbench directories can be chmod'd for host-side copies.  The
     # finalize-stage call is kept as a no-op safety net when this already ran.
@@ -2600,6 +3207,25 @@ def _cleanup_scheduler(context):
                     control_service.stop()
                 except Exception:
                     logging.error("Failed to stop xLLM control service", exc_info=True)
+            elif should_clean:
+                # Non-service-routed deployments never went through
+                # _wait_xllm_processes_exit above; stop xllm here so the SHM
+                # objects are no longer held before the in-container removal.
+                _wait_xllm_processes_exit(runtimes, grace_s=shutdown_grace_s)
+            if should_clean:
+                # SHM cleanup must not depend on control_service: non-PD,
+                # non-service-routed deployments (the common case) have none,
+                # and their stale xllm_<chip>_* objects would otherwise poison
+                # the next start with "incompatible shared memory layout".
+                # The host-side pass only cleans the local host (and fails on
+                # root-owned objects), so delete them from inside EVERY
+                # instance container (as root, via each manager's own
+                # executor — remote hosts included) while it still exists.
+                for runtime in runtimes:
+                    _cleanup_xllm_shm_in_container(
+                        getattr(runtime, "container_manager", None)
+                    )
+                _cleanup_xllm_shm(runtimes)
         finally:
             if should_clean:
                 _separate_shutdown_logs(runtimes, snapshots)
@@ -2617,11 +3243,47 @@ def _cleanup_scheduler(context):
             )
         else:
             cleanup_service_group(runtimes, should_clean)
+        if should_clean and state.get("vbench_container_manager") is not None:
+            state["vbench_container_manager"].cleanup()
         return
 
     container_manager = context.state.get("container_manager")
     if should_clean and container_manager is not None:
+        # Single-host path: xLLM runs --ipc=host, so its POSIX SHM objects
+        # live in the host /dev/shm and are created by root (the container
+        # user).  The host user cannot unlink them, so stop xllm and remove
+        # the objects from inside the container (as root) BEFORE the
+        # container is torn down; a leftover poisons the next start with
+        # "incompatible shared memory layout".  Multi-host does the same in
+        # the service-group branch above.
+        _cleanup_xllm_shm_in_container(container_manager)
+        # Same driver-async-release window as the service-group path: HBM and
+        # HCCL communicator are freed after the engine exits; a case running
+        # immediately after on the same devices can fail HcclGetRootInfo.
+        # Single-host has no ServiceRuntime, so wrap the manager in a minimal
+        # shim exposing the same .container_manager.executor surface the
+        # waiter polls; devices come from task_config (device_ids or
+        # start_device_id/num_devices), the baseline falls back to env/default
+        # (not sampled — the non-deployment path has no launch-plan hook).
+        _wait_npu_hbm_released(
+            types.SimpleNamespace(
+                plan=types.SimpleNamespace(
+                    host="local",
+                    hbm_baseline_mb=0,
+                    device_ids=_single_host_device_ids(
+                        state.get("task_config") or {}
+                    ),
+                ),
+                container_manager=container_manager,
+            )
+        )
         container_manager.cleanup()
+        # Host-side fallback for objects the in-container step could not
+        # reach (e.g. container already dying).  Harmless when it fails on
+        # root-owned leftovers; those surface as a warning.
+        _cleanup_xllm_shm([])
+    if should_clean and context.state.get("vbench_container_manager") is not None:
+        context.state["vbench_container_manager"].cleanup()
 
 
 def _build_task_scheduler():

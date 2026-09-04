@@ -405,11 +405,16 @@ class ContainerManager:
         if config.shm_size:
             cmd_parts.extend([f"--shm-size={config.shm_size}"])
         
-        # Add environment variables
-        # for key, value in config.environment.items():
-        #     cmd_parts.extend(["-e", f"{key}={value}"])
+        # Add environment variables.
+        # Proxy vars keep the historical special-case handling (no_proxy
+        # derivation below); every other configured env var is passed through
+        # as-is so benchmark runners receive their injected paths
+        # (VBENCH2_DATASETS / AIS_THIRD_PARTY / TORCH_HOME / ...).
+        for key, value in config.environment.items():
+            if key in ("http_proxy", "https_proxy", "no_proxy", "NO_PROXY"):
+                continue
+            cmd_parts.extend(["-e", f"{key}={value}"])
 
-        # Add environment variables
         # Add environment proxy
         for key, value in config.environment.items():
             if key == "http_proxy" or key == "https_proxy":
@@ -663,13 +668,29 @@ class ContainerManager:
         runtime = self.config.runtime if self.config else "docker"
         
         # Check if container not exists or not running
+        # NOTE: container_exists issues a remote docker query (SSH on remote
+        # hosts).  A transient SSH/docker failure returns an empty stdout and
+        # is indistinguishable from a truly deleted container, which would
+        # abort perfectly valid exec calls (e.g. the readiness probe during
+        # service startup) with "does not exist".  Retry once after a short
+        # delay so only a stable negative verdict is honored.
         if not self.container_exists(container_name):
-            return CommandResult(
-                success=False,
-                exit_code=-1,
-                stdout="",
-                stderr=f"Container '{container_name}' does not exist",
-                execution_time=0.0
+            import time as _time
+
+            _time.sleep(2)
+            if not self.container_exists(container_name):
+                return CommandResult(
+                    success=False,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=f"Container '{container_name}' does not exist",
+                    execution_time=0.0
+                )
+            logging.info(
+                "[%s] Container '%s' existence check recovered on retry "
+                "(transient remote failure)",
+                inspect.currentframe().f_code.co_name,
+                container_name,
             )
         else:
             logging.debug("[%s] Check %s container is exist" % 

@@ -100,6 +100,38 @@ def verify_result(result, task_config):
         logging.error("✗ Test failed: benchmark command did not complete successfully")
         return False
 
+    if "vbench" in task_config.get("metrics", []):
+        vbench_result = result.get("benchmark_vbench_result")
+        if not isinstance(vbench_result, Mapping):
+            logging.error("✗ Test failed: missing VBench result")
+            return False
+        try:
+            failed = int(vbench_result.get("failed", 0) or 0)
+        except (TypeError, ValueError):
+            failed = 1
+        if failed > 0:
+            logging.error("✗ Test failed: VBench contains %s failed videos", failed)
+            return False
+        mode = str(
+            ((task_config.get("benchmark") or {}).get("vbench") or {}).get(
+                "mode", "generate_and_evaluate"
+            )
+        ).lower()
+        actual = vbench_result.get("total_score")
+        if mode in {"evaluate", "generate_and_evaluate"} and actual is None:
+            logging.error("✗ Test failed: VBench final total score is missing")
+            return False
+        baseline = _vbench_baseline(task_config)
+        if baseline is None or actual is None:
+            return True
+        baseline_value, threshold = baseline
+        try:
+            actual_value = float(actual)
+        except (TypeError, ValueError):
+            logging.error("✗ Test failed: invalid VBench total score: %r", actual)
+            return False
+        return check_accuracy_within_threshold(baseline_value, threshold, actual_value)
+
     if "acc" in task_config.get("metrics"):
         baseline = task_config.get("benchmark").get("acc").get("baseline")
         if baseline:
@@ -204,7 +236,30 @@ def _configured_baseline(task_config):
         baseline = metric_config.get("baseline")
         if baseline:
             return metric_name, baseline, metric_config.get("threshold")
+    # A vbench block may be present as metadata in a non-VBench task.  Only
+    # an explicit VBench metric is allowed to select its baseline.
+    if not _contains_metric(task_config, "vbench"):
+        return None
+    vbench = (benchmark.get("vbench") or {}) if isinstance(benchmark, Mapping) else {}
+    evaluation = vbench.get("evaluation") or {}
+    baseline = evaluation.get("baseline", vbench.get("baseline"))
+    if baseline not in (None, ""):
+        return "vbench", baseline, evaluation.get("threshold", vbench.get("threshold", 0.1))
     return None
+
+
+def _vbench_baseline(task_config):
+    configured = _configured_baseline(task_config)
+    if configured is None or configured[0] != "vbench":
+        return None
+    try:
+        baseline = float(configured[1])
+        threshold = float(configured[2])
+    except (TypeError, ValueError):
+        return None
+    if baseline <= 0 or threshold < 0 or threshold > 1:
+        return None
+    return baseline, threshold
 
 
 def _baseline_failure_reason(result, task_config):
@@ -215,6 +270,9 @@ def _baseline_failure_reason(result, task_config):
     if metric_name == "acc":
         actual = result.get("benchmark_acc_result")
         metric_label = "accuracy"
+    elif metric_name == "vbench":
+        actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
+        metric_label = "vbench_total_score"
     else:
         summary = getattr(result.get("benchmark_perf_result"), "summary", None)
         actual = getattr(summary, "output_tps_avg", None)
@@ -239,6 +297,9 @@ def _baseline_difference(result, task_config):
     if metric_name == "acc":
         actual = result.get("benchmark_acc_result")
         metric_label = "accuracy"
+    elif metric_name == "vbench":
+        actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
+        metric_label = "vbench_total_score"
     else:
         summary = getattr(result.get("benchmark_perf_result"), "summary", None)
         actual = getattr(summary, "output_tps_avg", None)
@@ -278,6 +339,8 @@ def _baseline_result_failed(result, task_config):
     metric_name, baseline, threshold = configured
     if metric_name == "acc":
         actual = result.get("benchmark_acc_result")
+    elif metric_name == "vbench":
+        actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
     else:
         summary = getattr(result.get("benchmark_perf_result"), "summary", None)
         actual = getattr(summary, "output_tps_avg", None)
@@ -333,18 +396,59 @@ def _classify_failure(result, task_config):
         return FAILURE_BASELINE, _baseline_failure_reason(result, task_config)
 
     if result.get("benchmark_success") is True:
-        missing_result = (
-            result.get("benchmark_acc_result") in (None, "")
-            if _contains_metric(task_config, "acc")
-            else getattr(result.get("benchmark_perf_result"), "summary", None) is None
-        )
+        if _contains_metric(task_config, "vbench"):
+            raw_vbench_result = result.get("benchmark_vbench_result")
+            vbench_result = raw_vbench_result if isinstance(raw_vbench_result, Mapping) else {}
+            try:
+                failed_videos = int(vbench_result.get("failed", 0) or 0)
+            except (TypeError, ValueError):
+                failed_videos = 1
+            missing_result = (
+                not isinstance(raw_vbench_result, Mapping)
+                or failed_videos > 0
+                or (
+                    str(((task_config.get("benchmark") or {}).get("vbench") or {}).get("mode", "generate_and_evaluate")).lower()
+                    in {"evaluate", "generate_and_evaluate"}
+                    and vbench_result.get("total_score") is None
+                )
+            )
+        else:
+            missing_result = (
+                result.get("benchmark_acc_result") in (None, "")
+                if _contains_metric(task_config, "acc")
+                else getattr(result.get("benchmark_perf_result"), "summary", None) is None
+            )
         if missing_result or "verification failed" in message.lower():
             return FAILURE_PROCESSING, message or "Benchmark result could not be processed"
         return FAILURE_OTHER, message or "Failure occurred after benchmark processing"
     return FAILURE_OTHER, message or "Unknown scheduler failure"
 
 
-def _result_payload(result):
+def _result_payload(result, task_config=None):
+    vbench_result = result.get("benchmark_vbench_result")
+    task_config = task_config or result.get("task_config") or {}
+    benchmark_type = str(
+        (task_config.get("benchmark") or {}).get("benchmark_type", "")
+    ).lower()
+    if benchmark_type == "vbench" and isinstance(vbench_result, Mapping):
+        # Keep the workbook bounded.  VBench's per-video evaluation payload
+        # and latency list belong in the archived JSON files, not in one Excel
+        # cell (Excel rejects values over 32K and the row becomes unreadable).
+        fields = (
+            "generated",
+            "resumed",
+            "total",
+            "failed",
+            "quality_score",
+            "i2v_score",
+            "total_score",
+            "temporal_flickering",
+            "raw_scores",
+            "normalized_weighted",
+            "final_score_file",
+            "eval_results_file",
+        )
+        return {field: vbench_result.get(field) for field in fields if field in vbench_result}
     perf_result = result.get("benchmark_perf_result")
     if perf_result is None:
         return {}
@@ -390,6 +494,11 @@ def _flatten_mapping(value: Any, target: dict, prefix: str = "") -> None:
         field_name = ".".join(
             part for part in field_name.split(".") if part != "total"
         )
+        if not field_name:
+            # Stripping the "total" segment can leave an empty name (the
+            # VBench ``total`` video counter); an empty column header would
+            # break the workbook layout, so drop the field instead.
+            return
         target[field_name] = json.dumps(value, ensure_ascii=False, default=str)
         return
     field_name = (
@@ -400,6 +509,9 @@ def _flatten_mapping(value: Any, target: dict, prefix: str = "") -> None:
     field_name = ".".join(
         part for part in field_name.split(".") if part != "total"
     )
+    if not field_name:
+        # Same as above: never emit an empty column header.
+        return
     target[field_name] = value
 
 
@@ -460,7 +572,7 @@ def _build_result_row(result, task_config, task_path=None, args=None):
         )
     else:
         row["accuracy"] = "NA"
-        _flatten_mapping(_result_payload(result), row)
+        _flatten_mapping(_result_payload(result, task_config), row)
     return model_name, row
 
 

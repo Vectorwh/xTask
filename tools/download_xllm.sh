@@ -25,6 +25,15 @@ XLLM_PACK_URL="https://9n-das-tools.s3.cn-north-1.jdcloud-oss.com/xllm-ai/xllm_r
 XLLM_PACK_ARCHIVE="$TARGET_DIR/xllm_pack.tar.gz"
 XLLM_PACK_DIR="$TARGET_DIR/xllm_pack"
 XLLM_PACK_READY=0
+# 宿主机 /export/home/models/xllm_test_060 会归档 xllm_pack.tar.gz。该目录在
+# 容器内可能是相同路径直挂，也可能是 /xllm_test_060；两个候选都探测，也可用
+# XLLM_PACK_LOCAL_DIR 显式指定归档目录。
+XLLM_PACK_LOCAL_DIR="${XLLM_PACK_LOCAL_DIR:-}"
+XLLM_PACK_LOCAL_CANDIDATES=(
+    "/export/home/models/xllm_test_060"
+    "/xllm_test_060"
+)
+XLLM_PACK_LOCAL_SOURCE=""
 
 ensure_xllm_pack() {
     if [ "$XLLM_PACK_READY" -eq 1 ]; then
@@ -35,6 +44,35 @@ ensure_xllm_pack() {
     # 避免 wget 生成 .1 文件后仍误用旧包。
     rm -rf "$XLLM_PACK_DIR"
     rm -f "$XLLM_PACK_ARCHIVE" "$XLLM_PACK_ARCHIVE".*
+
+    # 优先使用服务器本地归档，避免每次从外网 wget ~585MB。
+    if [ -z "$XLLM_PACK_LOCAL_SOURCE" ]; then
+        local candidate
+        for candidate in "$XLLM_PACK_LOCAL_DIR" "${XLLM_PACK_LOCAL_CANDIDATES[@]}"; do
+            [ -n "$candidate" ] || continue
+            if [ -f "$candidate/xllm_pack.tar.gz" ]; then
+                XLLM_PACK_LOCAL_SOURCE="$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -n "$XLLM_PACK_LOCAL_SOURCE" ]; then
+        echo "使用本地归档: $XLLM_PACK_LOCAL_SOURCE/xllm_pack.tar.gz"
+        if tar -zxf "$XLLM_PACK_LOCAL_SOURCE/xllm_pack.tar.gz" -C "$TARGET_DIR"; then
+            if [ ! -d "$XLLM_PACK_DIR" ]; then
+                echo "Error: 本地归档解压后未生成目录: $XLLM_PACK_DIR，回退到外网下载。" >&2
+            else
+                XLLM_PACK_READY=1
+                return 0
+            fi
+        else
+            echo "Error: 本地归档校验失败，回退到外网下载: $XLLM_PACK_LOCAL_SOURCE/xllm_pack.tar.gz" >&2
+            rm -rf "$XLLM_PACK_DIR"
+            rm -f "$XLLM_PACK_ARCHIVE" "$XLLM_PACK_ARCHIVE".*
+        fi
+        XLLM_PACK_LOCAL_SOURCE=""
+    fi
+
     wget --tries=3 -O "$XLLM_PACK_ARCHIVE" "$XLLM_PACK_URL"
     tar -zxvf "$XLLM_PACK_ARCHIVE" -C "$TARGET_DIR"
 

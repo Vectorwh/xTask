@@ -587,6 +587,138 @@ class WriteResultTests(unittest.TestCase):
             "11.87.191.99/daily_group/case-a/20260712_195639",
         )
 
+    def test_vbench_result_never_creates_blank_header_columns(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(
+            result_processor.os, "getcwd", return_value=root
+        ):
+            source = self._source_case(root)
+            config = self._config("case-vbench", metrics="vbench")
+            config["benchmark"] = {
+                "benchmark_type": "vbench",
+                "vbench": {"mode": "generate_and_evaluate"},
+            }
+            result = self._result(config)
+            result["benchmark_vbench_result"] = {
+                "generated": 5,
+                "resumed": 0,
+                "total": 5,
+                "failed": 0,
+                "quality_score": -0.5,
+                "i2v_score": -0.25,
+                "total_score": -0.39,
+                "raw_scores": {"Subject Consistency": 0.9},
+                "normalized_weighted": {"Subject Consistency": 0.8},
+                "final_score_file": "/outputs/final.json",
+                "eval_results_file": "/outputs/eval.json",
+            }
+            result_processor.write_result(result, config, task_path=str(source))
+            workbook_path = Path(root) / "outputs" / "result.xlsx"
+            headers = self._sheet_headers(workbook_path, "qwen3_8b")
+            rows = self._sheet_rows(workbook_path, "qwen3_8b")
+
+        self.assertNotIn("", headers)
+        self.assertNotIn(None, headers)
+        self.assertFalse(any("total" in header.split(".") for header in headers))
+        self.assertEqual(rows[0]["generated"], 5)
+        self.assertEqual(rows[0]["failed"], 0)
+        self.assertEqual(rows[0]["quality_score"], -0.5)
+        self.assertEqual(rows[0]["total_score"], -0.39)
+        self.assertEqual(rows[0]["raw_scores.Subject Consistency"], 0.9)
+        self.assertEqual(
+            rows[0]["normalized_weighted.Subject Consistency"], 0.8
+        )
+        self.assertEqual(rows[0]["final_score_file"], "/outputs/final.json")
+
+    def test_blank_header_columns_are_purged_from_existing_workbook(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(
+            result_processor.os, "getcwd", return_value=root
+        ):
+            source = self._source_case(root)
+            config = self._config("case-a")
+            result_processor.write_result(
+                self._result(config, perf=FakePerfResult()),
+                config,
+                task_path=str(source),
+            )
+            workbook_path = Path(root) / "outputs" / "result.xlsx"
+            workbook = load_workbook(workbook_path)
+            worksheet = workbook["qwen3_8b"]
+            # Simulate a legacy workbook: a blank header column between
+            # "model_name" and "case_group" carrying a data value.
+            worksheet.insert_cols(2)
+            worksheet.cell(1, 2, None)
+            worksheet.cell(2, 2, 7)
+            workbook.save(workbook_path)
+            workbook.close()
+
+            second_config = self._config("case-b")
+            result_processor.write_result(
+                self._result(second_config, perf=FakePerfResult()),
+                second_config,
+                task_path=str(source),
+            )
+            headers = self._sheet_headers(workbook_path, "qwen3_8b")
+            rows = self._sheet_rows(workbook_path, "qwen3_8b")
+
+        self.assertNotIn(None, headers)
+        self.assertNotIn("", headers)
+        self.assertEqual(headers[:6], list(LEADING_RESULT_FIELDS))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["case_name"], "case-a")
+        self.assertEqual(rows[1]["case_name"], "case-b")
+        self.assertEqual(rows[1]["summary.output_tps_avg"], 100)
+
+    def test_new_headers_append_after_real_columns(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(
+            result_processor.os, "getcwd", return_value=root
+        ):
+            source = self._source_case(root)
+            config = self._config("case-a")
+            result_processor.write_result(
+                self._result(config, perf=FakePerfResult()),
+                config,
+                task_path=str(source),
+            )
+            workbook_path = Path(root) / "outputs" / "result.xlsx"
+            workbook = load_workbook(workbook_path)
+            worksheet = workbook["qwen3_8b"]
+            # A legacy blank trailing header cell must not absorb the next
+            # new field header (regression: header written at len(headers)
+            # instead of the real column count used to overwrite it).
+            worksheet.cell(1, worksheet.max_column + 1, None)
+            workbook.save(workbook_path)
+            workbook.close()
+
+            vbench_config = self._config("case-b", metrics="vbench")
+            vbench_config["benchmark"] = {
+                "benchmark_type": "vbench",
+                "vbench": {"mode": "generate_and_evaluate"},
+            }
+            vbench_result = self._result(vbench_config)
+            vbench_result["benchmark_vbench_result"] = {
+                "generated": 1,
+                "resumed": 0,
+                "failed": 0,
+                "total_score": 0.42,
+                "final_score_file": "/outputs/final.json",
+                "eval_results_file": "/outputs/eval.json",
+            }
+            result_processor.write_result(
+                vbench_result, vbench_config, task_path=str(source)
+            )
+            headers = self._sheet_headers(workbook_path, "qwen3_8b")
+            rows = self._sheet_rows(workbook_path, "qwen3_8b")
+
+        self.assertNotIn(None, headers)
+        self.assertIn("generated", headers)
+        self.assertIn("final_score_file", headers)
+        self.assertIn("eval_results_file", headers)
+        self.assertLess(headers.index("eval_results_file"), len(headers))
+        vbench_row = next(row for row in rows if row["case_name"] == "case-b")
+        self.assertEqual(vbench_row["generated"], 1)
+        self.assertEqual(vbench_row["total_score"], 0.42)
+        self.assertEqual(vbench_row["final_score_file"], "/outputs/final.json")
+
     def test_existing_workbook_columns_are_pruned_and_reordered(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(
             result_processor.os, "getcwd", return_value=root

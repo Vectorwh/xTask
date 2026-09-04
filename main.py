@@ -110,7 +110,7 @@ def run_validated_workflow(args, xtask_config):
     )
     
     # 发送京me通报
-    #openme_client.SendJUEMsgCard(args=args)
+    openme_client.SendJUEMsgCard(args=args)
 
 
 def parse_and_validate_arguments():

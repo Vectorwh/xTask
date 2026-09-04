@@ -3,13 +3,13 @@
 写一个用例时，按下面四步拼起来即可：
 
 1. 先写模型和数据集。
-2. 再选一个 benchmark：AISBench 或 EvalScope。
-3. 再选一种测试：性能 `perf` 或精度 `acc`。
+2. 再选一个 benchmark：AISBench、EvalScope 或 VBench。
+3. 再选一种测试：性能 `perf`、精度 `acc` 或视频质量 `vbench`。
 4. 最后选部署：单机、普通多机、普通实例统一路由，或者 PD 分离；需要搜索时再加搜索段。
 
 ## 1. 可参考示例
 
-可直接参考的 24 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
+可直接参考的 25 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
 
 | 目的 | 示例 |
 | --- | --- |
@@ -35,6 +35,7 @@
 | 单机 AISBench ShareGPT 多组 Prefix Cache 性能测试 | `22_single_aisbench_sharegpt_prefix_cache_perf.yaml` |
 | 单机 AISBench ShareGPT `packed` 多组 Prefix Cache 长上下文性能测试 | `23_single_aisbench_sharegpt_prefix_cache_packed_perf.yaml` |
 | 单机 AISBench GPQA Diamond 精度测试 | `24_single_aisbench_gpqa_acc.yaml` |
+| 单机 Wan2.2 I2V + VBench 质量评测 | `25_single_vbench_wan_i2v.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
 
@@ -45,7 +46,7 @@ case_name: qwen3_8b_xllm_perf_i1024_o1024_bs1
 engine_type: xllm
 model_path: /export/home/models/Qwen3-8B
 served_model_name: Qwen3-8B
-metrics: perf                 # perf=性能，acc=精度
+metrics: perf                 # perf=性能，acc=精度，vbench=视频质量
 dataset_name: gsm8k
 dataset_path: ''
 dataset_format: json
@@ -64,7 +65,7 @@ deployment: {}
 | `engine_type` | 是 | 要启动哪个推理引擎 | 本文只讲 `xllm`。写成其他值会走其他引擎流程。 |
 | `model_path` | 是 | 模型权重在宿主机上的目录 | 所有参与启动 xLLM 的服务器都要有这个目录。工程不会自动同步整个模型目录；容器内会通过路径映射访问它。 |
 | `served_model_name` | 是 | 请求接口里传给 `model` 的名字 | AISBench 和 EvalScope 都会使用它。它可以与目录名不同，但必须是当前 xLLM 服务接受的模型名。 |
-| `metrics` | 是 | 选择性能还是精度 | `perf` 表示性能，`acc` 表示精度。真正决定执行分支的是这个字段，不是 `case_type`。当前用例建议一次只写一种。 |
+| `metrics` | 是 | 选择性能、精度或视频质量 | `perf` 表示性能，`acc` 表示精度，`vbench` 表示视频质量。真正决定执行分支的是这个字段，不是 `case_type`。当前用例建议一次只写一种。 |
 | `dataset_name` | 是 | benchmark 使用的数据集或数据生成器名称 | AISBench 性能常用 `gsm8k`、`syn`、`sharegpt`；EvalScope 精度直接把它传给 `--datasets`，性能传给 `--dataset`。 |
 | `dataset_path` | 按数据集需要 | 顶层数据集路径 | AISBench 配置了本地路径时会生成用例级数据集配置，优先使用 `benchmark.perf/acc.dataset_path`，否则使用此处路径；EvalScope 精度更常在 `dataset_args` 中指定。多机资源同步建议填写 `/xllm_test_060/...` 容器路径。 |
 | `dataset_format` | 建议 | 数据文件格式说明 | 常写 `json`。它主要作为任务元数据保留，具体解析方式仍由 benchmark 和数据集配置决定。 |
@@ -73,7 +74,7 @@ deployment: {}
 | `progress_conn_port` | 端口冲突时填写 | xLLM 多进程主节点协调端口 | 启动模板用它组成 `MASTER_NODE_ADDR`，默认 9590。它是逻辑实例级配置：普通部署整组共享；统一路由和 PD 分别在各 `service_instances[]`、`pd_instances[]` 配置，同组所有 node 必须一致；多个逻辑组的主节点在同一 host 时必须使用不同值。 |
 | `userid` | 建议 | 结果文件归属用户的历史配置 | 常沿用环境中的 UID，例如 `1048`。部分当前流程直接取实际运行用户 UID，因此不要把它当作容器权限问题的唯一控制项。 |
 | `serving_wait_time` | 建议 | 服务启动命令发出后额外等待多少秒 | 它不是完整的服务启动超时。多机还会做实例 readiness 和统一 endpoint 健康检查。 |
-| `benchmark` | 是 | benchmark 类型及性能/精度参数 | 详见第 3 节。 |
+| `benchmark` | 是 | benchmark 类型及性能/精度/视频质量参数 | 详见第 3、8 节。 |
 | `deployment` | 是 | xLLM 用哪些服务器、卡和端口启动 | 详见第 4 节。 |
 | `assess_test_param` | 仅搜参 | 哪些字段需要搜索，以及每个字段有哪些候选值 | 只在 `--assess_test_type para_set` 下使用。 |
 | `assess_search` | 搜参建议 | 选择 exhaustive 或 TPE，并配置目标与约束 | 不写时，`para_set` 默认按 exhaustive 全量组合执行。 |
@@ -98,7 +99,9 @@ deployment: {}
 
 ## 3. Benchmark 部分
 
-`benchmark.benchmark_type` 决定使用哪个测试工具，目前本文覆盖 `aisbench` 和 `evalscope`。`metrics: perf` 时必须提供 `benchmark.perf`，`metrics: acc` 时必须提供 `benchmark.acc`。
+`benchmark.benchmark_type` 决定使用哪个测试工具，目前本文覆盖 `aisbench`、`evalscope` 和
+`vbench`。`metrics: perf` 时必须提供 `benchmark.perf`，`metrics: acc` 时必须提供
+`benchmark.acc`，`metrics: vbench` 时必须提供 `benchmark.vbench`。
 
 `benchmark.perf/acc.case_type` 建议分别写成 `performance`、`accuracy`，便于阅读和结果归类；但切换执行流程的仍是顶层 `metrics`。
 
@@ -707,6 +710,21 @@ pkg/xllm/service_binary/current/librust_tokenizers.so
 及其依赖。直接手工执行 `download_xllm.sh` 时，未设置开关仍保留旧行为；如需显式
 跳过控制面组件，可使用 `XLLM_INSTALL_SERVICE=0 bash tools/download_xllm.sh`。
 
+`download_xllm.sh` 需要的 `xllm_pack.tar.gz` 会优先从服务器本地归档获取，不再
+每次从外网 wget（约 585MB）。脚本按顺序探测以下位置：
+
+1. 环境变量 `XLLM_PACK_LOCAL_DIR` 指定的目录；
+2. `/export/home/models/xllm_test_060`（宿主机目录在容器内同路径直挂时）；
+3. `/xllm_test_060`（资源同步挂载布局）。
+
+只要任一位置存在 `xllm_pack.tar.gz` 就直接解压使用；本地归档缺失、损坏或解压
+后没有生成 `xllm_pack` 目录时，自动回退到原来的外网 `wget` 下载，保证行为
+向后兼容。要固定使用某个归档目录，可在执行前导出：
+
+```bash
+export XLLM_PACK_LOCAL_DIR=/export/home/models/xllm_test_060
+```
+
 定时任务如需同时编译 xLLM 和 Service，可显式执行：
 
 ```bash
@@ -1223,7 +1241,143 @@ sudo crontab -u <用户名> -l
 bash tools/install_crontab.sh --uninstall
 ```
 
-## 8. 常用执行命令
+## 8. VBench Wan2.2 I2V
+
+VBench 是独立的视频生成质量评测类型，不能把它写成 AISBench 的
+`api_type`。VBench 用例应设置 `metrics: vbench` 和
+`benchmark.benchmark_type: vbench`，xTask 会为它创建独立的 runner 容器：
+
+- xLLM 容器只负责启动 Wan2.2 I2V 推理服务并占用 NPU。
+- VBench runner 只负责读取输入、调用 `/v1/video/generation`、保存 MP4 和执行质量评测。
+- 普通 AISBench、EvalScope、文本/视觉精度和性能用例不会创建这个 runner，也不会走 VBench 分支。
+
+可复制的完整示例是 `tests/e2e/xllm/examples/yaml_authoring/25_single_vbench_wan_i2v.yaml`。
+VBench 工具、评测脚本及模型权重必须提前装入 runner 镜像或通过挂载提供；xTask 不会在测试期间
+下载 VBench 数据集和权重。`camera_motion` 等维度还可能使用 Torch Hub 缓存，离线环境也应提前准备。
+未配置 `image_home`/`image_name` 时，runner 默认使用
+`quay.io/jd_xllm/xllm-ai:8.1.rc1-a3-openeuler22.03-py3.10`。
+
+### 8.1 输入和输出路径
+
+四个路径字段 `full_info`、`image_root`、`cache_dir`、`evaluation_script` 全部可以省略。
+省略时使用统一默认布局：
+
+```text
+/export/home/models/xllm_test_060/vbench_data/     # 共享数据集（所有 vbench 用例只读复用）
+├── full_info.json
+└── data/                                          # full_info 中 image_name 对应的图片
+
+<xTask 工程>/outputs/vbench_data/cache/             # 工程内共享缓存（容器内 /workspace/outputs/vbench_data/cache/）
+                                                   # 维度模型、解码等可复用缓存
+
+<xTask 工程>/xtask/benchmarks/vbench/               # 框架源码（容器内 /workspace/xtask/benchmarks/vbench/）
+├── run_i2v.py                                     # 视频生成驱动
+└── evaluate_vbench_i2v_bench.py                   # VBench 质量评测器（随仓库版本化）
+```
+
+`full_info` 是 VBench 原始 JSON，`image_root` 是图片根目录；二者可以写宿主机绝对路径，
+也可以写当前 xTask 工程内的路径。若路径位于 xTask 工程挂载范围，脚本会自动换成容器内的
+`/workspace/...` 路径。`cache_dir` 与 `evaluation_script` 同理，显式指定时必须保证 runner
+对应的宿主机路径可见。
+
+每次调用都会在 case 目录创建一个新的日期目录：
+
+```text
+outputs/<case_name>/
+├── run_vbench_test.sh
+└── YYYYMMDD_HHMMSS/
+    ├── videos/*.mp4
+    ├── *_full_info_videos.json
+    ├── generation_metrics.json
+    ├── *_eval_results.json
+    └── *_final_score.json
+```
+
+`generation_metrics.json` 记录生成/断点续跑/失败统计；`*_eval_results.json` 是逐维度原始结果；
+`*_final_score.json` 是 VBench 的 raw、归一化加权分数及 `quality_score`、`i2v_score`、
+`total_score`。`temporal_flickering` 单独保留，不计入 Total Score。
+
+### 8.2 VBench 配置字段
+
+```yaml
+metrics: vbench
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    mode: generate_and_evaluate   # generate / evaluate / generate_and_evaluate
+    # 以下四个路径字段全部可省略，默认值见 8.1 节的共享布局
+    full_info: /path/to/full_info.json
+    image_root: /path/to/images
+    cache_dir: /path/to/outputs/vbench_data/cache
+    evaluation_script: /path/to/evaluate_vbench_i2v_bench.py
+    resolution: 16-9
+    name: wan2_2_xllm
+    check: true
+    dimensions: [i2v_subject, i2v_background, camera_motion]
+    generation:
+      size: "832*480"
+      num_inference_steps: 40
+      guidance_scale: 1.5
+      num_frames: 81
+      fps: 16
+      seed: 42
+      request_timeout: 1800
+      limit: 107
+    evaluation:
+      baseline: null
+      threshold: 0.10
+```
+
+`generate` 只生成视频并输出 manifest，`evaluate` 只读取已有的带 `video_list` 的 manifest，
+`generate_and_evaluate` 先生成再评测。`limit` 仅用于试跑时限制样本条数；删除后按 full_info
+全量执行。`dimensions` 省略时使用评测脚本默认维度。若配置 `evaluation.baseline`，xTask
+会以 `total_score` 按 `threshold` 做基线校验；不配置 baseline 时只校验生成/评测结果完整性。
+
+### 8.3 单机和多机规则
+
+单机 VBench 仍只有一个 xLLM runtime 和一个 VBench runner。多机 VBench 的 xLLM runtime
+按原有 `deployment.instances`/PD 拓扑启动，benchmark runner 由
+`deployment.benchmark.runner_instance` 选定；case 输出目录只同步到 runner 所在 host，
+不会把 MP4 和共享 `vbench_data` 缓存复制到其他 xLLM worker。远端 runner 完成后，xTask 会把其输出
+下载回控制机，再执行统一结果归档和 baseline 校验。
+
+`CLEAN_RESULTS=true` 时按现有生命周期清理 xLLM runtime、VBench runner 和相关服务；
+`CLEAN_RESULTS=false` 时两类容器和服务都保留，便于调试，输出文件仍保留在 case 目录。
+
+### 8.4 容器与运行环境（行为说明）
+
+**容器环境变量全量透传**：`ContainerConfig.environment` 中配置的所有键值对（此前仅
+proxy 相关变量生效）现在会原样注入容器。历史上写过但从未生效的环境变量配置，
+从本版本起会真正进入容器环境——升级后请检查现有 YAML/引擎配置中是否有本不打算
+生效的 `environment` 字段。proxy 变量（`http_proxy`/`https_proxy`/`no_proxy`/`NO_PROXY`）
+仍走原有的特殊处理（自动补 `no_proxy` 白名单）。
+
+**CANN 环境**：VBench runner 生成的 `run_vbench_test.sh` 会在启动时 source
+`/usr/local/Ascend/ascend-toolkit/set_env.sh`（存在时），保证 `torch_npu` 在
+import 链路（transformers 的 NPU 探测）中干净加载。评测维度模型本身仍默认跑 CPU。
+
+**xLLM 共享内存**：xLLM 以 `--ipc=host` 运行，其 POSIX SHM 对象
+（`/dev/shm/xllm_<port>_*`）在宿主机上按端口命名，且启动时会校验布局大小。
+历史上崩溃残留的旧对象会让下次同端口启动报
+`incompatible shared memory layout`。xTask 现在会在清理阶段自动删除本用例端口
+对应的残留对象；多机场景下远端宿主机的残留对象无法自动清理，出现该报错时需手工删除。
+
+**模型权重转换**：modelers.cn 的原生 Wan2.2-I2V-A14B 权重需转换为 diffusers 目录
+结构后 xLLM 才能加载。转换工具已固化在
+`xtask/benchmarks/vbench/tools/convert_wan22_diffusers.py`：
+
+```bash
+python3 xtask/benchmarks/vbench/tools/convert_wan22_diffusers.py \
+    --model-root /export/home/models/wan2_2
+```
+
+脚本只转换 `high_noise_model/`、`low_noise_model/` 两个 transformer；
+`model_index.json`、`scheduler/`、`text_encoder/`、`tokenizer/`、`vae/`
+需从 HuggingFace `Wan2.2-I2V-A14B-Diffusers` 拉取放入同一目录，
+并在根目录补 `config.json`（`transformers_version: null` 可跳过框架的
+transformers 版本对齐安装）。
+
+## 9. 常用执行命令
 
 普通单用例：
 

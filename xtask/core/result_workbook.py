@@ -161,11 +161,19 @@ def _ensure_headers(worksheet, row: Mapping[str, Any]) -> list[str]:
         if worksheet.cell(1, column).value is not None
     ]
     for field_name in row:
+        if not field_name:
+            # Blank field names (legacy empty ``total`` keys) would recreate
+            # the ghost blank-header column this fix removes.
+            continue
         if field_name not in headers:
             headers.append(field_name)
-            cell = worksheet.cell(1, len(headers), field_name)
+            # ``headers`` skips blank (None) header cells, so its length can
+            # be smaller than the real column count; append after the last
+            # physically used column instead of overwriting a neighbour.
+            column_index = max(worksheet.max_column + 1, len(headers))
+            cell = worksheet.cell(1, column_index, field_name)
             _header_style(cell)
-            _update_column_width(worksheet, len(headers), field_name)
+            _update_column_width(worksheet, column_index, field_name)
     return headers
 
 
@@ -195,7 +203,16 @@ def _normalized_result_field(field_name: str):
         return None
     if field_name.startswith("parameters."):
         field_name = field_name[len("parameters.") :]
-    return ".".join(part for part in field_name.split(".") if part != "total")
+    normalized = ".".join(
+        part for part in field_name.split(".") if part != "total"
+    )
+    if not normalized:
+        # An empty header (legacy ``total`` column or an openpyxl None cell)
+        # has no meaningful column identity; drop it so the normalization
+        # pass can also purge leftover blank header columns from old
+        # workbooks instead of preserving them forever.
+        return None
+    return normalized
 
 
 def _is_blank(value: Any) -> bool:
@@ -216,12 +233,20 @@ def _accuracy_case_names(rows: list[Mapping[str, Any]]) -> set[str]:
 
 
 def _normalize_result_sheet(worksheet) -> None:
+    # Blank header cells (legacy empty ``total`` columns persisted by
+    # openpyxl as None) carry data columns that would be silently dropped
+    # by the ``value is not None`` filter below, so detect them first and
+    # force a rebuild that rewrites every row from the parsed values.
+    has_blank_header = any(
+        worksheet.cell(1, column).value in (None, "")
+        for column in range(1, worksheet.max_column + 1)
+    )
     source_headers = [
         (column, str(worksheet.cell(1, column).value))
         for column in range(1, worksheet.max_column + 1)
         if worksheet.cell(1, column).value is not None
     ]
-    if not source_headers:
+    if not source_headers and not has_blank_header:
         return
 
     kept_headers = []
@@ -289,7 +314,11 @@ def _normalize_result_sheet(worksheet) -> None:
             values_changed = True
 
     current_headers = [field_name for _, field_name in source_headers]
-    if current_headers == ordered_headers and not values_changed:
+    if (
+        current_headers == ordered_headers
+        and not values_changed
+        and not has_blank_header
+    ):
         _refresh_sheet_layout(worksheet)
         return
 

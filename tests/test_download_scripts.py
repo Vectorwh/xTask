@@ -139,6 +139,43 @@ class DownloadXllmScriptTests(unittest.TestCase):
             self.script,
         )
 
+    def test_xllm_pack_prefers_local_archive_before_wget(self):
+        self.assertIn('XLLM_PACK_LOCAL_DIR="${XLLM_PACK_LOCAL_DIR:-}"', self.script)
+        self.assertIn('XLLM_PACK_LOCAL_CANDIDATES=(', self.script)
+        self.assertIn('"/export/home/models/xllm_test_060"', self.script)
+        self.assertIn('"/xllm_test_060"', self.script)
+        # 本地探测必须发生在 wget 之前。
+        probe = self.script.index('XLLM_PACK_LOCAL_SOURCE="$candidate"')
+        wget = self.script.index(
+            'wget --tries=3 -O "$XLLM_PACK_ARCHIVE" "$XLLM_PACK_URL"'
+        )
+        self.assertLess(probe, wget)
+        # 命中本地归档且解压成功时直接返回，不触发外网下载。
+        self.assertIn(
+            'tar -zxf "$XLLM_PACK_LOCAL_SOURCE/xllm_pack.tar.gz" -C "$TARGET_DIR"',
+            self.script,
+        )
+        self.assertIn(
+            'echo "使用本地归档: $XLLM_PACK_LOCAL_SOURCE/xllm_pack.tar.gz"',
+            self.script,
+        )
+
+    def test_xllm_pack_local_archive_failure_falls_back_to_wget(self):
+        # 本地归档损坏（tar 校验失败）或解压后没有生成目录时回退外网下载。
+        self.assertIn(
+            'Error: 本地归档校验失败，回退到外网下载',
+            self.script,
+        )
+        self.assertIn(
+            'Error: 本地归档解压后未生成目录',
+            self.script,
+        )
+        fallback = self.script.index('Error: 本地归档校验失败，回退到外网下载')
+        wget = self.script.index(
+            'wget --tries=3 -O "$XLLM_PACK_ARCHIVE" "$XLLM_PACK_URL"'
+        )
+        self.assertLess(fallback, wget)
+
     def test_service_install_can_be_disabled_per_runtime(self):
         self.assertIn(
             'XLLM_INSTALL_SERVICE="${XLLM_INSTALL_SERVICE:-1}"', self.script

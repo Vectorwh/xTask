@@ -1,0 +1,19 @@
+{
+  "i2v_subject": [
+    null,
+    []
+  ],
+  "dynamic_degree": [
+    null,
+    []
+  ],
+  "temporal_flickering": [
+    0.9705551072662952,
+    [
+      {
+        "video_path": "/workspace/outputs/25_single_vbench_wan_i2v/20260902_011842/videos/00000.mp4",
+        "video_results": 0.9705551072662952
+      }
+    ]
+  ]
+}

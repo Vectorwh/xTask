@@ -1,0 +1,73 @@
+case_name: 25_single_vbench_wan_i2v
+engine_type: xllm
+model_path: /export/home/models/wan2_2
+served_model_name: wan2_2
+metrics: vbench
+dataset_name: vbench_i2v
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 30
+
+# VBench 数据集提前准备到共享路径 /export/home/models/xllm_test_060/vbench_data/
+# （full_info.json + data/ 图片）；评测脚本是框架源码
+# xtask/benchmarks/vbench/evaluate_vbench_i2v_bench.py（随仓库版本化）。
+# 以下路径字段全部可省略，框架会自动使用这些默认共享路径。
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    mode: generate_and_evaluate
+    resolution: 16-9
+    name: wan2_2_xllm
+    check: true
+    generation:
+      size: "832*480"
+      num_inference_steps: 40
+      guidance_scale: 1.5
+      num_frames: 81
+      fps: 16
+      seed: 42
+      request_timeout: 1800
+      # 试跑可设为 5；删除后按 full_info 全量生成。
+      limit: 5
+    evaluation:
+      # 正式回归时替换为实测 Total Score；null 表示只检查结果完整性。
+      baseline: null
+      threshold: 0.10
+
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    # Wan2.2 I2V（非蒸馏）双卡：按交付报告 4.1 的 8 卡典型配置
+    # （cfg=2, sp=4, vae=4, tp=1, nnodes=8）等比缩到 2 卡：
+    # cfg=2 + sp=1 + tp=1，nnodes=2 = cfg*sp*tp。
+    # xLLM DiT 校验 cfg*tp*sp*dp == world_size。
+    device_ids: [0, 1]
+    world_size: 2
+    local_nnodes: 2
+    global_nnodes: 2
+    local_port: 8800
+    serving_extensiable_param:
+      backend: dit
+      tp_size: 1
+      cfg_size: 2
+      sp_size: 1
+      vae_size: 1
+      max_memory_utilization: 0.98
+      output_shm_size: 1024
+      enable_prefix_cache: false
+      enable_chunked_prefill: false
+      enable_schedule_overlap: false
+      use_contiguous_input_buffer: false
+      enable_rolling_load: true
+      rolling_load_num_rolling_slots: 2
+      dit_laser_attention_enabled: true
+      dit_sparse_attention_enabled: false
+      enable_shm: true

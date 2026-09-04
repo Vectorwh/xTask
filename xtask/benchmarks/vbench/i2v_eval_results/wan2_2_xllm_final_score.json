@@ -1,0 +1,29 @@
+{
+  "model_name": "wan2_2_xllm",
+  "raw_scores": {
+    "Video-Text Camera Motion": 0.0,
+    "Video-Image Subject Consistency": 0.0,
+    "Video-Image Background Consistency": 0.0,
+    "Subject Consistency": 0.0,
+    "Background Consistency": 0.0,
+    "Motion Smoothness": 0.0,
+    "Dynamic Degree": 0.0,
+    "Aesthetic Quality": 0.0,
+    "Imaging Quality": 0.0
+  },
+  "normalized_weighted": {
+    "Video-Text Camera Motion": 0.0,
+    "Video-Image Subject Consistency": -0.17123448114312484,
+    "Video-Image Background Consistency": -0.3540961408259987,
+    "Subject Consistency": -0.17123448114312484,
+    "Background Consistency": -0.3540961408259987,
+    "Motion Smoothness": -2.4219554030874777,
+    "Dynamic Degree": 0.0,
+    "Aesthetic Quality": 0.0,
+    "Imaging Quality": 0.0
+  },
+  "quality_score": -0.5358701863739275,
+  "i2v_score": -0.250157439032916,
+  "total_score": -0.3930138127034217,
+  "note": "计算流程与官方 scripts/cal_i2v_final_score.py 完全一致；temporal_flickering 已评测但不参与总分（官方口径）；缺失/失败维度按 0 处理（官方 submission() 行为）。"
+}

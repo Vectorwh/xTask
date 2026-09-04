@@ -183,7 +183,7 @@ Usage Examples:
         parser.add_argument(
             "--benchmark_type", "-bt",
             type=str,
-            choices=['aisbench', 'vllm_bench', 'xllm_bench', 'jd_vllm_bench'],
+            choices=['aisbench', 'evalscope', 'vbench', 'vllm_bench', 'xllm_bench', 'jd_vllm_bench'],
             default='aisbench',
             help="Benchmark tool type"
         )
