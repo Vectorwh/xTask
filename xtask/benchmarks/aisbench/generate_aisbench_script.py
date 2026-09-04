@@ -447,6 +447,14 @@ def generate_aisbench_script(
         num_prompts = accuracy_cfg.get("num_prompts", "")
 
         # 替换最大生成token数
+        # aisbench build.py 硬编码校验 max_out_len <= 131072，若配置值超限则自动放宽校验上限
+        # (模型实际上下文远大于此，如 DSV4 支持 1M；131072 仅为 aisbench 保守默认值)
+        if int(accuracy_max_out_len) > 131072:
+            shell_content.append(
+                'if [ -f "$AIS_BENCH_PATH/benchmark/utils/config/build.py" ]; then '
+                'sed -i "s/0 < v <= 131072/0 < v <= 1048576/; s/(0, 131072\\\\]/(0, 1048576\\\\]/" '
+                '"$AIS_BENCH_PATH/benchmark/utils/config/build.py" 2>/dev/null; fi'
+            )
         shell_content.append(f'sed -i "s/max_out_len\s*=\s*.*,/max_out_len={accuracy_max_out_len},/g" {api_type_file}')
         # 替换batchsize
         shell_content.append(f'sed -i "s/batch_size\s*=\s*.*,/batch_size={accuracy_batch_size},/g" {api_type_file}')

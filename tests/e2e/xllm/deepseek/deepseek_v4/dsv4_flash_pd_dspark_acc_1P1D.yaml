@@ -29,12 +29,12 @@ benchmark:
     # GPQA Diamond 子集固定 198 题，删 num_prompts 或设 198 即跑全量。
     num_prompts: 198
     batch_size: 8
-    output_len: 32768
+    output_len: 163840
     request_rate: 0
-    # GPQA 结果量纲是百分数。baseline=85.86（2026-09-01 实测，198题 diamond，bs8/CoT）；
-    # threshold 0.20 → 允许区间 68.69~103.03。
-    baseline: 85.86
-    threshold: 0.20
+    # GPQA 结果量纲是百分数。baseline=88.89（2026-09-04 实测，198题 diamond，bs8/CoT/output_len=163840）；
+    # threshold 0.05 → 允许区间 84.45~93.33。
+    baseline: 88.89
+    threshold: 0.05
     generation_kwargs: {temperature: 0, ignore_eos: false}
 
 deployment:

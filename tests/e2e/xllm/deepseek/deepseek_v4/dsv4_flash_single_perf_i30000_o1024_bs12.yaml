@@ -1,0 +1,78 @@
+# 66单机 bs12 perf: DSV4-Flash, i30000_o1024_bs12 (单机16卡, DSpark混部)
+# 并发数取自 auto_assess 摸高(target_tpot 50)收敛结果 bs=12
+# 实测: output_tps_avg=24.96, tpot_p90=49.6ms
+case_name: dsv4_flash_single_perf_i30000_o1024_bs12
+engine_type: xllm
+model_path: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
+served_model_name: DeepSeek-V4-Flash-0731-w8a8
+metrics: perf
+dataset_name: sharegpt
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+hccl_if_port: 43432
+progress_conn_port: 8773
+
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    case_type: performance
+    api_type: vllm_api_general_stream
+    dataset_conf: sharegpt_gen
+    # 必须显式声明 infer_mode: last，否则 is_sharegpt_fixed_length_enabled() 因缺该字段返回 False，
+    # 不会走 preprocess_sharegpt → process_sharegpt_dataset 的固定长度填充路径，
+    # 而是直接用源 ShareGPT 自然长度(~2k)，input_len 配置形同虚设。
+    infer_mode: last
+    input_len: 30000
+    output_len: 1024
+    max_out_len: 1024
+    batch_size: 12
+    request_rate: 0
+    # num_prompts 自动耦合 batch_size*4，bs12 → 48 prompts。
+    num_prompts: 48
+    num_warmups: 4
+    # baseline=output_tps_avg 实测值，threshold 0.10=±10% 容差。
+    baseline: 24.96
+    threshold: 0.10
+    generation_kwargs: {temperature: 0, ignore_eos: true}
+
+deployment:
+  master_host: 11.87.191.66
+  sync_workspace: true
+  resource_sync:
+    enabled: true
+    source: /export/home/models/xllm_test_060
+    target: /export/home/models/xllm_test_060
+    max_workers: 4
+    timeout: 3600
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.66
+    role: master
+    rank_start: 0
+    device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+    local_port: 18004
+    serving_extensiable_param:
+      max_memory_utilization: 0.8
+      max_seqs_per_batch: 16
+      max_tokens_per_batch: 16384
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      max_tokens_per_chunk_for_prefill: 4096
+      enable_schedule_overlap: true
+      enable_graph: true
+      ep_size: 16
+      dp_size: 4
+      speculative_algorithm: DSpark
+      draft_model: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
+      num_speculative_tokens: 5
+      enable_flashcomm1: true
+      flashcomm1_min_prefill_tokens: 1000
+      tool_call_parser: deepseekv4
+      reasoning_parser: deepseek-v4
