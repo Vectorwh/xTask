@@ -283,13 +283,11 @@ def wait_xllm_serv_start(task_config, serving_wait_time, output_file_path: str,
         logging.debug("Unable to pre-check xLLM readiness log %s: %s", log_file, exc)
 
     device_ids = _resolve_device_ids(task_config)
-    # Large multi-host models (e.g. DeepSeek 16+16) need longer than default 300s.
-    #ready_timeout = int(
-    #    task_config.get("serving_ready_timeout")
-    #    or task_config.get("serving_timeout")
-    #    or 300
-    #)
-    ready_timeout = 320
+    ready_timeout = int(
+        task_config.get("serving_ready_timeout")
+        or task_config.get("serving_timeout")
+        or 320
+    )
     test_config = WatchdogConfig(
         log_file=log_file,
         success_keywords=success_keywords,

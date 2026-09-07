@@ -1084,3 +1084,33 @@ def path_mapping_in_container(path: str):
         if outside_path in path:
             return path.replace(outside_path, inside_path + "/").replace("//", "/")
     return path
+
+
+def ensure_host_bind_mount(volumes: Dict[str, str], host_path: str) -> None:
+    """Bind-mount a host path into the container at the same absolute path.
+
+    Configured ``DOCKER_CONFIG.volumes`` mappings take precedence.  Paths
+    outside those mappings (for example models under ``/mnt/cfs``) must be
+    added explicitly or the container cannot see them.
+    """
+    if not host_path:
+        return
+
+    normalized = os.path.abspath(os.path.normpath(str(host_path)))
+    if not os.path.exists(normalized):
+        return
+
+    mapped = path_mapping_in_container(normalized)
+    if mapped != normalized:
+        return
+
+    for existing_host in volumes:
+        existing_host_norm = os.path.abspath(
+            os.path.normpath(str(existing_host).rstrip(os.sep))
+        )
+        if normalized == existing_host_norm or normalized.startswith(
+            existing_host_norm + os.sep
+        ):
+            return
+
+    volumes[normalized] = normalized

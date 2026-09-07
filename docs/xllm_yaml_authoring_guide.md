@@ -555,6 +555,9 @@ deployment:
 | `service_control.host` | etcd 和 `xllm_master_serving` 所在 host，必须对应一个实际 node。 |
 | `service_control.etcd_client_port` / `etcd_peer_port` | etcd 客户端和 peer 端口，默认 3389/3390。 |
 | `service_control.http_server_port` / `rpc_server_port` | 统一 HTTP 入口和内部 RPC 端口，默认 38888/38889。 |
+| `service_control.service_deployment_role` | 默认 `COORDINATOR`；与 PD 相同，仅在 refactor 二进制上生效。 |
+| `service_control.service_binary_profile` | 默认 `auto`；`legacy` / `refactor` 语义同 `pd_control.service_binary_profile`。 |
+| `service_control.master_key_wait_seconds` | 控制面启动后等待 MASTER key 或 `/readyz` ready 的最长秒数，默认 30。 |
 | `service_instances[].name` | 独立普通逻辑实例名，全局唯一。 |
 | `service_instances[].group_master_host` | 本逻辑实例的主节点，必须对应本组某个 node；默认取本组第一个 node。 |
 | `service_instances[].progress_conn_port` | 本逻辑实例所有 node 共用；同 host 上的不同逻辑实例必须不同。 |
@@ -673,12 +676,18 @@ deployment:
 | `pd_control.rpc_server_port` | 建议 | `xllm_master_serving` 内部 RPC 端口 | 默认 38889，确保控制节点端口未占用。 |
 | `pd_control.startup_attempts` | 否 | 控制面启动失败最多重试几次 | 默认 2；每次重试前会清理旧的 etcd 和 `xllm_master_serving` 进程。 |
 | `pd_control.startup_wait_seconds` | 否 | 每次启动控制面后先等多少秒再检查 | 默认 3。它不是全部 P/D 实例注册完成的超时。 |
+| `pd_control.master_key_wait_seconds` | 否 | 等待控制面锚点就位的最长秒数 | 默认 30。框架优先用 `etcdctl`（gRPC）轮询 etcd 的 `XLLM:SERVICE:MASTER`，回退到 etcd v3 REST 网关 `/v3/kv/range`；refactor 二进制还接受 `http://<host>:<http_server_port>/readyz` 返回 `status=ready`。 |
+| `pd_control.service_deployment_role` | 否 | `xllm_master_serving` 部署角色 | 默认 `COORDINATOR`，仅在 refactor 二进制上生效。 |
+| `pd_control.service_binary_profile` | 否 | 控制面二进制兼容模式 | 默认 `auto`：启动前探测 `xllm_master_serving --help` 是否支持 `--service_deployment_role`。`legacy` 对应 GitHub 旧版（不传 role flag；MASTER key 探测为**非阻塞**告警——旧版二进制启动即自动写 MASTER，但用 3s 短租约，硬性门控易在租约边界抖动，故沿用历史的 `pgrep + etcd /health + 无 fatal 日志` 基础健康检查）；`refactor` 对应 JD 新版（传 `COORDINATOR`，MASTER key/`/readyz` 为**硬性门控**，用于捕获默认 ROUTER 不选举的回归）。 |
+| `pd_control.master_service_key` | 否 | 控制面锚点 etcd key | 默认 `XLLM:SERVICE:MASTER`。仅在自定义 `control_plane_shard_id` 时可能需要改成带 shard 前缀的 key。 |
 | `pd_control.transfer_port_base` | 仅兼容 | 所有 P/D 逻辑组的 transfer 端口默认值 | 默认 26000。旧用例继续有效；同 host 多 P/D 组的新用例应改在各 `pd_instances[]` 上分别配置。 |
 | `pd_control.no_proxy_hosts` | 否 | 额外加入 `NO_PROXY` 的 host 列表 | localhost、控制面和所有实例 host 会自动加入；这里只需补充环境中特殊地址。 |
 | `deployment.benchmark.runner_instance` | 建议 | 在哪个物理 node 的容器里跑 benchmark | 层级 PD YAML 中应填写一个实际的 `nodes[].name`，例如 `prefill-0-node-0`，不是逻辑实例名 `prefill-0`。不写时框架会自动选择；写了却不匹配任何 node 时会退回首个 runtime，但配置含义会变得不明确。 |
 | `deployment.benchmark.health_path` | 建议 | 统一服务健康检查路径 | 默认 `/health`，拼在 `pd_control` 的 HTTP endpoint 后。 |
 
 注意：`deployment.benchmark.endpoint` 即使手工填写，当前服务组逻辑也不会把它作为权威地址；普通部署从 `master_host + local_port` 推导，PD 从 `pd_control.host + http_server_port` 推导。
+
+xLLM-Service 在 `service architecture refactor`（约 `55905ea` / `3fe20c6`）之后引入了 `COORDINATOR` / `ROUTER` 双角色：二进制默认是 `ROUTER`，只有 `COORDINATOR` 会通过 `elect_master()` 写入 `XLLM:SERVICE:MASTER`。GitHub 旧版 main（如 `72ab598` / `73d5e00`）没有该 flag，启动时会自动写 MASTER（用 3s 短租约 + 后台 keepalive 续约）。xTask 默认 `service_binary_profile=auto` 自动探测并兼容两类二进制：探测到 refactor 二进制时注入 `--service_deployment_role=COORDINATOR` 并把 MASTER key/`/readyz` 作为**硬性**控制面门控（捕获默认 ROUTER 不选举的回归）；探测到 legacy 二进制时不传 role flag，MASTER key 探测退化为**非阻塞**告警，沿用历史的基础健康检查（`pgrep + etcd /health + 无 fatal 日志`），避免 3s 租约边界抖动误杀旧版二进制。也可显式设为 `legacy` 或 `refactor`。
 
 ### PD / Service 路由场景编译 xLLM-Service
 

@@ -58,6 +58,13 @@ class ServiceGroupTests(unittest.TestCase):
         self.assertEqual(config.output_subdir, "service_control")
         self.assertIn("10.0.0.2", config.no_proxy_hosts)
         runtime = SimpleNamespace()
+        runtime.container_manager = mock.Mock()
+        runtime.container_config = SimpleNamespace(container_name="service-control")
+        # auto profile probes `xllm_master_serving --help`; simulate a legacy
+        # binary so no --service_deployment_role flag is injected.
+        runtime.container_manager.exec_in_container.return_value = SimpleNamespace(
+            success=False, stdout="", stderr=""
+        )
         with mock.patch(
             "xtask.utils.container_manager.path_mapping_in_container",
             side_effect=lambda path: path,
@@ -68,7 +75,371 @@ class ServiceGroupTests(unittest.TestCase):
         command = service._build_start_command()
         self.assertIn("--etcd_addr=10.0.0.1:13389", command)
         self.assertIn("--http_server_port 13888", command)
+        self.assertIn("--internal_api_token=xtask-internal-api-token", command)
         self.assertNotIn("ENABLE_DECODE_RESPONSE_TO_SERVICE", command)
+
+    def test_pd_control_start_command_includes_internal_api_token(self):
+        from xtask.core.pd_control_service import (
+            XllmControlService,
+            build_pd_control_config,
+        )
+
+        task = {
+            "deployment": {
+                "mode": "pd_disaggregated",
+                "master_host": "10.0.0.1",
+                "pd_control": {
+                    "host": "10.0.0.1",
+                    "internal_api_token": "pd-shared-secret",
+                    "service_binary_profile": "refactor",
+                },
+                "pd_instances": [
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "nodes": [{"host": "10.0.0.1", "device_ids": [0]}],
+                    },
+                    {
+                        "name": "decode-0",
+                        "role": "decode",
+                        "nodes": [{"host": "10.0.0.2", "device_ids": [0]}],
+                    },
+                ],
+            }
+        }
+        config = build_pd_control_config(task)
+        runtime = SimpleNamespace()
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            service = XllmControlService(
+                runtime, config, "/models/DeepSeek-V4", "/tmp/output"
+            )
+        command = service._build_start_command()
+        self.assertIn("ENABLE_DECODE_RESPONSE_TO_SERVICE=true", command)
+        self.assertIn("--internal_api_token=pd-shared-secret", command)
+        self.assertIn("--service_deployment_role=COORDINATOR", command)
+
+    def test_pd_control_legacy_profile_omits_deployment_role_flag(self):
+        from xtask.core.pd_control_service import (
+            XllmControlService,
+            build_pd_control_config,
+        )
+
+        task = {
+            "deployment": {
+                "mode": "pd_disaggregated",
+                "master_host": "10.0.0.1",
+                "pd_control": {
+                    "host": "10.0.0.1",
+                    "service_binary_profile": "legacy",
+                },
+                "pd_instances": [
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "nodes": [{"host": "10.0.0.1", "device_ids": [0]}],
+                    }
+                ],
+            }
+        }
+        config = build_pd_control_config(task)
+        runtime = SimpleNamespace()
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            service = XllmControlService(
+                runtime, config, "/models/DeepSeek-V4", "/tmp/output"
+            )
+        command = service._build_start_command()
+        self.assertNotIn("service_deployment_role", command)
+
+    def test_pd_control_auto_profile_uses_binary_help_detection(self):
+        from xtask.core.pd_control_service import (
+            XllmControlService,
+            build_pd_control_config,
+        )
+
+        task = {
+            "deployment": {
+                "mode": "pd_disaggregated",
+                "master_host": "10.0.0.1",
+                "pd_control": {"host": "10.0.0.1", "service_binary_profile": "auto"},
+                "pd_instances": [
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "nodes": [{"host": "10.0.0.1", "device_ids": [0]}],
+                    }
+                ],
+            }
+        }
+        config = build_pd_control_config(task)
+        runtime = SimpleNamespace()
+        runtime.container_manager = mock.Mock()
+        runtime.container_config = SimpleNamespace(container_name="pd-control")
+        runtime.container_manager.exec_in_container.return_value = SimpleNamespace(
+            success=True, stdout="", stderr=""
+        )
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            service = XllmControlService(
+                runtime, config, "/models/DeepSeek-V4", "/tmp/output"
+            )
+            command = service._build_start_command()
+
+        self.assertIn("--service_deployment_role=COORDINATOR", command)
+        runtime.container_manager.exec_in_container.assert_called_once()
+
+    def test_pd_control_health_waits_for_master_key_or_readyz(self):
+        from xtask.core.pd_control_service import (
+            XllmControlService,
+            build_pd_control_config,
+        )
+
+        task = {
+            "deployment": {
+                "mode": "pd_disaggregated",
+                "master_host": "10.0.0.1",
+                "pd_control": {"host": "10.0.0.1", "master_key_wait_seconds": 5, "service_binary_profile": "refactor"},
+                "pd_instances": [
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "nodes": [{"host": "10.0.0.1", "device_ids": [0]}],
+                    }
+                ],
+            }
+        }
+        config = build_pd_control_config(task)
+        runtime = SimpleNamespace()
+        runtime.container_manager = mock.Mock()
+        runtime.container_config = SimpleNamespace(container_name="pd-control")
+        runtime.container_manager.exec_in_container.side_effect = [
+            SimpleNamespace(success=True, stdout="", stderr=""),
+            SimpleNamespace(success=False, stdout="", stderr=""),
+            SimpleNamespace(success=True, stdout="", stderr=""),
+        ]
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ), mock.patch("xtask.core.pd_control_service.time.sleep", return_value=None):
+            service = XllmControlService(
+                runtime, config, "/models/DeepSeek-V4", "/tmp/output"
+            )
+            healthy, detail = service._check_health()
+
+        self.assertTrue(healthy)
+        self.assertEqual(detail, "ok")
+        probe_commands = [
+            call.args[1]
+            for call in runtime.container_manager.exec_in_container.call_args_list
+        ]
+        self.assertIn("/v3/kv/range", probe_commands[1])
+        self.assertIn("XLLM:SERVICE:MASTER", probe_commands[1])
+        self.assertIn("/readyz", probe_commands[2])
+
+    def test_pd_control_legacy_health_checks_master_key_only(self):
+        from xtask.core.pd_control_service import (
+            XllmControlService,
+            build_pd_control_config,
+        )
+
+        task = {
+            "deployment": {
+                "mode": "pd_disaggregated",
+                "master_host": "10.0.0.1",
+                "pd_control": {
+                    "host": "10.0.0.1",
+                    "master_key_wait_seconds": 5,
+                    "service_binary_profile": "legacy",
+                },
+                "pd_instances": [
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "nodes": [{"host": "10.0.0.1", "device_ids": [0]}],
+                    }
+                ],
+            }
+        }
+        config = build_pd_control_config(task)
+        runtime = SimpleNamespace()
+        runtime.container_manager = mock.Mock()
+        runtime.container_config = SimpleNamespace(container_name="pd-control")
+        runtime.container_manager.exec_in_container.side_effect = [
+            SimpleNamespace(success=True, stdout="", stderr=""),
+            SimpleNamespace(success=True, stdout="", stderr=""),
+        ]
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ), mock.patch("xtask.core.pd_control_service.time.sleep", return_value=None):
+            service = XllmControlService(
+                runtime, config, "/models/DeepSeek-V4", "/tmp/output"
+            )
+            healthy, detail = service._check_health()
+
+        self.assertTrue(healthy)
+        self.assertEqual(detail, "ok")
+        probe_commands = [
+            call.args[1]
+            for call in runtime.container_manager.exec_in_container.call_args_list
+        ]
+        self.assertEqual(len(probe_commands), 2)
+        self.assertIn("/v3/kv/range", probe_commands[1])
+        self.assertNotIn("/readyz", probe_commands[1])
+
+    def test_pd_control_legacy_anchor_failure_is_non_blocking(self):
+        """Legacy binaries self-elect with a short lease; a timing-sensitive
+        anchor probe must not block the historically-working basic health
+        check (regression guard for the GitHub-compiled binary)."""
+        from xtask.core.pd_control_service import (
+            XllmControlService,
+            build_pd_control_config,
+        )
+
+        task = {
+            "deployment": {
+                "mode": "pd_disaggregated",
+                "master_host": "10.0.0.1",
+                "pd_control": {
+                    "host": "10.0.0.1",
+                    "master_key_wait_seconds": 2,
+                    "service_binary_profile": "legacy",
+                },
+                "pd_instances": [
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "nodes": [{"host": "10.0.0.1", "device_ids": [0]}],
+                    }
+                ],
+            }
+        }
+        config = build_pd_control_config(task)
+        runtime = SimpleNamespace()
+        runtime.container_manager = mock.Mock()
+        runtime.container_config = SimpleNamespace(container_name="pd-control")
+        # basic health passes, but the master-key anchor probe never finds
+        # the key (simulating the 3s-lease expiry race).
+        runtime.container_manager.exec_in_container.side_effect = [
+            SimpleNamespace(success=True, stdout="", stderr=""),  # basic health
+            SimpleNamespace(success=False, stdout="", stderr="key not found"),  # probe 1
+            SimpleNamespace(success=False, stdout="", stderr="key not found"),  # probe 2
+        ]
+        # Drive the anchor loop for exactly two iterations: deadline = t0 + 2,
+        # then while-checks return t0, t0+1, t0+2 (exit). The logging module
+        # also calls time.time(), so the side_effect must not exhaust.
+        time_seq = [0.0, 0.0, 1.0, 2.0]
+
+        def fake_time():
+            return time_seq.pop(0) if time_seq else 2.0
+
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ), mock.patch(
+            "xtask.core.pd_control_service.time.time", side_effect=fake_time
+        ), mock.patch("xtask.core.pd_control_service.time.sleep", return_value=None):
+            service = XllmControlService(
+                runtime, config, "/models/DeepSeek-V4", "/tmp/output"
+            )
+            healthy, detail = service._check_health()
+
+        # Legacy: anchor failure is advisory, so control plane is healthy.
+        self.assertTrue(healthy)
+        self.assertEqual(detail, "ok")
+
+    def test_pd_control_refactor_anchor_failure_is_blocking(self):
+        """The refactor binary may default to ROUTER and never elect a master;
+        a missing anchor must fail startup (the regression this guard catches)."""
+        from xtask.core.pd_control_service import (
+            XllmControlService,
+            build_pd_control_config,
+        )
+
+        task = {
+            "deployment": {
+                "mode": "pd_disaggregated",
+                "master_host": "10.0.0.1",
+                "pd_control": {
+                    "host": "10.0.0.1",
+                    "master_key_wait_seconds": 2,
+                    "service_binary_profile": "refactor",
+                },
+                "pd_instances": [
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "nodes": [{"host": "10.0.0.1", "device_ids": [0]}],
+                    }
+                ],
+            }
+        }
+        config = build_pd_control_config(task)
+        runtime = SimpleNamespace()
+        runtime.container_manager = mock.Mock()
+        runtime.container_config = SimpleNamespace(container_name="pd-control")
+        runtime.container_manager.exec_in_container.side_effect = [
+            SimpleNamespace(success=True, stdout="", stderr=""),  # basic health
+            SimpleNamespace(success=False, stdout="", stderr="key not found"),  # master 1
+            SimpleNamespace(success=False, stdout="", stderr="readyz not ready"),  # readyz 1
+            SimpleNamespace(success=False, stdout="", stderr="key not found"),  # master 2
+            SimpleNamespace(success=False, stdout="", stderr="readyz not ready"),  # readyz 2
+        ]
+        time_seq = [0.0, 0.0, 1.0, 2.0]
+
+        def fake_time():
+            return time_seq.pop(0) if time_seq else 2.0
+
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ), mock.patch(
+            "xtask.core.pd_control_service.time.time", side_effect=fake_time
+        ), mock.patch("xtask.core.pd_control_service.time.sleep", return_value=None):
+            service = XllmControlService(
+                runtime, config, "/models/DeepSeek-V4", "/tmp/output"
+            )
+            healthy, detail = service._check_health()
+
+        self.assertFalse(healthy)
+        self.assertIn("control plane anchor not ready", detail)
+
+    def test_service_control_start_command_uses_coordinator_role(self):
+        from xtask.core.pd_control_service import (
+            XllmControlService,
+            build_service_control_config,
+        )
+
+        task = {
+            "deployment": {
+                "mode": "service_routed",
+                "service_control": {"host": "10.0.0.1", "service_binary_profile": "refactor"},
+                "service_instances": [
+                    {
+                        "name": "default-0",
+                        "nodes": [{"host": "10.0.0.1", "device_ids": [0]}],
+                    }
+                ],
+            }
+        }
+        config = build_service_control_config(task)
+        runtime = SimpleNamespace()
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            service = XllmControlService(
+                runtime, config, "/models/Qwen3-8B", "/tmp/output"
+            )
+        command = service._build_start_command()
+        self.assertIn("--service_deployment_role=COORDINATOR", command)
 
     def test_service_routed_instances_are_flattened_into_independent_groups(self):
         task = {
@@ -1390,6 +1761,48 @@ class GenerateXllmMultiHostTests(unittest.TestCase):
 
         self.assertTrue(ready)
         watchdog_manager.assert_not_called()
+
+    def test_wait_xllm_serv_start_uses_serving_ready_timeout(self):
+        from xtask.serv_fmk.xllm_serv.generate_xllm_serv import wait_xllm_serv_start
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = os.path.join(tmp, "node_0.log")
+            open(log_file, "w", encoding="utf-8").close()
+            with mock.patch(
+                "xtask.utils.watchdog.WatchdogConfig"
+            ) as watchdog_config, mock.patch(
+                "xtask.utils.watchdog.WatchdogManager"
+            ) as watchdog_manager:
+                wait_xllm_serv_start(
+                    {"device_ids": [0], "serving_ready_timeout": 1800},
+                    1,
+                    tmp,
+                    log_file=log_file,
+                )
+
+        watchdog_config.assert_called_once()
+        self.assertEqual(watchdog_config.call_args.kwargs["timeout"], 1800)
+        watchdog_manager.assert_called_once()
+
+    def test_wait_xllm_serv_start_falls_back_to_serving_timeout(self):
+        from xtask.serv_fmk.xllm_serv.generate_xllm_serv import wait_xllm_serv_start
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = os.path.join(tmp, "node_0.log")
+            open(log_file, "w", encoding="utf-8").close()
+            with mock.patch(
+                "xtask.utils.watchdog.WatchdogConfig"
+            ) as watchdog_config, mock.patch(
+                "xtask.utils.watchdog.WatchdogManager"
+            ):
+                wait_xllm_serv_start(
+                    {"device_ids": [0], "serving_timeout": 900},
+                    1,
+                    tmp,
+                    log_file=log_file,
+                )
+
+        self.assertEqual(watchdog_config.call_args.kwargs["timeout"], 900)
 
     def test_generated_script_owns_logs_with_xtask_process_uid(self):
         from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_script

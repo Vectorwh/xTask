@@ -218,12 +218,19 @@ class ContainerConfigBuilder:
         work_dir = engine_config.get("working_dir", "/workspace")
         
         # 构建挂载卷
-        volumes = get_xtask_config_data().get("DOCKER_CONFIG").get("volumes")
-        
-        # 从任务配置中获取模型路径，如果存在则添加到挂载卷
-        # model_path = task_config.get("model_path", "")
-        # if model_path and os.path.exists(model_path):
-        #     volumes[os.path.abspath(model_path)] = f"{work_dir}/model_data"
+        from xtask.utils.container_manager import ensure_host_bind_mount
+
+        volumes = dict(
+            get_xtask_config_data().get("DOCKER_CONFIG").get("volumes") or {}
+        )
+
+        host_paths = [task_config.get("model_path", "")]
+        ext_params = task_config.get("serving_extensiable_param") or {}
+        if isinstance(ext_params, dict):
+            for key in ("draft_model", "draft_model_path"):
+                host_paths.append(ext_params.get(key))
+        for host_path in host_paths:
+            ensure_host_bind_mount(volumes, host_path)
         
         # 构建环境变量
         environment = {
@@ -2102,7 +2109,9 @@ def _wait_instance_ready(runtime, serving_wait_time, engine):
                 os.path.join(plan.output_dir, "log", "node_0.log")
             )
             ready_timeout = int(
-                plan.instance_config.get("serving_ready_timeout") or 320
+                plan.instance_config.get("serving_ready_timeout")
+                or plan.instance_config.get("serving_timeout")
+                or 320
             )
             # The console-script launcher replaces itself with the packaged
             # binary, so the process may be reported as either ``xllm`` or by

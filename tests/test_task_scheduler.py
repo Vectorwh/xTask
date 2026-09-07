@@ -676,6 +676,46 @@ deployment:
         )
         self.assertEqual(manager.exec_in_container.call_args.kwargs["timeout"], 350)
 
+    def test_colocated_local_master_readiness_uses_serving_timeout_fallback(self):
+        from xtask.core import scheduler
+
+        manager = mock.Mock()
+        manager.exec_in_container.return_value = SimpleNamespace(
+            success=True,
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
+        runtime = SimpleNamespace(
+            plan=SimpleNamespace(
+                instance_name="decode-0-node-0",
+                role="decode",
+                host="10.0.0.2",
+                rank_start=0,
+                is_local=False,
+                isolate_ipc=False,
+                output_dir="/host/outputs/decode-0-node-0",
+                readiness={},
+                instance_config={
+                    "enable_disagg_pd": True,
+                    "serving_timeout": 900,
+                },
+            ),
+            container_config=SimpleNamespace(container_name="decode-container"),
+            container_manager=manager,
+        )
+
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            return_value="/workspace/outputs/decode-0-node-0/log/node_0.log",
+        ), mock.patch(
+            "xtask.serv_fmk.xllm_serv.generate_xllm_serv.wait_xllm_serv_start"
+        ) as wait_for_start:
+            self.assertTrue(scheduler._wait_instance_ready(runtime, 1, "xllm"))
+
+        wait_for_start.assert_not_called()
+        self.assertEqual(manager.exec_in_container.call_args.kwargs["timeout"], 930)
+
     def test_regular_multi_host_worker_readiness_waits_for_worker_log(self):
         from xtask.core import scheduler
 

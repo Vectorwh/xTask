@@ -170,11 +170,15 @@ else
 fi
 
 git config --global --add safe.directory "${SERVICE_SOURCE_DIR}" 2>/dev/null || true
-# The upstream build instructions initialize the Service repository's direct
-# submodules. Several of those dependencies contain their own optional
-# submodules (for example cpprestsdk websocket support) which this build does
-# not use; recursively fetching them adds unrelated network failure points.
+# Initialize direct Service submodules first. Do not recurse the whole tree:
+# cpprestsdk carries optional nested submodules (websocketpp/vcpkg) that this
+# build does not need and that add unrelated network failure points.
 retry "xLLM-Service submodule update" git -C "${SERVICE_SOURCE_DIR}" submodule update --init
+# xLLM-Service links against xLLM's pinned spdlog via
+# third_party/xllm/third_party/spdlog. That nested submodule must be present
+# before CMake configure, but only under third_party/xllm.
+retry "xLLM-Service xllm nested submodule update" \
+  git -C "${SERVICE_SOURCE_DIR}" submodule update --init --recursive third_party/xllm
 
 if [[ ! -f "${SERVICE_SOURCE_DIR}/CMakeLists.txt" || ! -f "${SERVICE_SOURCE_DIR}/prepare.sh" ]]; then
   echo "ERROR: xLLM-Service source is incomplete: ${SERVICE_SOURCE_DIR}" >&2
@@ -188,8 +192,91 @@ REQUIRED_SOURCE_FILES=(
   third_party/sentencepiece/CMakeLists.txt
   third_party/smhasher/src/CMakeLists.txt
   third_party/xllm/CMakeLists.txt
+  third_party/xllm/third_party/spdlog/CMakeLists.txt
   third_party/xxHash/CMakeLists.txt
 )
+
+submodule_path_for_required_file() {
+  local source_file="$1"
+  if [[ "${source_file}" != third_party/* ]]; then
+    return 1
+  fi
+  local top="${source_file#third_party/}"
+  echo "third_party/${top%%/*}"
+}
+
+nested_submodule_within_xllm() {
+  local source_file="$1"
+  if [[ "${source_file}" != third_party/xllm/third_party/* ]]; then
+    return 1
+  fi
+  local nested="${source_file#third_party/xllm/third_party/}"
+  echo "third_party/${nested%%/*}"
+}
+
+repair_required_submodules() {
+  local source_file submodule_path submodule_dir nested_submodule repair_key
+  local -a repaired_keys=()
+  local already_repaired
+
+  for source_file in "${REQUIRED_SOURCE_FILES[@]}"; do
+    if [[ -f "${SERVICE_SOURCE_DIR}/${source_file}" ]]; then
+      continue
+    fi
+
+    if nested_submodule="$(nested_submodule_within_xllm "${source_file}")"; then
+      repair_key="xllm-nested:${nested_submodule}"
+      for already_repaired in "${repaired_keys[@]}"; do
+        if [[ "${already_repaired}" == "${repair_key}" ]]; then
+          continue 2
+        fi
+      done
+      repaired_keys+=("${repair_key}")
+
+      submodule_dir="${SERVICE_SOURCE_DIR}/third_party/xllm/${nested_submodule}"
+      echo "WARN: missing required source '${source_file}', repairing nested submodule '${nested_submodule}'..." >&2
+      if [[ -e "${submodule_dir}" ]]; then
+        rm -rf -- "${submodule_dir}"
+      fi
+      if [[ -f "${SERVICE_SOURCE_DIR}/third_party/xllm/CMakeLists.txt" ]]; then
+        retry "xLLM-Service nested submodule repair ${nested_submodule}" \
+          git -C "${SERVICE_SOURCE_DIR}/third_party/xllm" submodule update --init "${nested_submodule}"
+      else
+        retry "xLLM-Service submodule repair third_party/xllm" \
+          git -C "${SERVICE_SOURCE_DIR}" submodule update --init --recursive third_party/xllm
+      fi
+      continue
+    fi
+
+    if ! submodule_path="$(submodule_path_for_required_file "${source_file}")"; then
+      continue
+    fi
+    repair_key="top:${submodule_path}"
+    for already_repaired in "${repaired_keys[@]}"; do
+      if [[ "${already_repaired}" == "${repair_key}" ]]; then
+        continue 2
+      fi
+    done
+    repaired_keys+=("${repair_key}")
+
+    submodule_dir="${SERVICE_SOURCE_DIR}/${submodule_path}"
+    echo "WARN: missing required source '${source_file}', repairing submodule '${submodule_path}'..." >&2
+    # A half-initialized submodule can look present to git while the working tree
+    # is empty (for example when a sibling submodule clone aborts the batch).
+    if [[ -e "${submodule_dir}" ]]; then
+      rm -rf -- "${submodule_dir}"
+    fi
+    if [[ "${submodule_path}" == "third_party/xllm" ]]; then
+      retry "xLLM-Service submodule repair ${submodule_path}" \
+        git -C "${SERVICE_SOURCE_DIR}" submodule update --init --recursive third_party/xllm
+    else
+      retry "xLLM-Service submodule repair ${submodule_path}" \
+        git -C "${SERVICE_SOURCE_DIR}" submodule update --init "${submodule_path}"
+    fi
+  done
+}
+
+repair_required_submodules
 for source_file in "${REQUIRED_SOURCE_FILES[@]}"; do
   if [[ ! -f "${SERVICE_SOURCE_DIR}/${source_file}" ]]; then
     echo "ERROR: xLLM-Service submodule is incomplete: ${source_file}" >&2

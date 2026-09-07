@@ -414,6 +414,7 @@ class PrepareXllmServiceScriptTests(unittest.TestCase):
         "third_party/sentencepiece/CMakeLists.txt",
         "third_party/smhasher/src/CMakeLists.txt",
         "third_party/xllm/CMakeLists.txt",
+        "third_party/xllm/third_party/spdlog/CMakeLists.txt",
         "third_party/xxHash/CMakeLists.txt",
     )
 
@@ -575,6 +576,188 @@ class PrepareXllmServiceScriptTests(unittest.TestCase):
             self.assertIn("validate xLLM-Service repository", result.stderr)
             self.assertTrue(marker.is_file())
 
+    def _git_commit(self, cwd: Path, message: str = "initial") -> None:
+        self._git(
+            "-c",
+            "user.name=xTask Test",
+            "-c",
+            "user.email=xtask@example.invalid",
+            "commit",
+            "-m",
+            message,
+            cwd=cwd,
+        )
+
+    def _create_bare_remote_with_tree(
+        self, root: Path, name: str, files: dict[str, str]
+    ) -> Path:
+        remote = root / f"{name}.git"
+        source = root / f"{name}-source"
+        self._git("init", "--bare", str(remote))
+        self._git("init", "-b", "main", str(source))
+        for relative_path, content in files.items():
+            path = source / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        self._git("add", ".", cwd=source)
+        self._git_commit(source, f"add {name}")
+        self._git("remote", "add", "origin", str(remote), cwd=source)
+        self._git("push", "-u", "origin", "main", cwd=source)
+        self._git("symbolic-ref", "HEAD", "refs/heads/main", cwd=remote)
+        return remote
+
+    def _create_remote_with_minja_submodule(self, root: Path) -> Path:
+        minja_remote = root / "minja.git"
+        minja_source = root / "minja-source"
+        self._git("init", "--bare", str(minja_remote))
+        self._git("init", "-b", "main", str(minja_source))
+        (minja_source / "CMakeLists.txt").write_text("minja", encoding="utf-8")
+        self._git("add", ".", cwd=minja_source)
+        self._git_commit(minja_source, "add minja")
+        self._git("remote", "add", "origin", str(minja_remote), cwd=minja_source)
+        self._git("push", "-u", "origin", "main", cwd=minja_source)
+        self._git("symbolic-ref", "HEAD", "refs/heads/main", cwd=minja_remote)
+
+        service_remote = root / "service.git"
+        service_source = root / "service-source"
+        self._git("init", "--bare", str(service_remote))
+        self._git("init", "-b", "main", str(service_source))
+        for relative_path in self._required_source_files:
+            if relative_path.startswith("third_party/minja/"):
+                continue
+            path = service_source / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("stub", encoding="utf-8")
+        self._git("add", ".", cwd=service_source)
+        self._git_commit(service_source, "add service skeleton")
+        self._git(
+            "submodule",
+            "add",
+            str(minja_remote),
+            "third_party/minja",
+            cwd=service_source,
+        )
+        self._git_commit(service_source, "add service with minja submodule")
+        self._git("remote", "add", "origin", str(service_remote), cwd=service_source)
+        self._git("push", "-u", "origin", "main", cwd=service_source)
+        self._git("symbolic-ref", "HEAD", "refs/heads/main", cwd=service_remote)
+        return service_remote
+
+    def _simulate_half_pulled_submodule(self, submodule_dir: Path) -> None:
+        git_pointer = (submodule_dir / ".git").read_text(encoding="utf-8")
+        shutil.rmtree(submodule_dir)
+        submodule_dir.mkdir()
+        (submodule_dir / ".git").write_text(git_pointer, encoding="utf-8")
+
+    def test_repair_half_pulled_top_level_submodule(self):
+        with self._temporary_root() as temporary_directory:
+            root = Path(temporary_directory)
+            remote = self._create_remote_with_minja_submodule(root)
+            project = root / "project"
+            project.mkdir()
+            self._git(
+                "clone",
+                "--recurse-submodules",
+                str(remote),
+                str(project / "xllm-service"),
+            )
+            minja_dir = project / "xllm-service" / "third_party" / "minja"
+            self.assertTrue((minja_dir / "CMakeLists.txt").is_file())
+            self._simulate_half_pulled_submodule(minja_dir)
+            self.assertFalse((minja_dir / "CMakeLists.txt").is_file())
+
+            result = self._run_prepare(project, remote)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("repairing submodule 'third_party/minja'", result.stderr)
+            self.assertEqual(
+                (minja_dir / "CMakeLists.txt").read_text(encoding="utf-8"),
+                "minja",
+            )
+
+    def test_repair_half_pulled_nested_xllm_submodule(self):
+        with self._temporary_root() as temporary_directory:
+            root = Path(temporary_directory)
+            spdlog_remote = self._create_bare_remote_with_tree(
+                root,
+                "spdlog",
+                {"CMakeLists.txt": "spdlog"},
+            )
+            xllm_remote = root / "xllm.git"
+            xllm_source = root / "xllm-source"
+            self._git("init", "--bare", str(xllm_remote))
+            self._git("init", "-b", "main", str(xllm_source))
+            (xllm_source / "CMakeLists.txt").write_text("xllm", encoding="utf-8")
+            self._git("add", ".", cwd=xllm_source)
+            self._git_commit(xllm_source, "add xllm skeleton")
+            self._git(
+                "submodule",
+                "add",
+                str(spdlog_remote),
+                "third_party/spdlog",
+                cwd=xllm_source,
+            )
+            self._git_commit(xllm_source, "add xllm with spdlog submodule")
+            self._git("remote", "add", "origin", str(xllm_remote), cwd=xllm_source)
+            self._git("push", "-u", "origin", "main", cwd=xllm_source)
+            self._git("symbolic-ref", "HEAD", "refs/heads/main", cwd=xllm_remote)
+
+            service_remote = root / "service.git"
+            service_source = root / "service-source"
+            self._git("init", "--bare", str(service_remote))
+            self._git("init", "-b", "main", str(service_source))
+            for relative_path in self._required_source_files:
+                if relative_path.startswith("third_party/xllm/"):
+                    continue
+                path = service_source / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("stub", encoding="utf-8")
+            self._git("add", ".", cwd=service_source)
+            self._git_commit(service_source, "add service skeleton")
+            self._git(
+                "submodule",
+                "add",
+                str(xllm_remote),
+                "third_party/xllm",
+                cwd=service_source,
+            )
+            self._git_commit(service_source, "add service with xllm submodule")
+            self._git("remote", "add", "origin", str(service_remote), cwd=service_source)
+            self._git("push", "-u", "origin", "main", cwd=service_source)
+            self._git("symbolic-ref", "HEAD", "refs/heads/main", cwd=service_remote)
+
+            project = root / "project"
+            project.mkdir()
+            self._git(
+                "clone",
+                "--recurse-submodules",
+                str(service_remote),
+                str(project / "xllm-service"),
+            )
+            xllm_dir = project / "xllm-service" / "third_party" / "xllm"
+            spdlog_dir = xllm_dir / "third_party" / "spdlog"
+            self.assertTrue((xllm_dir / "CMakeLists.txt").is_file())
+            self.assertTrue((spdlog_dir / "CMakeLists.txt").is_file())
+            self._simulate_half_pulled_submodule(spdlog_dir)
+            self.assertTrue((xllm_dir / "CMakeLists.txt").is_file())
+            self.assertFalse((spdlog_dir / "CMakeLists.txt").is_file())
+
+            result = self._run_prepare(project, service_remote)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "repairing nested submodule 'third_party/spdlog'",
+                result.stderr,
+            )
+            self.assertEqual(
+                (spdlog_dir / "CMakeLists.txt").read_text(encoding="utf-8"),
+                "spdlog",
+            )
+            self.assertEqual(
+                (xllm_dir / "CMakeLists.txt").read_text(encoding="utf-8"),
+                "xllm",
+            )
+
     def test_update_source_disabled_does_not_replace_existing_checkout(self):
         with self._temporary_root() as temporary_directory:
             root = Path(temporary_directory)
@@ -608,8 +791,23 @@ class BuildXllmServiceScriptTests(unittest.TestCase):
         self.assertIn("XLLM_SERVICE_SOURCE_DIR", self.outer_script)
         self.assertIn("docker run", self.outer_script)
         self.assertIn("submodule update --init", self.outer_script)
-        self.assertNotIn("submodule update --init --recursive", self.outer_script)
+        self.assertIn(
+            "submodule update --init --recursive third_party/xllm",
+            self.outer_script,
+        )
+        self.assertNotRegex(
+            self.outer_script,
+            r"submodule update --init --recursive(?!\s+third_party/xllm)",
+        )
+        self.assertIn("third_party/xllm/third_party/spdlog/CMakeLists.txt", self.outer_script)
         self.assertIn("REQUIRED_SOURCE_FILES", self.outer_script)
+        self.assertIn("repair_required_submodules", self.outer_script)
+        self.assertIn("nested_submodule_within_xllm", self.outer_script)
+        self.assertIn(
+            'git -C "${SERVICE_SOURCE_DIR}/third_party/xllm" submodule update --init',
+            self.outer_script,
+        )
+        self.assertIn("submodule_path_for_required_file", self.outer_script)
         self.assertIn("third_party/etcd_cpp_apiv3/CMakeLists.txt", self.outer_script)
         self.assertNotIn('bash "${SCRIPT_DIR}/prepare_xllm.sh"', self.outer_script)
 
@@ -623,6 +821,7 @@ class BuildXllmServiceScriptTests(unittest.TestCase):
         self.assertIn('CXX_STANDARD="${XLLM_SERVICE_CXX_STANDARD:-20}"', self.inner_script)
         self.assertIn("CMAKE_PROJECT_xllm_service_INCLUDE", self.inner_script)
         self.assertIn("-DWERROR=OFF", self.inner_script)
+        self.assertIn("-DBUILD_TESTING=ON", self.inner_script)
         self.assertIn("trap restore_host_ownership EXIT", self.inner_script)
 
     def test_service_archive_is_versioned_and_atomic(self):

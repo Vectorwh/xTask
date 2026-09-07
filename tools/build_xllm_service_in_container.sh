@@ -55,6 +55,7 @@ printf 'set(CMAKE_CXX_STANDARD "%s")\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\n' \
 cmake -S "${SERVICE_SOURCE_DIR}" -B "${BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
   -DCMAKE_PROJECT_xllm_service_INCLUDE="${CMAKE_COMPAT_FILE}" \
+  -DBUILD_TESTING=ON \
   -DWERROR=OFF
 
 # xLLM-Service's Ascend branch still adds legacy vcpkg paths such as

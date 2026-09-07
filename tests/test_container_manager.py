@@ -65,6 +65,33 @@ class ContainerManagerTests(unittest.TestCase):
         self.assertEqual(config.ipc_mode, "private")
         self.assertEqual(config.shm_size, "64g")
 
+    def test_create_container_config_bind_mounts_unmapped_model_path(self):
+        model_path = "/mnt/cfs/9n-das-admin/llm_models/DeepSeek-V4-Flash-0731-w8a8"
+        with mock.patch(
+            "xtask.core.scheduler.get_xtask_config_data",
+            return_value={
+                "DOCKER_CONFIG": {
+                    "volumes": {"/export/home/models/": "/export/home/models"}
+                }
+            },
+        ), mock.patch(
+            "xtask.utils.container_manager.os.path.exists",
+            side_effect=lambda path: path == model_path,
+        ):
+            config = ContainerConfigBuilder.create_container_config(
+                {"network_mode": "host"},
+                {
+                    "case_name": "cfs-model",
+                    "model_path": model_path,
+                    "serving_extensiable_param": {
+                        "draft_model": model_path,
+                    },
+                },
+                "task.yaml",
+            )
+
+        self.assertEqual(config.volumes[model_path], model_path)
+
 
 if __name__ == "__main__":
     unittest.main()

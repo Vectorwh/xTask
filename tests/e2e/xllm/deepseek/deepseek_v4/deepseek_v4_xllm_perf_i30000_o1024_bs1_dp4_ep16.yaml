@@ -37,7 +37,7 @@ benchmark:
 
 deployment:
   mode: pd_disaggregated
-  master_host: 11.87.191.66
+  master_host: 11.87.191.75
   sync_workspace: true
   resource_sync:
     enabled: true
@@ -46,7 +46,7 @@ deployment:
     max_workers: 4
     timeout: 3600
   pd_control:
-    host: 11.87.191.66
+    host: 11.87.191.75
     etcd_client_port: 22389
     etcd_peer_port: 22380
     http_server_port: 28888
@@ -56,7 +56,7 @@ deployment:
   pd_instances:
   - name: prefill-0
     role: prefill
-    group_master_host: 11.87.191.66
+    group_master_host: 11.87.191.75
     serving_extensiable_param: &pd_param
       max_memory_utilization: 0.8
       max_tokens_per_batch: 16384
@@ -80,15 +80,15 @@ deployment:
       disagg_pd_port: 7777
     nodes:
     - name: prefill-0-node-0
-      host: 11.87.191.66
+      host: 11.87.191.75
       device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
       local_port: 18004
   - name: decode-0
     role: decode
-    group_master_host: 11.87.191.68
+    group_master_host: 11.87.191.121
     serving_extensiable_param: *pd_param
     nodes:
     - name: decode-0-node-0
-      host: 11.87.191.68
+      host: 11.87.191.121
       device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
       local_port: 18004
