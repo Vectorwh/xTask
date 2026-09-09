@@ -2161,6 +2161,184 @@ def _wait_instance_ready(runtime, serving_wait_time, engine):
     return True
 
 
+def _pd_listen_ports(plan) -> list:
+    """Ports this PD instance will bind on its host.
+
+    Derived from the merged launch plan (the same values the startup script
+    uses), not hardcoded defaults. Empty when the runtime is not a PD
+    data-plane instance so non-PD callers are a no-op.
+    """
+    if plan is None:
+        return []
+    cfg = getattr(plan, "instance_config", None)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    role = str(getattr(plan, "role", "") or "").lower()
+    if not cfg.get("enable_disagg_pd") and role not in {"prefill", "decode"}:
+        return []
+
+    ports = []
+
+    def _add_port(raw):
+        try:
+            port = int(raw)
+        except (TypeError, ValueError):
+            return
+        if 1 <= port <= 65535:
+            ports.append(port)
+
+    disagg = cfg.get("disagg_pd_port")
+    if disagg is None:
+        ext = cfg.get("serving_extensiable_param") or {}
+        if isinstance(ext, dict):
+            disagg = ext.get("disagg_pd_port")
+    if disagg is None:
+        disagg = 7777
+    _add_port(disagg)
+
+    try:
+        transfer_base = int(cfg.get("transfer_port_base", 26000) or 26000)
+    except (TypeError, ValueError):
+        transfer_base = 26000
+    raw_rank = getattr(plan, "rank_start", None)
+    if raw_rank is None:
+        raw_rank = cfg.get("rank_start", 0)
+    try:
+        rank_start = int(raw_rank)
+    except (TypeError, ValueError):
+        rank_start = 0
+    devices = getattr(plan, "device_ids", None)
+    if isinstance(devices, (list, tuple)) and devices:
+        n_ranks = len(devices)
+    else:
+        n_ranks = 1
+    for offset in range(n_ranks):
+        _add_port(transfer_base + rank_start + offset)
+    return sorted(set(ports))
+
+
+def _pd_listen_ports_probe_cmd(ports) -> str:
+    """Host-side read-only LISTEN probe for the given TCP ports."""
+    want = ",".join(str(int(port)) for port in ports)
+    return (
+        "command -v ss >/dev/null 2>&1 || { echo UNREADABLE; exit 0; }; "
+        "ss -lnt 2>/dev/null | awk -v want="
+        + shlex.quote(want)
+        + r""" '
+BEGIN { n=split(want, a, ","); for (i = 1; i <= n; i++) w[a[i]] = 1 }
+$1 ~ /LISTEN/ {
+  nfields = split($4, p, ":")
+  port = p[nfields]
+  gsub(/[^0-9]/, "", port)
+  if (port != "" && port in w && !seen[port]++) print port
+}'"""
+    )
+
+
+def _read_pd_listen_ports_in_use(runtime, ports) -> Optional[list]:
+    """Return LISTEN subset of ``ports``. None means the probe is unusable."""
+    if not ports:
+        return []
+    host = getattr(getattr(runtime, "plan", None), "host", "?")
+    cmd = _pd_listen_ports_probe_cmd(ports)
+    try:
+        result = runtime.container_manager.executor.run(cmd, timeout=20)
+    except Exception as exc:
+        logging.warning("PD listen-port probe error on %s: %s", host, exc)
+        return None
+    out = getattr(result, "stdout", None) or ""
+    if not isinstance(out, str):
+        out = ""
+    out = out.strip()
+    if "UNREADABLE" in out:
+        return None
+    busy = []
+    wanted = {int(port) for port in ports}
+    for line in out.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            port = int(line)
+            if port in wanted:
+                busy.append(port)
+    return sorted(set(busy))
+
+
+def _wait_pd_listen_ports_released(runtime, timeout_s=None, interval_s=1) -> None:
+    """Wait until this PD instance's DisaggPD/Mooncake ports leave LISTEN.
+
+    Timeout (default 30s, XTASK_PD_PORT_RELEASE_TIMEOUT) logs a warning and
+    proceeds; it does not fail the case or pkill. Already-free ports return
+    after one probe with no extra sleep.
+    """
+    plan = getattr(runtime, "plan", None)
+    host = getattr(plan, "host", "?")
+    name = getattr(plan, "instance_name", "?")
+    try:
+        ports = _pd_listen_ports(plan)
+        if not ports:
+            return
+        if timeout_s is None:
+            try:
+                timeout_s = max(
+                    1, int(os.environ.get("XTASK_PD_PORT_RELEASE_TIMEOUT", "30"))
+                )
+            except ValueError:
+                timeout_s = 30
+        deadline = time.monotonic() + timeout_s
+        last_busy = None
+        while time.monotonic() < deadline:
+            busy = _read_pd_listen_ports_in_use(runtime, ports)
+            if busy is None:
+                logging.warning(
+                    "PD listen-port probe unreadable on %s (%s); skipping wait",
+                    host,
+                    name,
+                )
+                return
+            if not busy:
+                if last_busy:
+                    logging.info(
+                        "PD listen ports released on %s (%s)", host, name
+                    )
+                return
+            if busy != last_busy:
+                logging.info(
+                    "Waiting for PD listen ports on %s (%s): %s",
+                    host,
+                    name,
+                    busy,
+                )
+            last_busy = busy
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval_s, remaining))
+        logging.warning(
+            "PD listen ports still in use on %s (%s) after %ss (%s); "
+            "proceeding anyway",
+            host,
+            name,
+            timeout_s,
+            last_busy,
+        )
+    except Exception:
+        logging.warning(
+            "PD listen-port wait failed on %s (%s); proceeding anyway",
+            host,
+            name,
+            exc_info=True,
+        )
+
+
+def _wait_pd_listen_ports_before_start(state, runtimes) -> None:
+    """PD-only gate: wait for this case's listen ports before P/D start."""
+    if not state.get("pd_disaggregated"):
+        return
+    from xtask.core.service_group import run_on_runtimes_parallel
+
+    run_on_runtimes_parallel(runtimes or [], _wait_pd_listen_ports_released)
+
+
 def _start_and_wait_service_multi_host(context):
     from xtask.core.service_group import (
         get_benchmark_endpoint,
@@ -2220,6 +2398,9 @@ def _start_and_wait_service_multi_host(context):
         if task_config.get("serving_wait_time")
         else state["config_data"].get("XLLM_CONFIG").get("serving_wait_time")
     )
+    # PD leftover LISTEN on disagg_pd_port / transfer_listen_port prevents
+    # pairing and keeps HTTP 28888 closed. Wait only for this case's ports.
+    _wait_pd_listen_ports_before_start(state, runtimes)
 
     def _start_one(runtime):
         cmd = runtime.plan.startup_cmd

@@ -117,6 +117,13 @@ def datatmp_generator(input_len, tokenizer, dataset, batch_size):
 
 
 SHAREGPT_PADDING_UNITS = (" x", "x", " a", "a", " 0", "0", " .", ".", "\n")
+_SHAREGPT_SIMPLE_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{ message['role'] | capitalize }}: {{ message['content'] }}\n"
+    "{% endfor %}"
+    "Assistant:"
+)
+_UNSET = object()
 
 
 def _sharegpt_messages(conversations):
@@ -127,6 +134,31 @@ def _sharegpt_messages(conversations):
     ]
 
 
+def _sharegpt_chat_template_override(tokenizer):
+    """Resolve chat_template once per tokenizer.
+
+    None means the tokenizer has a native template. A string means every later
+    apply must pass that jinja template (DeepSeek-V4 has none and would
+    otherwise raise on every length check).
+    """
+    cached = getattr(tokenizer, "_xtask_sharegpt_chat_template", _UNSET)
+    if cached is not _UNSET:
+        return cached
+    probe = [{"role": "user", "content": "x"}]
+    try:
+        tokenizer.apply_chat_template(
+            probe, tokenize=True, add_generation_prompt=True
+        )
+        override = None
+    except (ValueError, TypeError):
+        override = _SHAREGPT_SIMPLE_TEMPLATE
+    try:
+        tokenizer._xtask_sharegpt_chat_template = override
+    except Exception:
+        pass
+    return override
+
+
 def _sharegpt_prompt_length(tokenizer, conversations):
     return len(_sharegpt_prompt_token_ids(tokenizer, conversations))
 
@@ -134,28 +166,13 @@ def _sharegpt_prompt_length(tokenizer, conversations):
 def _sharegpt_prompt_token_ids(tokenizer, conversations):
     # Prefer the tokenizer's own chat_template when available so we stay
     # consistent with inference-time tokenization. Fall back to an explicit
-    # simple template for tokenizers that ship none (e.g. DeepSeek-V4),
-    # which otherwise raise "no chat_template was specified" on apply.
-    simple_template = (
-        "{% for message in messages %}"
-        "{{ message['role'] | capitalize }}: {{ message['content'] }}\n"
-        "{% endfor %}"
-        "Assistant:"
-    )
+    # simple template for tokenizers that ship none (e.g. DeepSeek-V4).
     messages = _sharegpt_messages(conversations)
-    try:
-        token_ids = tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-        )
-    except (ValueError, TypeError):
-        token_ids = tokenizer.apply_chat_template(
-            messages,
-            chat_template=simple_template,
-            tokenize=True,
-            add_generation_prompt=True,
-        )
+    kwargs = {"tokenize": True, "add_generation_prompt": True}
+    template = _sharegpt_chat_template_override(tokenizer)
+    if template is not None:
+        kwargs["chat_template"] = template
+    token_ids = tokenizer.apply_chat_template(messages, **kwargs)
     if hasattr(token_ids, "tolist"):
         token_ids = token_ids.tolist()
     # transformers >=5 may return a BatchEncoding dict (keys: input_ids /
@@ -334,11 +351,39 @@ def fix_sharegpt_sample(tokenizer, sample, target_len):
     return fixed_sample
 
 
+def _existing_sharegpt_dataset_usable(tokenizer, output_path, input_len, num_prompts):
+    """Reuse a previous run only when current tokenizer still sees exact lengths."""
+    if not os.path.isfile(output_path):
+        return False
+    try:
+        with open(output_path, "r", encoding="utf-8") as output_file:
+            data = json.load(output_file)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, list) or len(data) != num_prompts:
+        return False
+    for sample in data:
+        if not _validate_sharegpt_sample(sample):
+            return False
+        if _sharegpt_prompt_length(tokenizer, sample["conversations"]) != input_len:
+            return False
+    return True
+
+
 def process_sharegpt_dataset(tokenizer, source_path, output_path, input_len, num_prompts):
     if input_len <= 0:
         raise ValueError("input_len must be a positive integer")
     if num_prompts <= 0:
         raise ValueError("num_prompts must be a positive integer")
+
+    if _existing_sharegpt_dataset_usable(
+        tokenizer, output_path, input_len, num_prompts
+    ):
+        print(
+            f"[process_dataset]: reuse existing ShareGPT dataset "
+            f"with exact last-prompt length {input_len}: {output_path}"
+        )
+        return output_path
 
     with open(source_path, "r", encoding="utf-8") as source_file:
         source_dataset = json.load(source_file)

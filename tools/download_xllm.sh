@@ -152,12 +152,13 @@ if ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/dev/null 2>&1 && [ -d "$XLLM_VENDORS_DIR" 
     rm -f "$TARGET_DIR/$TORCH_NPU_FILE"
     cp -fv "$SOURCE_DIR/$TORCH_NPU_FILE" "$TARGET_DIR/"
 
-    "$XLLM_PYTHON" -m pip install \
-        --force-reinstall \
-        --no-deps \
-        "$TARGET_DIR/$TORCH_NPU_FILE"
+    # 最新镜像已经预装torch_npu，不再单独安装
+    #"$XLLM_PYTHON" -m pip install \
+    #    --force-reinstall \
+    #    --no-deps \
+    #    "$TARGET_DIR/$TORCH_NPU_FILE"
 
-    echo "torch_npu 安装完成: $TORCH_NPU_FILE"
+    #echo "torch_npu 安装完成: $TORCH_NPU_FILE"
 
     # 安装 xLLM wheel。
     "$XLLM_PYTHON" -m pip install "$XLLM_PKG_DIR"/xllm_npu*.whl --force-reinstall

@@ -39,7 +39,7 @@ benchmark:
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:
-  master_host: 11.87.191.66
+  master_host: 11.87.191.75
   sync_workspace: true
   resource_sync:
     enabled: true
@@ -52,7 +52,7 @@ deployment:
     health_path: /health
   instances:
   - name: master-0
-    host: 11.87.191.66
+    host: 11.87.191.75
     role: master
     rank_start: 0
     device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]

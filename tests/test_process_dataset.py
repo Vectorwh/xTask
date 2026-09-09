@@ -388,6 +388,119 @@ class ShareGPTDatasetProcessingTests(unittest.TestCase):
                     num_prompts=2,
                 )
 
+    def test_existing_exact_dataset_is_reused(self):
+        source_data = [
+            sharegpt_sample("only", [("human", "question"), ("gpt", "answer")]),
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_path = root / "source.json"
+            output_path = root / "fixed.json"
+            source_path.write_text(json.dumps(source_data), encoding="utf-8")
+            process_dataset.process_sharegpt_dataset(
+                self.tokenizer,
+                str(source_path),
+                str(output_path),
+                input_len=40,
+                num_prompts=3,
+            )
+            first = output_path.read_text(encoding="utf-8")
+            source_path.write_text("[]", encoding="utf-8")
+            process_dataset.process_sharegpt_dataset(
+                self.tokenizer,
+                str(source_path),
+                str(output_path),
+                input_len=40,
+                num_prompts=3,
+            )
+            self.assertEqual(output_path.read_text(encoding="utf-8"), first)
+
+    def test_stale_dataset_is_regenerated(self):
+        source_data = [
+            sharegpt_sample("only", [("human", "question"), ("gpt", "answer")]),
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_path = root / "source.json"
+            output_path = root / "fixed.json"
+            source_path.write_text(json.dumps(source_data), encoding="utf-8")
+            output_path.write_text(
+                json.dumps(
+                    [
+                        sharegpt_sample(
+                            "stale", [("human", "short"), ("gpt", "x")]
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            process_dataset.process_sharegpt_dataset(
+                self.tokenizer,
+                str(source_path),
+                str(output_path),
+                input_len=40,
+                num_prompts=2,
+            )
+            generated = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(generated), 2)
+            for sample in generated:
+                self.assertEqual(
+                    process_dataset._sharegpt_prompt_length(
+                        self.tokenizer, sample["conversations"]
+                    ),
+                    40,
+                )
+
+    def test_missing_chat_template_is_probed_once(self):
+        tokenizer = _FallbackChatTokenizer()
+        sample = sharegpt_sample(
+            "only", [("human", "question"), ("gpt", "answer")]
+        )
+        process_dataset.fix_sharegpt_sample(tokenizer, sample, target_len=40)
+        self.assertEqual(tokenizer.native_calls, 1)
+        self.assertGreater(tokenizer.template_calls, 0)
+        native_after_first = tokenizer.native_calls
+        process_dataset.fix_sharegpt_sample(tokenizer, sample, target_len=48)
+        self.assertEqual(tokenizer.native_calls, native_after_first)
+
+
+class _FallbackChatTokenizer:
+    """Mimic DeepSeek-V4: native apply_chat_template raises until a template is passed."""
+
+    def __init__(self):
+        self.native_calls = 0
+        self.template_calls = 0
+
+    def encode(self, text, add_special_tokens=False):
+        return list(text)
+
+    def decode(
+        self,
+        token_ids,
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    ):
+        return "".join(token_ids)
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        chat_template=None,
+    ):
+        if chat_template is None:
+            self.native_calls += 1
+            raise ValueError("no chat_template was specified")
+        self.template_calls += 1
+        prompt = "".join(
+            f"<{message['role']}>{message['content']}</{message['role']}>"
+            for message in messages
+        )
+        if add_generation_prompt:
+            prompt += "<assistant>"
+        return list(prompt) if tokenize else prompt
+
 
 if __name__ == "__main__":
     unittest.main()
