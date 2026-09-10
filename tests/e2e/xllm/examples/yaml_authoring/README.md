@@ -32,3 +32,5 @@
 | `23` | 单机 AISBench ShareGPT `last` 模式 `packed` 多组 Prefix Cache 长上下文性能测试 |
 | `24` | 单机 AISBench GPQA Diamond 精度测试 |
 | `25` | 单机 xLLM Wan2.2 I2V 视频生成与 VBench 质量评测 |
+| `26` | 外部已有 OpenAI 兼容服务 + AISBench 性能（不启动 xLLM） |
+| `27` | 外部已有 Wan2.2 + 独立 VBench runner 质量评测（不启动 xLLM） |

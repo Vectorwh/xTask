@@ -1,0 +1,34 @@
+case_name: 26_external_aisbench_perf
+engine_type: xllm
+external_service: true
+model_path: /export/home/models/DeepSeek-V3.2-w8a8
+served_model_name: DeepSeek-V3.2-w8a8
+metrics: perf
+dataset_name: gsm8k
+dataset_path: ''
+dataset_format: json
+userid: 1048
+
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    case_type: performance
+    api_type: vllm_api_general_stream
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    input_len: 1024
+    output_len: 1024
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 1
+    num_prompts: 6
+    num_warmups: 20
+    baseline: null
+    threshold: 0.10
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: true
+
+deployment:
+  benchmark:
+    endpoint: http://11.87.191.75:8800
+    health_path: /health

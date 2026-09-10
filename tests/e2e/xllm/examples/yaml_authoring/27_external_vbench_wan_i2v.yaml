@@ -1,0 +1,35 @@
+case_name: 27_external_vbench_wan_i2v
+engine_type: xllm
+external_service: true
+served_model_name: wan2_2
+metrics: vbench
+dataset_name: vbench_i2v
+dataset_format: json
+userid: 1048
+
+# 不启动 Wan2.2 / xLLM。只起 benchmark.vbench 指定的独立 runner 镜像，
+# 向已有服务的 /v1/video/generation 发请求并做质量评测。
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    mode: generate_and_evaluate
+    resolution: 16-9
+    name: wan2_2_external
+    check: true
+    generation:
+      size: "832*480"
+      num_inference_steps: 40
+      guidance_scale: 1.5
+      num_frames: 81
+      fps: 16
+      seed: 42
+      request_timeout: 1800
+      limit: 5
+    evaluation:
+      baseline: null
+      threshold: 0.10
+
+deployment:
+  benchmark:
+    endpoint: http://10.20.30.40:8800
+    health_path: /health

@@ -546,6 +546,14 @@ def gen_group_paraset_task(
 
         validate_pd_deployment_authoring(base_config)
 
+        from xtask.core.external_service import validate_external_service_config
+
+        try:
+            validate_external_service_config(base_config)
+        except ValueError as exc:
+            logging.error("%s", exc)
+            return False
+
         # 获取评估测试配置。原始配置单独保留，用于写入每个参数组合的
         # 说明文件；生成组合时使用规范化后的路径映射。
         raw_assess_test = base_config.get("assess_test_param", {})

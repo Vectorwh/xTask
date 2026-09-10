@@ -1125,8 +1125,17 @@ def get_benchmark_endpoint(task_config: Dict[str, Any], plans: List[ServiceLaunc
     Other deployments use ``master_host`` and the matching instance's
     ``local_port``. An explicit ``deployment.benchmark.endpoint`` is
     intentionally ignored so topology has one authoritative source for
-    service addressing.
+    service addressing, except when ``external_service`` is enabled: then the
+    caller-provided live URL (origin, without API path) is authoritative.
     """
+    from xtask.core.external_service import (
+        is_external_service_enabled,
+        resolve_external_origin,
+    )
+
+    if is_external_service_enabled(task_config):
+        return resolve_external_origin(task_config)
+
     normalize_pd_deployment(task_config)
     deployment = task_config.get("deployment") or {}
     pd_control = deployment.get("pd_control")

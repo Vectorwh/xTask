@@ -9,7 +9,7 @@
 
 ## 1. 可参考示例
 
-可直接参考的 25 个独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
+可直接参考的独立示例放在 `tests/e2e/xllm/examples/yaml_authoring/`，不会修改或替换旧用例。
 
 | 目的 | 示例 |
 | --- | --- |
@@ -36,6 +36,8 @@
 | 单机 AISBench ShareGPT `packed` 多组 Prefix Cache 长上下文性能测试 | `23_single_aisbench_sharegpt_prefix_cache_packed_perf.yaml` |
 | 单机 AISBench GPQA Diamond 精度测试 | `24_single_aisbench_gpqa_acc.yaml` |
 | 单机 Wan2.2 I2V + VBench 质量评测 | `25_single_vbench_wan_i2v.yaml` |
+| 外部已有服务 + AISBench 性能 | `26_external_aisbench_perf.yaml` |
+| 外部已有 Wan2.2 + VBench | `27_external_vbench_wan_i2v.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
 
@@ -75,7 +77,8 @@ deployment: {}
 | `userid` | 建议 | 结果文件归属用户的历史配置 | 常沿用环境中的 UID，例如 `1048`。部分当前流程直接取实际运行用户 UID，因此不要把它当作容器权限问题的唯一控制项。 |
 | `serving_wait_time` | 建议 | 服务启动命令发出后额外等待多少秒 | 它不是完整的服务启动超时。多机还会做实例 readiness 和统一 endpoint 健康检查。 |
 | `benchmark` | 是 | benchmark 类型及性能/精度/视频质量参数 | 详见第 3、8 节。 |
-| `deployment` | 是 | xLLM 用哪些服务器、卡和端口启动 | 详见第 4 节。 |
+| `deployment` | 是 | xLLM 用哪些服务器、卡和端口启动 | 详见第 4 节。`external_service` 开启时拓扑被忽略，见第 10 节。 |
+| `external_service` | 否 | 是否对接已有服务、不由 xTask 启动 xLLM | 默认关闭。`true` 或带 `endpoint` 的 mapping 进入外部模式；不写或 `false` 保持现有端到端路径。 |
 | `assess_test_param` | 仅搜参 | 哪些字段需要搜索，以及每个字段有哪些候选值 | 只在 `--assess_test_type para_set` 下使用。 |
 | `assess_search` | 搜参建议 | 选择 exhaustive 或 TPE，并配置目标与约束 | 不写时，`para_set` 默认按 exhaustive 全量组合执行。 |
 | `assess_topologies` | 仅 PD 拓扑搜索 | 预先定义多个完整、合法的 PD 拓扑 | 不能用于普通 `deployment.instances`。 |
@@ -685,7 +688,7 @@ deployment:
 | `deployment.benchmark.runner_instance` | 建议 | 在哪个物理 node 的容器里跑 benchmark | 层级 PD YAML 中应填写一个实际的 `nodes[].name`，例如 `prefill-0-node-0`，不是逻辑实例名 `prefill-0`。不写时框架会自动选择；写了却不匹配任何 node 时会退回首个 runtime，但配置含义会变得不明确。 |
 | `deployment.benchmark.health_path` | 建议 | 统一服务健康检查路径 | 默认 `/health`，拼在 `pd_control` 的 HTTP endpoint 后。 |
 
-注意：`deployment.benchmark.endpoint` 即使手工填写，当前服务组逻辑也不会把它作为权威地址；普通部署从 `master_host + local_port` 推导，PD 从 `pd_control.host + http_server_port` 推导。
+注意：`deployment.benchmark.endpoint` 即使手工填写，当前服务组逻辑也不会把它作为权威地址；普通部署从 `master_host + local_port` 推导，PD 从 `pd_control.host + http_server_port` 推导。**仅当顶层 `external_service` 开启时**，该字段（以及 `external_service.endpoint`）才成为被测服务地址。
 
 xLLM-Service 在 `service architecture refactor`（约 `55905ea` / `3fe20c6`）之后引入了 `COORDINATOR` / `ROUTER` 双角色：二进制默认是 `ROUTER`，只有 `COORDINATOR` 会通过 `elect_master()` 写入 `XLLM:SERVICE:MASTER`。GitHub 旧版 main（如 `72ab598` / `73d5e00`）没有该 flag，启动时会自动写 MASTER（用 3s 短租约 + 后台 keepalive 续约）。xTask 默认 `service_binary_profile=auto` 自动探测并兼容两类二进制：探测到 refactor 二进制时注入 `--service_deployment_role=COORDINATOR` 并把 MASTER key/`/readyz` 作为**硬性**控制面门控（捕获默认 ROUTER 不选举的回归）；探测到 legacy 二进制时不传 role flag，MASTER key 探测退化为**非阻塞**告警，沿用历史的基础健康检查（`pgrep + etcd /health + 无 fatal 日志`），避免 3s 租约边界抖动误杀旧版二进制。也可显式设为 `legacy` 或 `refactor`。
 
@@ -1386,7 +1389,57 @@ python3 xtask/benchmarks/vbench/tools/convert_wan22_diffusers.py \
 并在根目录补 `config.json`（`transformers_version: null` 可跳过框架的
 transformers 版本对齐安装）。
 
-## 9. 常用执行命令
+## 9. 外部已有服务（不启动 xLLM）
+
+默认关闭。不写 `external_service`、写成 `false`，或写成 `enabled: false` 时，
+行为与现有端到端用例完全相同：拉容器、编译/下载 xLLM、启动服务、再跑
+benchmark。
+
+开启后，xTask **不启动** xLLM、`xllm_master_serving`、etcd，也不占用被测机器上的
+昇腾卡。它只做数据集准备、生成 benchmark 脚本、起 **client 容器**、对给定地址做
+健康探测、跑测试并汇总结果。
+
+```yaml
+external_service: true          # 也可写成 mapping，见下
+served_model_name: Qwen3-8B
+model_path: /export/home/models/Qwen3-8B   # AISBench/EvalScope tokenizer；VBench 生成可不填
+metrics: perf
+dataset_name: gsm8k
+benchmark:
+  benchmark_type: aisbench
+  perf: { ... }
+deployment:
+  benchmark:
+    endpoint: http://10.20.30.40:8800
+    health_path: /health
+```
+
+或：
+
+```yaml
+external_service:
+  enabled: true
+  endpoint: https://gateway.example/inference/svc-x
+  health_path: /v1/models      # 空字符串表示跳过探测
+  api_key: EMPTY               # 仅 EvalScope 使用
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `external_service` | `true` / mapping。缺省或 `false` = 端到端。 |
+| `endpoint` | 权威地址。解析顺序：`external_service.endpoint` → `host`+`port` → `deployment.benchmark.endpoint` → 顶层 `host_addr`+`port`。 |
+| `health_path` | 拼在 **origin**（不含 API path）后探测。默认 `/health`；HTTP 2xx 即通过。空 = 跳过。 |
+| `deployment.instances` / `pd_control` 等 | 开启后忽略并打 warning，不会去那些 host 起服务容器。 |
+
+**AISBench / EvalScope：** 仍起一台 engine 镜像作为 client，并下载对应 bench 工具；不执行 `download_xllm.sh`。AISBench 使用 `host_ip`/`host_port`，网关 URL 里的 path 不会写入 AISBench 配置。EvalScope 使用 origin + path 作为 `--api-url` 前缀。
+
+**VBench / Wan2.2：** 只起 `benchmark.vbench.image_home` / `image_name` 指定的独立 runner，不创建 dummy xLLM 容器。默认请求 `http://<origin>/v1/video/generation`；若 `endpoint` 已带 path，则原样作为视频 API。`mode: evaluate` 不要求活服务、不做健康探测。NPU watchdog 在外部模式关闭。
+
+搜 `serving_extensiable_param`、卡号、PD 拓扑会被拒绝；只允许搜 benchmark 请求参数（如 `batch_size`）。
+
+完整示例：`26_external_aisbench_perf.yaml`、`27_external_vbench_wan_i2v.yaml`。
+
+## 10. 常用执行命令
 
 普通单用例：
 
@@ -1415,7 +1468,7 @@ python main.py --case_group 11_single_para_set_tpe \
 
 搜索完成后，重点查看 `outputs/<case_group>/search/<基础用例名>/search_summary.yaml` 和 `search_trials.csv`。前者汇总最佳组合和成功/失败数量，后者一行记录一次实际测试。
 
-## 9. 写完后的检查清单
+## 11. 写完后的检查清单
 
 - 先确认 `metrics`、`benchmark_type` 和对应的 `perf/acc` 块一致。
 - 确认模型路径在所有服务节点存在，数据资源路径在 benchmark runner 可见。
@@ -1424,4 +1477,5 @@ python main.py --case_group 11_single_para_set_tpe \
 - 同一 host 上检查 `device_ids`、`local_port` 端口段、HCCL/协调端口和 PD transfer 端口没有冲突。
 - 非 PD 多机的 `rank_start` 要按全局卡数累计；PD 可按逻辑实例分别累计或省略让框架计算。
 - 搜索路径必须指向 YAML 中已经存在的字段；不要使用 `nodes[0]`、`device_ids[0]` 这种通用列表路径。
+- 对接已有服务时打开 `external_service`，写清 endpoint；未打开时不要依赖 `deployment.benchmark.endpoint`。
 - `para_set` 的 case group 内不要混用 exhaustive 和 TPE；每个组合的完整配置会保存在输出目录，旧用例不会被改写。

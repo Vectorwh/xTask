@@ -283,9 +283,14 @@ def generate_benchmark_command(
     service_plans=None,
 ) -> str:
     """Generate only the benchmark command for an already running service."""
+    from xtask.core.external_service import is_external_service_enabled
     from xtask.core.service_group import is_multi_host_deployment
 
     def _bench_task_config_with_endpoint():
+        # Live-target host/port were already applied. Do not derive from
+        # leftover deployment.instances when external_service is on.
+        if is_external_service_enabled(task_config):
+            return task_config
         if not is_multi_host_deployment(task_config):
             return task_config
         from xtask.core.service_group import get_benchmark_endpoint, resolve_master_host
@@ -359,12 +364,23 @@ def generate_commands(
     Returns:
         (启动命令, 基准测试命令)
     """
+    from xtask.core.external_service import is_external_service_enabled
     from xtask.core.service_group import is_multi_host_deployment
 
     work_dir = engine_config.get("working_dir", "/workspace")
     config_file = f"{work_dir}/config/{os.path.basename(task_yaml_path)}"
     startup_cmd = ""
     benchmark_cmd = ""
+
+    # External mode must not build xLLM launch plans even if a copied YAML
+    # still contains deployment.instances / pd_control.
+    if is_external_service_enabled(task_config):
+        benchmark_cmd = generate_benchmark_command(
+            task_config,
+            output_file_path,
+            service_plans=[],
+        )
+        return startup_cmd, benchmark_cmd
     
     # deployment.instances（含单机单节点）：按实例生成启动脚本
     if is_multi_host_deployment(task_config):
@@ -1274,6 +1290,29 @@ def _load_task_and_engine(context):
                 f"'{host_addr_override}'"
             )
 
+    from xtask.core.external_service import (
+        apply_external_service_to_task_config,
+        is_external_service_enabled,
+        topology_fields_ignored,
+        validate_external_service_config,
+    )
+
+    external_service = is_external_service_enabled(task_config)
+    if external_service:
+        try:
+            validate_external_service_config(task_config)
+            apply_external_service_to_task_config(task_config)
+        except Exception as exc:
+            _fail_stage(context, f"external_service configuration error: {exc}")
+            return
+        ignored = topology_fields_ignored(task_config)
+        if ignored:
+            logging.warning(
+                "external_service is enabled; ignored topology fields %s "
+                "(xLLM / pd_control will not be started)",
+                ", ".join(ignored),
+            )
+
     source_task_config = copy.deepcopy(task_config)
     context.result["task_config"] = task_config
     context.result["output_file_path"] = context.output_file_path
@@ -1301,7 +1340,7 @@ def _load_task_and_engine(context):
     from xtask.core.service_group import is_multi_host_deployment
 
     service_plans = task_config.pop("_service_plans", None)
-    multi_host = is_multi_host_deployment(task_config)
+    multi_host = False if external_service else is_multi_host_deployment(task_config)
     context.state.update(
         task_config=task_config,
         source_task_config=source_task_config,
@@ -1311,18 +1350,27 @@ def _load_task_and_engine(context):
         startup_cmd=startup_cmd,
         benchmark_cmd=benchmark_cmd,
         multi_host=multi_host,
+        external_service=external_service,
         service_plans=service_plans or [],
         pd_disaggregated=(
-            task_config.get("deployment", {}).get("mode") == "pd_disaggregated"
-            or any(
-                str(instance.get("role", "")).lower() in {"prefill", "decode"}
-                for instance in (task_config.get("deployment", {}).get("instances") or [])
+            False
+            if external_service
+            else (
+                task_config.get("deployment", {}).get("mode") == "pd_disaggregated"
+                or any(
+                    str(instance.get("role", "")).lower() in {"prefill", "decode"}
+                    for instance in (task_config.get("deployment", {}).get("instances") or [])
+                )
             )
         ),
         service_routed=(
-            task_config.get("deployment", {}).get("mode") == "service_routed"
+            False
+            if external_service
+            else (task_config.get("deployment", {}).get("mode") == "service_routed")
         ),
     )
+    if external_service:
+        context.result["external_service"] = True
     if multi_host and not service_plans:
         _fail_stage(
             context,
@@ -1443,7 +1491,11 @@ def _prepare_vbench_container(context, service_manager, service_config):
         manager = ContainerManager(
             vbench_config,
             logging.getLogger(),
-            executor=getattr(service_manager, "executor", None),
+            executor=(
+                getattr(service_manager, "executor", None)
+                if service_manager is not None
+                else None
+            ),
         )
         image_url = f"{vbench_config.image_home}:{vbench_config.image_name}"
         if not manager.image_exists(image_url) and not manager.pull_image(image_url):
@@ -1482,12 +1534,46 @@ def _prepare_vbench_container(context, service_manager, service_config):
                 )
 
 
-def _prepare_container(context):
+def _prepare_external_client_container(context):
+    """Start only the benchmark client. Do not create xLLM serving containers.
+
+    AISBench/EvalScope reuse the engine image as a client. VBench uses its
+    dedicated runner image and does not keep a dummy serving container.
+    """
     state = context.state
-    if state.get("multi_host"):
-        _prepare_container_multi_host(context)
+    task_config = state["task_config"]
+    engine_config = state["engine_config"]
+    if _is_vbench_task(task_config):
+        _prepare_vbench_container(context, None, engine_config)
+        if context.complete:
+            return
+        manager = state.get("vbench_container_manager")
+        config = state.get("vbench_container_config")
+        if manager is None or config is None:
+            _fail_stage(
+                context,
+                "Failed to create VBench runner for external_service",
+            )
+            return
+        state["container_manager"] = manager
+        state["container_config"] = config
+        context.result["container_id"] = state.get("vbench_container_id")
+        state["init_entries"] = os.listdir(context.output_file_path)
+        logging.info(
+            "external_service: using dedicated VBench runner %s",
+            config.container_name,
+        )
         return
 
+    _prepare_single_host_client_container(context)
+
+
+def _prepare_single_host_client_container(context):
+    """Create the local client/serving container used by single-host cases.
+
+    Shared by E2E single-host prepare and AISBench/EvalScope external_service.
+    """
+    state = context.state
     task_config = state["task_config"]
     engine_config = state["engine_config"]
     container_config = ContainerConfigBuilder.create_container_config(
@@ -1559,6 +1645,18 @@ def _prepare_container(context):
     state["init_entries"] = os.listdir(context.output_file_path)
     if _is_vbench_task(task_config):
         _prepare_vbench_container(context, container_manager, engine_config)
+
+
+def _prepare_container(context):
+    state = context.state
+    if state.get("external_service"):
+        _prepare_external_client_container(context)
+        return
+    if state.get("multi_host"):
+        _prepare_container_multi_host(context)
+        return
+
+    _prepare_single_host_client_container(context)
 
 
 def _prepare_container_multi_host(context):
@@ -1736,6 +1834,9 @@ def _download_xllm_command(install_service):
 
 def _prepare_runtime_dependencies(context):
     state = context.state
+    if state.get("external_service"):
+        _prepare_external_runtime_dependencies(context)
+        return
     if state.get("multi_host"):
         _prepare_runtime_dependencies_multi_host(context)
         return
@@ -1979,8 +2080,149 @@ def _prepare_runtime_dependencies_multi_host(context):
         )
 
 
+def _prepare_external_runtime_dependencies(context):
+    """Install benchmark tools only. Never download/build xLLM in this mode."""
+    state = context.state
+    task_config = state["task_config"]
+    engine_config = state["engine_config"]
+    container_config = state.get("container_config")
+    container_manager = state.get("container_manager")
+    if container_manager is None or container_config is None:
+        _fail_stage(context, "external_service has no client container")
+        return
+    timeout = engine_config.get("startup_timeout", 300)
+    benchmark_type = (task_config.get("benchmark") or {}).get("benchmark_type")
+    down_benchmark_cmd = ""
+    if benchmark_type == "aisbench":
+        down_benchmark_cmd = "bash /workspace/tools/download_ais_bench.sh;"
+    elif benchmark_type == "evalscope":
+        down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
+    if down_benchmark_cmd:
+        logging.info(
+            "external_service: preparing benchmark tools: %s", down_benchmark_cmd
+        )
+        benchmark_download_result = container_manager.exec_in_container(
+            container_config.container_name, down_benchmark_cmd, timeout=timeout
+        )
+        if not benchmark_download_result.success:
+            detail = (
+                benchmark_download_result.stderr
+                or benchmark_download_result.stdout
+                or "unknown error"
+            )
+            _fail_stage(context, f"benchmark dependency preparation failed: {detail}")
+            return
+    if task_config.get("case_name"):
+        _clear_pre_benchmark_rst(
+            container_manager,
+            container_config,
+            task_config,
+            context.output_file_path,
+        )
+
+
+def _http_status_is_success(stdout: str) -> bool:
+    code = (stdout or "").strip()
+    return len(code) >= 3 and code[:3].isdigit() and code.startswith("2")
+
+
+def _probe_external_service(context) -> bool:
+    """Health-check a caller-provided live endpoint. Never start xLLM."""
+    from xtask.core.external_service import (
+        is_vbench_evaluate_only,
+        resolve_external_origin,
+        resolve_health_path,
+    )
+    from xtask.core.service_group import get_benchmark_endpoint
+
+    state = context.state
+    task_config = state["task_config"]
+    if is_vbench_evaluate_only(task_config):
+        logging.info(
+            "external_service: VBench evaluate-only, skip live endpoint probe"
+        )
+        state["service_healthy"] = True
+        return True
+
+    health_path = resolve_health_path(task_config)
+    if health_path is None:
+        logging.info("external_service: health_path is empty, skip probe")
+        state["service_healthy"] = True
+        return True
+
+    manager = state.get("container_manager")
+    container_config = state.get("container_config")
+    if manager is None or container_config is None:
+        _fail_stage(context, "external_service has no client container for health probe")
+        state["service_healthy"] = False
+        return False
+
+    try:
+        origin = get_benchmark_endpoint(task_config, state.get("service_plans") or [])
+    except Exception:
+        origin = resolve_external_origin(task_config)
+    check_url = origin.rstrip("/") + health_path
+    check_cmd = (
+        f"curl --noproxy '*' -sS -o /dev/null -w '%{{http_code}}' "
+        f"--max-time 10 {shlex.quote(check_url)}"
+    )
+    logging.info("external_service: probing live endpoint %s", check_url)
+    health_result = manager.exec_in_container(
+        container_config.container_name, check_cmd, timeout=30
+    )
+    state["health_result"] = health_result
+    healthy = bool(
+        health_result.success and _http_status_is_success(health_result.stdout)
+    )
+    state["service_healthy"] = healthy
+    if healthy:
+        logging.info("external_service endpoint is healthy: %s", check_url)
+        return True
+    message = (
+        f"external_service health check failed for {check_url}: "
+        f"{health_result.stderr or health_result.stdout}"
+    )
+    context.result["message"] = message
+    logging.error(message)
+    return False
+
+
+def _cleanup_external_client(context):
+    """Remove only the client/VBench runner. Never stop the live service."""
+    state = context.state
+    try:
+        _ensure_benchmark_date_dir(context)
+    except Exception:
+        logging.error(
+            "Failed to prepare fallback result directory during cleanup",
+            exc_info=True,
+        )
+    engine_config = state.get("engine_config")
+    should_clean = bool(
+        engine_config is not None
+        and not engine_config.get("serving_container_name")
+        and get_xtask_config_data().get("ENV_CONFIG").get("CLEAN_RESULTS")
+    )
+    if not should_clean:
+        return
+    vbench_mgr = state.get("vbench_container_manager")
+    container_manager = state.get("container_manager")
+    cleaned = set()
+    for manager in (vbench_mgr, container_manager):
+        if manager is None or id(manager) in cleaned:
+            continue
+        try:
+            manager.cleanup()
+        except Exception:
+            logging.error("Failed to clean external_service client container", exc_info=True)
+        cleaned.add(id(manager))
+
+
 def _start_and_wait_service(context):
     state = context.state
+    if state.get("external_service"):
+        _probe_external_service(context)
+        return
     if state.get("multi_host"):
         _start_and_wait_service_multi_host(context)
         return
@@ -2567,16 +2809,23 @@ def _run_benchmark_and_process(context):
         init_entries = os.listdir(context.output_file_path)
         state["init_entries"] = init_entries
         service_runtimes = state.get("service_runtimes") if state.get("multi_host") else None
-        benchmark_result = _execute_benchmark_with_npu_guard(
-            benchmark_container_manager,
-            benchmark_container_config,
-            task_config,
-            engine_config,
-            benchmark_cmd,
-            service_runtimes=service_runtimes,
-            guard_container_manager=container_manager if _is_vbench_task(task_config) else None,
-            guard_container_config=container_config if _is_vbench_task(task_config) else None,
-        )
+        if state.get("external_service"):
+            benchmark_result = benchmark_container_manager.exec_in_container(
+                benchmark_container_config.container_name,
+                benchmark_cmd,
+                timeout=engine_config.get("benchmark_timeout", 3600),
+            )
+        else:
+            benchmark_result = _execute_benchmark_with_npu_guard(
+                benchmark_container_manager,
+                benchmark_container_config,
+                task_config,
+                engine_config,
+                benchmark_cmd,
+                service_runtimes=service_runtimes,
+                guard_container_manager=container_manager if _is_vbench_task(task_config) else None,
+                guard_container_config=container_config if _is_vbench_task(task_config) else None,
+            )
         state["benchmark_result"] = benchmark_result
         context.result.update(
             benchmark_success=benchmark_result.success,
@@ -3347,6 +3596,9 @@ def _cleanup_scheduler(context):
     from xtask.core.service_group import cleanup_service_group
 
     state = context.state
+    if state.get("external_service"):
+        _cleanup_external_client(context)
+        return
     # Archive into a dated directory while containers are still available so
     # root-owned aisbench directories can be chmod'd for host-side copies.  The
     # finalize-stage call is kept as a no-op safety net when this already ran.
@@ -3530,6 +3782,16 @@ def _load_session_trial_config(context, task_yaml_path: str) -> Dict[str, Any]:
 
             apply_host_addr_override(task_config, host_addr_override)
 
+    from xtask.core.external_service import (
+        apply_external_service_to_task_config,
+        is_external_service_enabled,
+        validate_external_service_config,
+    )
+
+    if is_external_service_enabled(task_config):
+        validate_external_service_config(task_config)
+        apply_external_service_to_task_config(task_config)
+
     base_config = context.state.get("source_task_config") or {}
     if _benchmark_only_service_config(task_config) != _benchmark_only_service_config(
         base_config
@@ -3568,6 +3830,8 @@ def _reset_session_trial(
     )
     if previous_result.get("instances") is not None:
         result["instances"] = previous_result["instances"]
+    if previous_result.get("external_service"):
+        result["external_service"] = True
 
     context.task_yaml_path = task_yaml_path
     context.output_file_path = output_file_path
@@ -3598,6 +3862,8 @@ def _reset_session_trial(
 
 def _check_session_service_health(context) -> bool:
     state = context.state
+    if state.get("external_service"):
+        return _probe_external_service(context)
     task_config = state["task_config"]
     manager = state.get("container_manager")
     container_config = state.get("container_config")

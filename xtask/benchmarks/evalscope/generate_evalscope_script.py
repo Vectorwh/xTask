@@ -49,6 +49,18 @@ def generate_evalscope_script(
     model_name = task_config.get("served_model_name", "model")
     dataset_name = task_config.get("dataset_name").lower()
     user_id = os.getuid()
+    api_base = f"http://{api_address}:{api_port}"
+    api_key = "EMPTY"
+    from xtask.core.external_service import (
+        is_external_service_enabled,
+        resolve_external_location,
+    )
+
+    if is_external_service_enabled(task_config):
+        location = resolve_external_location(task_config)
+        api_base = location.origin + location.base_path
+        if location.api_key:
+            api_key = location.api_key
     
     # ========== 2. 构造shell脚本内容 ==========
     shell_content = []
@@ -67,8 +79,8 @@ def generate_evalscope_script(
 
         accuracy_cmd = (
             f'evalscope eval --model {model_name} '
-            f'--api-url http://{api_address}:{api_port}{endpoint} '
-            f'--api-key EMPTY '
+            f'--api-url {api_base}{endpoint} '
+            f'--api-key {api_key} '
             f'--eval-type openai_api '
             f'--datasets {dataset_name} '
             f'--timeout {timeout} '
@@ -110,7 +122,7 @@ def generate_evalscope_script(
         
         perf_cmd = (
             f'evalscope perf --model {model_name} '
-            f'--url http://{api_address}:{api_port}/v1/chat/completions '
+            f'--url {api_base}/v1/chat/completions '
             f'--api openai '
             f'--dataset {dataset_name} '
             f'--rate {request_rate} '
