@@ -28,14 +28,26 @@ class DownloadScriptTests(unittest.TestCase):
             executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             executable.chmod(0o755)
 
+        # SOURCE_DIR is hardcoded to /xllm_test_060/benchmark in the script;
+        # create a temp copy with SOURCE_DIR redirected to the test tree so
+        # the sync logic can be exercised without touching system paths.
+        original_script = Path(__file__).resolve().parents[1] / "tools" / "download_ais_bench.sh"
+        script_text = original_script.read_text(encoding="utf-8")
+        script_text = script_text.replace(
+            'SOURCE_DIR="/xllm_test_060/benchmark"',
+            f'SOURCE_DIR="{source}"',
+        )
+        temp_script = fake_bin / "download_ais_bench.sh"
+        temp_script.write_text(script_text, encoding="utf-8")
+        temp_script.chmod(0o755)
+
         env = os.environ.copy()
         env.update(
-            AISBENCH_SOURCE_DIR=str(source),
             AISBENCH_TARGET_DIR=str(target),
             PATH=f"{fake_bin}:{env['PATH']}",
         )
         return subprocess.run(
-            ["bash", "tools/download_ais_bench.sh"],
+            ["bash", str(temp_script)],
             cwd=Path(__file__).resolve().parents[1],
             env=env,
             text=True,

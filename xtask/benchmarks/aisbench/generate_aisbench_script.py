@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict
 
 from xtask.utils.container_manager import path_mapping_in_container
+from xtask.utils.config_parser import get_xtask_config_data
 from xtask.datasets.dataset_downloader import download_dataset
 from xtask.datasets.dataset_manger import (
     get_sharegpt_fixed_output_path,
@@ -43,7 +44,7 @@ def get_api_type_file(api_type, shell_content):
     model_config_name = f"xtask_{api_type}"
     shell_content.append("\n# 2. 创建用例级vllm_api配置")
     shell_content.append(
-        f'SOURCE_CONFIG_FILE="${{AISBENCH_SOURCE_DIR:-/xllm_test_060/benchmark}}/'
+        f'SOURCE_CONFIG_FILE="/xllm_test_060/benchmark/'
         f'ais_bench/benchmark/configs/models/vllm_api/{api_type}.py"'
     )
     shell_content.append('if [ ! -f "$SOURCE_CONFIG_FILE" ]; then')
@@ -63,10 +64,11 @@ def get_api_type_file(api_type, shell_content):
 
 
 def _aisbench_dataset_config_roots():
-    configured_root = os.environ.get("AISBENCH_SOURCE_DIR")
-    if configured_root:
-        yield Path(configured_root)
-    yield Path("/export/home/models/xllm_test_060/benchmark")
+    dep_path = (get_xtask_config_data().get("ENV_CONFIG") or {}).get(
+        "DEPENDENCE_PACKAGE_PATH", ""
+    ).strip()
+    if dep_path:
+        yield Path(dep_path) / "benchmark"
     yield Path(__file__).resolve().parents[3] / "benchmark"
 
 

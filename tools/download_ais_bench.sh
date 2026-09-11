@@ -1,7 +1,7 @@
 #!/bin/bash
 # ais_bench编译与部署
 #cd /workspace
-SOURCE_DIR="${AISBENCH_SOURCE_DIR:-/xllm_test_060/benchmark}"
+SOURCE_DIR="/xllm_test_060/benchmark"
 TARGET_DIR="${AISBENCH_TARGET_DIR:-/workspace/benchmark}"
 
 has_directory_content() {

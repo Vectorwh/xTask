@@ -223,6 +223,13 @@ class ContainerConfigBuilder:
         volumes = dict(
             get_xtask_config_data().get("DOCKER_CONFIG").get("volumes") or {}
         )
+        from xtask.utils.resource_sync import (
+            apply_dependence_package_mount,
+            resolve_resource_sync_roots,
+        )
+
+        local_source, _remote_target = resolve_resource_sync_roots(task_config)
+        apply_dependence_package_mount(volumes, local_source)
 
         host_paths = [task_config.get("model_path", "")]
         ext_params = task_config.get("serving_extensiable_param") or {}
@@ -1401,8 +1408,8 @@ def _vbench_container_config(context, service_manager, service_config):
     """
     from xtask.utils.container_manager import path_mapping_in_container
     from xtask.benchmarks.vbench.defaults import (
-        DEFAULT_AIS_THIRD_PARTY,
-        DEFAULT_VBENCH2_DATASETS,
+        get_default_ais_third_party,
+        get_default_vbench2_datasets,
         default_cache_dir,
     )
 
@@ -1413,6 +1420,20 @@ def _vbench_container_config(context, service_manager, service_config):
     image_home = vbench.get("image_home") or vbench.get("container_home") or "quay.io/jd_xllm/xllm-ai"
     image_name = vbench.get("image_name") or vbench.get("container_image") or "8.1.rc1-a3-openeuler22.03-py3.10"
     volumes = dict(get_xtask_config_data().get("DOCKER_CONFIG", {}).get("volumes") or {})
+    from xtask.utils.resource_sync import (
+        apply_dependence_package_mount,
+        resolve_resource_sync_roots,
+    )
+    from xtask.core.service_group import get_benchmark_runtime
+
+    local_source, remote_target = resolve_resource_sync_roots(task_config)
+    runner = get_benchmark_runtime(context.state.get("service_runtimes") or [])
+    dependence_host = (
+        remote_target
+        if runner is not None and not runner.plan.is_local
+        else local_source
+    )
+    apply_dependence_package_mount(volumes, dependence_host)
     # Keep an explicit case-output bind even when the workspace root is also
     # mounted.  This makes the contract clear for remote runner containers.
     output_inside = path_mapping_in_container(output_path)
@@ -1457,10 +1478,10 @@ def _vbench_container_config(context, service_manager, service_config):
             # evaluate_vbench_i2v_bench.py.  Explicit benchmark.vbench
             # env_* values win over these shared defaults.
             "VBENCH2_DATASETS": str(
-                config.get("vbench2_datasets") or DEFAULT_VBENCH2_DATASETS
+                config.get("vbench2_datasets") or get_default_vbench2_datasets()
             ),
             "AIS_THIRD_PARTY": str(
-                config.get("ais_third_party") or DEFAULT_AIS_THIRD_PARTY
+                config.get("ais_third_party") or get_default_ais_third_party()
             ),
             # camera_motion / dino go through torch.hub.load, which resolves
             # repos and checkpoints under TORCH_HOME.  Point it at the shared

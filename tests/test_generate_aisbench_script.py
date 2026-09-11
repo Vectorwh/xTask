@@ -574,8 +574,15 @@ class AisbenchScriptGenerationTests(unittest.TestCase):
             ais_bench.chmod(0o755)
 
             script_path = self._generate(output_dir, python_exec)
+            # The generated script hardcodes /xllm_test_060/benchmark as the
+            # AISBench source root; redirect it to the test tree so the
+            # stale source config can be found without touching system paths.
+            script_text = script_path.read_text(encoding="utf-8")
+            script_text = script_text.replace(
+                "/xllm_test_060/benchmark", str(root / "source")
+            )
+            script_path.write_text(script_text, encoding="utf-8")
             env = os.environ.copy()
-            env["AISBENCH_SOURCE_DIR"] = str(root / "source")
             env["PATH"] = f"{fake_bin}:{env['PATH']}"
             result = subprocess.run(
                 ["bash", str(script_path)],

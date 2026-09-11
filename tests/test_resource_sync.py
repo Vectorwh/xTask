@@ -6,7 +6,9 @@ from unittest import mock
 
 from xtask.utils.resource_sync import (
     ResourceSyncError,
+    apply_dependence_package_mount,
     build_host_requirements,
+    resolve_resource_sync_roots,
     sync_required_resources_to_hosts,
 )
 from xtask.core.task_scheduler import TaskExecutionContext
@@ -49,6 +51,56 @@ class _ResourceTree:
         path = self.root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+
+class ResourceSyncRootTests(unittest.TestCase):
+    def test_source_and_target_fall_back_independently(self):
+        with mock.patch(
+            "xtask.utils.resource_sync.get_dependence_package_path",
+            return_value="/export/home/models/xllm_test_060",
+        ):
+            self.assertEqual(
+                resolve_resource_sync_roots({}),
+                (
+                    "/export/home/models/xllm_test_060",
+                    "/export/home/models/xllm_test_060",
+                ),
+            )
+            self.assertEqual(
+                resolve_resource_sync_roots(
+                    {"deployment": {"resource_sync": {"source": "/local/src"}}}
+                ),
+                ("/local/src", "/export/home/models/xllm_test_060"),
+            )
+            self.assertEqual(
+                resolve_resource_sync_roots(
+                    {"deployment": {"resource_sync": {"target": "/remote/dst"}}}
+                ),
+                ("/export/home/models/xllm_test_060", "/remote/dst"),
+            )
+            self.assertEqual(
+                resolve_resource_sync_roots(
+                    {
+                        "deployment": {
+                            "resource_sync": {
+                                "source": "/local/src",
+                                "target": "/remote/dst",
+                            }
+                        }
+                    }
+                ),
+                ("/local/src", "/remote/dst"),
+            )
+
+    def test_apply_dependence_package_mount_replaces_previous_mapping(self):
+        volumes = {
+            "/export/home/models/": "/export/home/models",
+            "/export/home/models/xllm_test_060": "/xllm_test_060",
+        }
+        apply_dependence_package_mount(volumes, "/data/xllm_test_060")
+        self.assertEqual(volumes["/data/xllm_test_060"], "/xllm_test_060")
+        self.assertNotIn("/export/home/models/xllm_test_060", volumes)
+        self.assertEqual(volumes["/export/home/models/"], "/export/home/models")
 
 
 class ResourceRequirementTests(unittest.TestCase):
@@ -326,6 +378,46 @@ class ResourceSynchronizationTests(unittest.TestCase):
 
         self.assertEqual(result, {})
         executor_factory.assert_not_called()
+
+    def test_missing_target_falls_back_to_dependence_package_path(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _ResourceTree(temporary_directory)
+            executor = mock.Mock()
+            executor.host = "11.0.0.2"
+
+            def run(command, timeout=60):
+                if "PRESENT:runtime-numactl" in command:
+                    return _result(
+                        stdout=(
+                            "MISSING:runtime-numactl\n"
+                            "PRESENT:runtime-torch-npu\n"
+                            "PRESENT:aisbench-core\n"
+                        )
+                    )
+                return _result()
+
+            executor.run.side_effect = run
+            executor.sync_path.return_value = True
+
+            with mock.patch(
+                "xtask.utils.resource_sync.get_dependence_package_path",
+                return_value="/dep/root",
+            ):
+                sync_required_resources_to_hosts(
+                    {
+                        "benchmark": {"benchmark_type": "aisbench"},
+                        "dataset_name": "gsm8k",
+                        "deployment": {
+                            "resource_sync": {"source": temporary_directory}
+                        },
+                    },
+                    [_plan("11.0.0.2", runner=True)],
+                    executor_factory=lambda _host: executor,
+                )
+
+            remote_path = executor.sync_path.call_args.args[1]
+            self.assertTrue(str(remote_path).startswith("/dep/root"))
+            self.assertFalse(str(remote_path).startswith(temporary_directory))
 
     def test_scheduler_stops_before_workspace_or_container_on_sync_failure(self):
         from xtask.core import scheduler

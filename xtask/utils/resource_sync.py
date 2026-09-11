@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from xtask.utils.host_executor import HostExecutor, create_host_executor
+from xtask.utils.config_parser import get_xtask_config_data
 
 
 DEFAULT_RESOURCE_ROOT = "/export/home/models/xllm_test_060"
@@ -21,6 +22,54 @@ CONTAINER_RESOURCE_ROOT = "/xllm_test_060"
 NUMACTL_RPM = "numactl-2.0.16-9.vo2203sp4.aarch64.rpm"
 EVALSCOPE_WHEEL = "evalscope-1.5.0-py3-none-any.whl"
 TORCH_NPU_WHEEL = "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl"
+
+
+def get_dependence_package_path() -> str:
+    """Return the environment-level shared resource root."""
+    value = (get_xtask_config_data().get("ENV_CONFIG") or {}).get(
+        "DEPENDENCE_PACKAGE_PATH", DEFAULT_RESOURCE_ROOT
+    )
+    text = str(value or "").strip()
+    return text or DEFAULT_RESOURCE_ROOT
+
+
+def _nonempty_path(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def resolve_resource_sync_roots(task_config: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    """Resolve local sync source and remote sync target independently.
+
+    YAML ``deployment.resource_sync.source`` / ``target`` override the
+    environment default when present.  Missing fields fall back to
+    ``DEPENDENCE_PACKAGE_PATH`` separately — target does not inherit source.
+    """
+    default_root = get_dependence_package_path()
+    raw_config = ((task_config or {}).get("deployment") or {}).get("resource_sync", {})
+    if not isinstance(raw_config, dict):
+        return default_root, default_root
+    source = _nonempty_path(raw_config.get("source")) or default_root
+    target = _nonempty_path(raw_config.get("target")) or default_root
+    return source, target
+
+
+def apply_dependence_package_mount(volumes: Dict[str, str], host_path: str) -> None:
+    """Bind ``host_path`` to the fixed container mount ``/xllm_test_060``."""
+    normalized = os.path.normpath(str(host_path or "").strip())
+    if not normalized or normalized == ".":
+        return
+    container_root = CONTAINER_RESOURCE_ROOT.rstrip("/")
+    stale = [
+        existing
+        for existing, inside in list(volumes.items())
+        if os.path.normpath(str(inside).rstrip("/")) == container_root
+    ]
+    for existing in stale:
+        volumes.pop(existing, None)
+    volumes[normalized] = CONTAINER_RESOURCE_ROOT
 
 
 class ResourceSyncError(RuntimeError):
@@ -355,11 +404,11 @@ def sync_required_resources_to_hosts(
     if not raw_config.get("enabled", True):
         return {}
 
-    configured_source = str(raw_config.get("source", DEFAULT_RESOURCE_ROOT))
+    configured_source, configured_target = resolve_resource_sync_roots(task_config)
     source_root = str(Path(configured_source).resolve())
     # Preserve the configured host path for remote mounts even if the local path
     # happens to be a symlink to another storage location.
-    remote_root = str(raw_config.get("target", configured_source))
+    remote_root = configured_target
     timeout = int(raw_config.get("timeout", 3600))
     max_workers = max(1, int(raw_config.get("max_workers", 4)))
     requirements = build_host_requirements(task_config, plans, source_root)

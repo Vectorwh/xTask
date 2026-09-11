@@ -92,6 +92,42 @@ class ContainerManagerTests(unittest.TestCase):
 
         self.assertEqual(config.volumes[model_path], model_path)
 
+    def test_create_container_config_uses_yaml_source_for_dependence_mount(self):
+        with mock.patch(
+            "xtask.core.scheduler.get_xtask_config_data",
+            return_value={
+                "ENV_CONFIG": {
+                    "DEPENDENCE_PACKAGE_PATH": "/export/home/models/xllm_test_060"
+                },
+                "DOCKER_CONFIG": {
+                    "volumes": {
+                        "/export/home/models/": "/export/home/models",
+                        "/export/home/models/xllm_test_060": "/xllm_test_060",
+                    }
+                },
+            },
+        ), mock.patch(
+            "xtask.utils.resource_sync.get_dependence_package_path",
+            return_value="/export/home/models/xllm_test_060",
+        ):
+            config = ContainerConfigBuilder.create_container_config(
+                {"network_mode": "host"},
+                {
+                    "case_name": "yaml-source",
+                    "deployment": {
+                        "resource_sync": {
+                            "source": "/local/src",
+                            "target": "/remote/dst",
+                        }
+                    },
+                },
+                "task.yaml",
+            )
+
+        self.assertEqual(config.volumes["/local/src"], "/xllm_test_060")
+        self.assertNotIn("/export/home/models/xllm_test_060", config.volumes)
+        self.assertNotIn("/remote/dst", config.volumes)
+
 
 if __name__ == "__main__":
     unittest.main()

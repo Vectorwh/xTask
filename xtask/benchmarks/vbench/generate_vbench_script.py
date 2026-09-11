@@ -11,8 +11,8 @@ from typing import Any, Dict, List
 
 from xtask.utils.container_manager import path_mapping_in_container
 from xtask.benchmarks.vbench.defaults import (
-    DEFAULT_FULL_INFO,
-    DEFAULT_IMAGE_ROOT,
+    get_default_full_info,
+    get_default_image_root,
     default_cache_dir,
     default_evaluation_script,
 )
@@ -72,8 +72,8 @@ def generate_vbench_script(
     if mode not in valid_modes:
         raise ValueError(f"Unsupported VBench mode: {mode!r}; expected one of {sorted(valid_modes)}")
 
-    full_info = config.get("full_info") or config.get("dataset_path") or DEFAULT_FULL_INFO
-    image_root = config.get("image_root") or DEFAULT_IMAGE_ROOT
+    full_info = config.get("full_info") or config.get("dataset_path") or get_default_full_info()
+    image_root = config.get("image_root") or get_default_image_root()
     if mode in {"generate", "generate_and_evaluate"} and not image_root:
         raise ValueError("benchmark.vbench.image_root is required for generation")
     if not full_info:

@@ -6,7 +6,7 @@
         "MINDIE_LOG_LEVEL": "INFO",
         "VLLM_LOG_LEVEL": "INFO",
         "CLEAN_RESULTS": true,
-        "MODEL_HOME_PATH": "/export/home/models/",
+        "DEPENDENCE_PACKAGE_PATH": "/export/home/models/xllm_test_060",
         "DATASET_HOME_PATH": "output",
         "enable_docker": true,
         "Profiling": false,
@@ -30,7 +30,6 @@
         "benchmark_script_path": "",
         "volumes": {
             "/export/home/models/": "/export/home/models",
-            "/export/home/models/xllm_test_060": "/xllm_test_060",
             "/usr/local/dcmi": "/usr/local/dcmi",
             "/usr/local/bin/npu-smi": "/usr/local/bin/npu-smi",
             "/usr/local/Ascend/driver": "/usr/local/Ascend/driver",

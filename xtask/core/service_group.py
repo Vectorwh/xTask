@@ -1095,6 +1095,20 @@ def create_runtime_for_plan(
     container_config = container_config_builder.create_container_config(
         engine_config, plan.instance_config, task_yaml_path
     )
+    if not plan.is_local:
+        from xtask.utils.resource_sync import (
+            apply_dependence_package_mount,
+            resolve_resource_sync_roots,
+        )
+
+        _local_source, remote_target = resolve_resource_sync_roots(
+            plan.instance_config
+        )
+        volumes = getattr(container_config, "volumes", None)
+        if not isinstance(volumes, dict):
+            volumes = {}
+            container_config.volumes = volumes
+        apply_dependence_package_mount(volumes, remote_target)
     if plan.isolate_ipc:
         if container_config.ipc_mode is None:
             container_config.ipc_mode = "host"

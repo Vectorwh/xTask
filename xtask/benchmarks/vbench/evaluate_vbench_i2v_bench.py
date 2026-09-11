@@ -102,8 +102,8 @@ def _resolve_data_home():
     if env_datasets:
         candidates.append(os.path.join(env_datasets, 'vbench2_beta_i2v'))
         candidates.append(env_datasets)
-    candidates.append('/export/home/models/xllm_test_060/vbench_data')
-    candidates.append('/export/home/models/xllm_test_060/benchmark/vbench2/vbench2_beta_i2v')
+    candidates.append('/xllm_test_060/vbench_data')
+    candidates.append('/xllm_test_060/benchmark/vbench2/vbench2_beta_i2v')
     for c in candidates:
         if c and os.path.isdir(os.path.join(c, 'pretrained_models')):
             return c
