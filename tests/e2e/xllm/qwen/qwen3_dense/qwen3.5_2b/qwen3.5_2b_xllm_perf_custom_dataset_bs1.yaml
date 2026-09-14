@@ -1,0 +1,85 @@
+# Qwen3.5-2B TP4/MTP5（Draft Body TP1）log_request 转测。
+# 正式 200 条串行流式 chat，ignore_eos 打满 25 token；E2E < 140 ms。
+# warmup_paras 使用原数据 201～210，结果不计入正式统计。不自动三轮重启服务。
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    acc_dataset_len: 0
+    api_type: vllm_api_stream_chat
+    baseline: null
+    batch_size: 1
+    case_type: performance
+    dataset_conf: custom_dataset_gen
+    dataset_path: /workspace/xtask/datasets/custom/log_request.jsonl
+    dump_eval_details: false
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    max_num_worker: 1
+    max_out_len: 25
+    merge_ds: false
+    num_prompts: 200
+    output_len: 25
+    pressure: false
+    request_rate: 0
+    baseline_metrics:
+      - metric: e2el_avg
+        baseline: 125
+        compare: lt
+      - metric: output_tokens_avg
+        baseline: 25
+        threshold: 0.01
+    threshold: 0.1
+    num_warmups: 0
+    ignore_eos: true
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: true
+    warmup_paras:
+      dataset_path: /workspace/xtask/datasets/custom/log_request_warmup.jsonl
+      num_prompts: 10
+      batch_size: 1
+      request_rate: 0
+block_size: 128
+case_name: qwen3.5_2b_xllm_perf_custom_dataset_bs1
+communication_backend: lccl
+dataset_format: json
+dataset_name: custom_dataset
+dataset_path: ''
+engine_type: xllm
+metrics: perf
+model_path: /export/home/models/Qwen3.5-2B
+served_model_name: Qwen3.5-2B
+userid: 1048
+serving_wait_time: 10
+deployment:
+  master_host: 11.87.191.121
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.121
+    role: master
+    rank_start: 0
+    device_ids: [0, 1, 2, 3]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.86
+      max_tokens_per_batch: 32768
+      max_seqs_per_batch: 32
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      enable_graph: true
+      enable_graph_double_buffer: false
+      enable_graph_mode_decode_no_padding: true
+      enable_opt_validate_probs: true
+      max_concurrent_requests: 32
+      # 本机无独立 Qwen3.5-2B-mtp 目录；Qwen3.5-2B checkpoint 已含 mtp.* 权重。
+      draft_model: /export/home/models/Qwen3.5-2B
+      num_speculative_tokens: 5
+      enable_mtp_draft_body_tp1: true
