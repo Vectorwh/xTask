@@ -716,6 +716,426 @@ class AisbenchScriptGenerationTests(unittest.TestCase):
         )
         self.assertEqual(context.result["output_file_path"], str(second_output))
 
+    def test_find_prefers_aisbench_dataset_config_over_xtask(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            ais_root = root / "ais"
+            xtask_root = root / "xtask"
+            ais_config = (
+                ais_root
+                / "ais_bench"
+                / "benchmark"
+                / "configs"
+                / "datasets"
+                / "custom"
+                / "custom_dataset_gen.py"
+            )
+            xtask_config = xtask_root / "custom_dataset_gen.py"
+            ais_config.parent.mkdir(parents=True)
+            xtask_root.mkdir()
+            ais_config.write_text("# aisbench\n", encoding="utf-8")
+            xtask_config.write_text("# xtask\n", encoding="utf-8")
+
+            with mock.patch.object(
+                generator, "_aisbench_dataset_config_roots", return_value=[ais_root]
+            ), mock.patch.object(
+                generator, "_xtask_aisbench_dataset_config_root", return_value=xtask_root
+            ):
+                found = generator.find_aisbench_dataset_config("custom_dataset_gen")
+
+        self.assertEqual(found, ais_config)
+
+    def test_find_falls_back_to_xtask_dataset_config(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            xtask_root = Path(temporary_directory) / "xtask"
+            xtask_config = xtask_root / "custom_dataset_gen.py"
+            xtask_root.mkdir()
+            xtask_config.write_text("# xtask\n", encoding="utf-8")
+
+            with mock.patch.object(
+                generator, "_aisbench_dataset_config_roots", return_value=[]
+            ), mock.patch.object(
+                generator, "_xtask_aisbench_dataset_config_root", return_value=xtask_root
+            ):
+                found = generator.find_aisbench_dataset_config("custom_dataset_gen")
+
+        self.assertEqual(found, xtask_config)
+
+    def test_custom_dataset_perf_uses_xtask_dataset_config_and_stream_chat(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory) / "output"
+            output_dir.mkdir()
+            dataset_path = "/workspace/xtask/datasets/custom/prompt_30.jsonl"
+            task_config = self._task_config()
+            task_config["dataset_name"] = "custom_dataset"
+            task_config["dataset_path"] = dataset_path
+            task_config["benchmark"]["perf"].update(
+                {
+                    "api_type": "vllm_api_stream_chat",
+                    "dataset_conf": "custom_dataset_gen",
+                    "batch_size": 1,
+                    "request_rate": 0,
+                    "num_prompts": 30,
+                    "num_warmups": 5,
+                    "output_len": 128,
+                    "ignore_eos": False,
+                    "generation_kwargs": {
+                        "temperature": 0,
+                        "ignore_eos": False,
+                    },
+                }
+            )
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "_aisbench_dataset_config_roots", return_value=[]
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+            dataset_config = (
+                output_dir
+                / "aisbench_configs"
+                / "datasets"
+                / "xtask_custom_dataset_gen.py"
+            ).read_text(encoding="utf-8")
+
+        generated_path = output_dir / "prompt_30-n30.jsonl"
+        self.assertIn("--models xtask_vllm_api_stream_chat", script)
+        self.assertIn("--datasets xtask_custom_dataset_gen", script)
+        self.assertIn("--num-prompts 30", script)
+        self.assertIn("--num-warmups 5", script)
+        self.assertIn("ignore_eos=False", script)
+        self.assertIn("repeat_jsonl.py", script)
+        self.assertIn(
+            f"错误：AISBench数据集路径不存在 {dataset_path}",
+            script,
+        )
+        self.assertIn("按 num_prompts 重复拼接自定义数据集 jsonl", script)
+        self.assertIn(f"path='{generated_path}'", dataset_config)
+        self.assertNotIn(f"path='{dataset_path}'", dataset_config)
+        self.assertIn("template='{question}'", dataset_config)
+        self.assertNotIn("Question: {question}", dataset_config)
+        self.assertNotIn("gsm8k_gen_0_shot_cot_str_perf", script)
+
+    def test_custom_dataset_num_prompts_90_repeats_jsonl_in_generated_config(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory) / "output"
+            output_dir.mkdir()
+            dataset_path = "/workspace/xtask/datasets/custom/prompt_30.jsonl"
+            task_config = self._task_config()
+            task_config["dataset_name"] = "custom_dataset"
+            task_config["dataset_path"] = ""
+            task_config["benchmark"]["perf"].update(
+                {
+                    "api_type": "vllm_api_stream_chat",
+                    "dataset_conf": "custom_dataset_gen",
+                    "dataset_path": dataset_path,
+                    "batch_size": 1,
+                    "request_rate": 0,
+                    "num_prompts": 90,
+                    "num_warmups": 5,
+                    "output_len": 128,
+                    "ignore_eos": False,
+                }
+            )
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "_aisbench_dataset_config_roots", return_value=[]
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_test.sh").read_text(
+                encoding="utf-8"
+            )
+            dataset_config = (
+                output_dir
+                / "aisbench_configs"
+                / "datasets"
+                / "xtask_custom_dataset_gen.py"
+            ).read_text(encoding="utf-8")
+
+        generated_path = output_dir / "prompt_30-n90.jsonl"
+        self.assertIn("--num-prompts 90", script)
+        self.assertIn(f"--source {dataset_path}", script)
+        self.assertIn(f"--output {generated_path}", script)
+        self.assertIn(f"path='{generated_path}'", dataset_config)
+        self.assertIn("repeat_jsonl.py", script)
+        self.assertIn("/workspace/xtask/datasets/custom/repeat_jsonl.py", script)
+
+    def test_custom_alias_preprocesses_like_custom_dataset(self):
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._task_config()
+        task_config["dataset_name"] = "custom"
+        task_config["benchmark"]["perf"].update(
+            {
+                "dataset_path": "/workspace/xtask/datasets/custom/log_request.jsonl",
+                "num_prompts": 200,
+            }
+        )
+
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            commands, dataset_conf = preprocess_dataset(
+                "custom", task_config, "/tmp/xtask-custom-test"
+            )
+
+        command_text = "\n".join(commands)
+        self.assertEqual(dataset_conf, "custom_dataset_gen")
+        self.assertIn("--num-prompts 200", command_text)
+        self.assertIn("/tmp/xtask-custom-test/log_request-n200.jsonl", command_text)
+
+    def test_custom_dataset_preprocess_repeats_source_jsonl(self):
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._task_config()
+        task_config["dataset_name"] = "custom_dataset"
+        task_config["benchmark"]["perf"].update(
+            {
+                "dataset_conf": "custom_dataset_gen",
+                "dataset_path": "/workspace/xtask/datasets/custom/prompt_30.jsonl",
+                "num_prompts": 90,
+            }
+        )
+
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            commands, dataset_conf = preprocess_dataset(
+                "custom_dataset", task_config, "/tmp/xtask-custom-test"
+            )
+
+        command_text = "\n".join(commands)
+        self.assertEqual(dataset_conf, "custom_dataset_gen")
+        self.assertIn("repeat_jsonl.py", command_text)
+        self.assertIn("--num-prompts 90", command_text)
+        self.assertIn("/tmp/xtask-custom-test/prompt_30-n90.jsonl", command_text)
+        self.assertIn(
+            "/workspace/xtask/datasets/custom/prompt_30.jsonl",
+            command_text,
+        )
+
+    def test_custom_dataset_preprocess_requires_positive_num_prompts(self):
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._task_config()
+        task_config["dataset_name"] = "custom_dataset"
+        task_config["benchmark"]["perf"].update(
+            {
+                "dataset_path": "/workspace/xtask/datasets/custom/prompt_30.jsonl",
+                "num_prompts": 0,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "num_prompts must be a positive integer"):
+            preprocess_dataset(
+                "custom_dataset", task_config, "/tmp/xtask-custom-test"
+            )
+
+    def test_reserved_dataset_name_skips_custom_preprocess(self):
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._task_config()
+        task_config["dataset_name"] = "gsm8k"
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            commands, dataset_conf = preprocess_dataset(
+                "gsm8k", task_config, "/tmp/xtask-gsm8k-test"
+            )
+        command_text = "\n".join(commands)
+        self.assertEqual(dataset_conf, "gsm8k_gen_0_shot_cot_str_perf")
+        self.assertNotIn("repeat_jsonl.py", command_text)
+
+    def test_repeat_jsonl_records_pads_and_truncates(self):
+        import importlib.util
+
+        module_path = (
+            Path(__file__).resolve().parents[1]
+            / "xtask"
+            / "datasets"
+            / "custom"
+            / "repeat_jsonl.py"
+        )
+        spec = importlib.util.spec_from_file_location("repeat_jsonl", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        records = ["a\n", "b\n", "c\n"]
+        self.assertEqual(module.repeat_jsonl_records(records, 3), records)
+        self.assertEqual(
+            module.repeat_jsonl_records(records, 7),
+            ["a\n", "b\n", "c\n", "a\n", "b\n", "c\n", "a\n"],
+        )
+        self.assertEqual(module.repeat_jsonl_records(records, 2), ["a\n", "b\n"])
+        with self.assertRaisesRegex(ValueError, "jsonl dataset is empty"):
+            module.repeat_jsonl_records([], 1)
+
+    def _custom_warmup_task_config(self, warmup_paras, num_prompts=200):
+        task_config = self._task_config()
+        task_config["dataset_name"] = "custom_dataset"
+        task_config["benchmark"]["perf"].update(
+            {
+                "dataset_conf": "custom_dataset_gen",
+                "dataset_path": "/workspace/xtask/datasets/custom/log_request.jsonl",
+                "num_prompts": num_prompts,
+                "warmup_paras": warmup_paras,
+            }
+        )
+        return task_config
+
+    def test_custom_dataset_warmup_paras_is_optional(self):
+        from xtask.datasets.dataset_manger import parse_custom_dataset_warmup_paras
+
+        task_config = self._custom_warmup_task_config(warmup_paras=None)
+        task_config["benchmark"]["perf"].pop("warmup_paras", None)
+        self.assertIsNone(parse_custom_dataset_warmup_paras(task_config))
+
+    def test_custom_dataset_warmup_paras_requires_mapping_and_num_prompts(self):
+        from xtask.datasets.dataset_manger import parse_custom_dataset_warmup_paras
+
+        with self.assertRaisesRegex(ValueError, "warmup_paras must be a mapping"):
+            parse_custom_dataset_warmup_paras(
+                self._custom_warmup_task_config(warmup_paras="10")
+            )
+        with self.assertRaisesRegex(ValueError, "warmup_paras.num_prompts"):
+            parse_custom_dataset_warmup_paras(
+                self._custom_warmup_task_config(warmup_paras={"batch_size": 1})
+            )
+        with self.assertRaisesRegex(ValueError, "warmup_paras.num_prompts"):
+            parse_custom_dataset_warmup_paras(
+                self._custom_warmup_task_config(warmup_paras={"num_prompts": 0})
+            )
+        with self.assertRaisesRegex(ValueError, "warmup_paras.dataset_path"):
+            parse_custom_dataset_warmup_paras(
+                self._custom_warmup_task_config(
+                    warmup_paras={"num_prompts": 10, "dataset_path": "  "}
+                )
+            )
+
+    def test_custom_dataset_warmup_paras_rejects_invalid_during_preprocess(self):
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._custom_warmup_task_config(
+            warmup_paras={"num_prompts": 0}
+        )
+        with self.assertRaisesRegex(ValueError, "warmup_paras.num_prompts"):
+            preprocess_dataset(
+                "custom_dataset", task_config, "/tmp/xtask-custom-warmup"
+            )
+
+    def test_custom_dataset_warmup_overlay_repeats_jsonl_to_warmup_num_prompts(self):
+        from xtask.core.scheduler import _build_warmup_task_config
+        from xtask.datasets.dataset_manger import preprocess_dataset
+
+        task_config = self._custom_warmup_task_config(
+            warmup_paras={
+                "dataset_path": "/workspace/xtask/datasets/custom/log_request_warmup.jsonl",
+                "num_prompts": 10,
+                "batch_size": 1,
+                "request_rate": 0,
+            }
+        )
+        warmup_task_config, _ = _build_warmup_task_config(task_config)
+        with mock.patch(
+            "xtask.utils.container_manager.path_mapping_in_container",
+            side_effect=lambda path: path,
+        ):
+            commands, dataset_conf = preprocess_dataset(
+                "custom_dataset",
+                warmup_task_config,
+                "/tmp/xtask-custom-warmup",
+            )
+
+        command_text = "\n".join(commands)
+        self.assertEqual(dataset_conf, "custom_dataset_gen")
+        self.assertNotIn("warmup_paras", warmup_task_config["benchmark"]["perf"])
+        self.assertIn("--num-prompts 10", command_text)
+        self.assertIn(
+            "/workspace/xtask/datasets/custom/log_request_warmup.jsonl",
+            command_text,
+        )
+        self.assertIn(
+            "/tmp/xtask-custom-warmup/log_request_warmup-n10.jsonl",
+            command_text,
+        )
+        self.assertNotIn("log_request-n200.jsonl", command_text)
+
+    def test_custom_dataset_warmup_script_uses_isolated_config_dir(self):
+        from xtask.core import scheduler
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory) / "output"
+            output_dir.mkdir()
+            task_config = self._custom_warmup_task_config(
+                warmup_paras={
+                    "dataset_path": "/workspace/xtask/datasets/custom/log_request_warmup.jsonl",
+                    "num_prompts": 10,
+                    "batch_size": 1,
+                    "request_rate": 0,
+                }
+            )
+            task_config["benchmark"]["perf"]["api_type"] = "vllm_api_stream_chat"
+            task_config["benchmark"]["perf"]["num_warmups"] = 5
+
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "_aisbench_dataset_config_roots", return_value=[]
+            ), mock.patch(
+                "xtask.utils.container_manager.path_mapping_in_container",
+                side_effect=lambda path: path,
+            ):
+                command = scheduler._build_warmup_command(task_config, str(output_dir))
+
+            script = (output_dir / "run_aisbench_warmup.sh").read_text(
+                encoding="utf-8"
+            )
+            dataset_config = (
+                output_dir
+                / "aisbench_configs_warmup"
+                / "datasets"
+                / "xtask_custom_dataset_gen.py"
+            ).read_text(encoding="utf-8")
+
+        self.assertIn("run_aisbench_warmup.sh", command)
+        self.assertIn("aisbench_configs_warmup", script)
+        self.assertIn("--num-prompts 10", script)
+        self.assertIn("--num-warmups 0", script)
+        self.assertIn("log_request_warmup-n10.jsonl", script)
+        self.assertIn("log_request_warmup-n10.jsonl", dataset_config)
+        self.assertFalse((output_dir / "aisbench_configs").exists())
+
+    def test_should_run_perf_warmup_only_for_evalscope_or_custom_dataset(self):
+        from xtask.core.scheduler import _should_run_perf_warmup
+
+        evalscope = self._task_config()
+        evalscope["benchmark"]["benchmark_type"] = "evalscope"
+        evalscope["benchmark"]["perf"]["warmup_paras"] = {"num_prompts": 20}
+        self.assertTrue(_should_run_perf_warmup(evalscope))
+
+        gsm8k = self._task_config()
+        gsm8k["benchmark"]["perf"]["warmup_paras"] = {"num_prompts": 10}
+        self.assertFalse(_should_run_perf_warmup(gsm8k))
+
+        custom = self._custom_warmup_task_config(
+            warmup_paras={"num_prompts": 10}
+        )
+        self.assertTrue(_should_run_perf_warmup(custom))
+
+        custom_without = self._custom_warmup_task_config(warmup_paras=None)
+        custom_without["benchmark"]["perf"].pop("warmup_paras", None)
+        self.assertFalse(_should_run_perf_warmup(custom_without))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -114,6 +114,30 @@ class EvalscopeScriptGenerationTests(unittest.TestCase):
         self.assertIn(f"--outputs-dir {second}", second_script)
         self.assertNotIn(f"--outputs-dir {first}", second_script)
 
+    def test_evalscope_warmup_command_still_uses_overlayed_num_prompts(self):
+        from xtask.core.scheduler import _build_warmup_command
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory)
+            task_config = self._task_config()
+            task_config["benchmark"]["perf"]["warmup_paras"] = {
+                "num_prompts": 20,
+                "batch_size": 10,
+                "request_rate": 10,
+            }
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ):
+                command = _build_warmup_command(task_config, str(output_dir))
+            script = (output_dir / "run_evalscope_warmup.sh").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("run_evalscope_warmup.sh", command)
+        self.assertIn("--number 20", script)
+        self.assertIn("--parallel 10", script)
+        self.assertIn("--rate 10", script)
+
 
 if __name__ == "__main__":
     unittest.main()

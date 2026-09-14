@@ -16,7 +16,7 @@ from xtask.core.result_workbook import (
 
 
 class FakePerfResult:
-    def __init__(self, throughput=100.0):
+    def __init__(self, throughput=100.0, **summary_fields):
         self.parameters = {
             "TTFT": {
                 "total": SimpleNamespace(
@@ -46,6 +46,8 @@ class FakePerfResult:
             input_tokens_avg=1024,
             ttft_p90=120.0,
         )
+        for name, value in summary_fields.items():
+            setattr(self.summary, name, value)
         self.metadata = {"should_not_be_exported": True}
         self.throughput = throughput
 
@@ -86,6 +88,234 @@ class VerifyResultTests(unittest.TestCase):
         }
 
         self.assertTrue(result_processor.verify_result(result, self._config()))
+
+    def test_legacy_perf_baseline_band_still_works(self):
+        result = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(100),
+        }
+        self.assertTrue(
+            result_processor.verify_result(result, self._config(baseline=100))
+        )
+        self.assertFalse(
+            result_processor.verify_result(result, self._config(baseline=200))
+        )
+
+    def test_baseline_metrics_band_matches_legacy(self):
+        result = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(100),
+        }
+        config = {
+            "metrics": "perf",
+            "benchmark": {
+                "perf": {
+                    "baseline_metrics": [
+                        {
+                            "metric": "output_tps_avg",
+                            "baseline": 100,
+                            "threshold": 0.1,
+                        }
+                    ]
+                }
+            },
+        }
+        self.assertTrue(result_processor.verify_result(result, config))
+        config["benchmark"]["perf"]["baseline_metrics"][0]["baseline"] = 200
+        self.assertFalse(result_processor.verify_result(result, config))
+
+    def test_baseline_metrics_list_wins_over_top_level(self):
+        result = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(50),
+        }
+        config = {
+            "metrics": "perf",
+            "benchmark": {
+                "perf": {
+                    "baseline": 100,
+                    "threshold": 0.1,
+                    "baseline_metrics": [
+                        {
+                            "metric": "output_tps_avg",
+                            "baseline": 50,
+                            "threshold": 0.1,
+                        }
+                    ],
+                }
+            },
+        }
+        self.assertTrue(result_processor.verify_result(result, config))
+        config["benchmark"]["perf"]["baseline_metrics"][0]["baseline"] = 100
+        self.assertFalse(result_processor.verify_result(result, config))
+
+    def test_lte_on_e2el_avg(self):
+        config = {
+            "metrics": "perf",
+            "benchmark": {
+                "perf": {
+                    "baseline_metrics": [
+                        {"metric": "e2el_avg", "baseline": 418, "compare": "lte"}
+                    ]
+                }
+            },
+        }
+        passing = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(100, e2el_avg=418),
+        }
+        failing = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(100, e2el_avg=419),
+        }
+        self.assertTrue(result_processor.verify_result(passing, config))
+        self.assertFalse(result_processor.verify_result(failing, config))
+
+    def test_and_of_two_metrics(self):
+        config = {
+            "metrics": "perf",
+            "benchmark": {
+                "perf": {
+                    "baseline_metrics": [
+                        {
+                            "metric": "output_tps_avg",
+                            "baseline": 100,
+                            "threshold": 0.1,
+                        },
+                        {"metric": "e2el_avg", "baseline": 418, "compare": "lte"},
+                    ]
+                }
+            },
+        }
+        passing = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(100, e2el_avg=400),
+        }
+        tps_fail = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(50, e2el_avg=400),
+        }
+        latency_fail = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(100, e2el_avg=500),
+        }
+        self.assertTrue(result_processor.verify_result(passing, config))
+        self.assertFalse(result_processor.verify_result(tps_fail, config))
+        self.assertFalse(result_processor.verify_result(latency_fail, config))
+
+    def test_threshold_and_relational_compare_is_config_error(self):
+        result = {
+            "benchmark_success": True,
+            "benchmark_perf_result": FakePerfResult(100, e2el_avg=100),
+        }
+        config = {
+            "metrics": "perf",
+            "benchmark": {
+                "perf": {
+                    "baseline_metrics": [
+                        {
+                            "metric": "e2el_avg",
+                            "baseline": 418,
+                            "threshold": 0.1,
+                            "compare": "lt",
+                        }
+                    ]
+                }
+            },
+        }
+        self.assertFalse(result_processor.verify_result(result, config))
+
+    def test_acc_baseline_is_unchanged(self):
+        config = {
+            "metrics": "acc",
+            "benchmark": {
+                "acc": {"baseline": 0.8, "threshold": 0.1},
+                "perf": {
+                    "baseline_metrics": [
+                        {"metric": "e2el_avg", "baseline": 1, "compare": "lte"}
+                    ]
+                },
+            },
+        }
+        passing = {"benchmark_success": True, "benchmark_acc_result": 0.85}
+        failing = {"benchmark_success": True, "benchmark_acc_result": 0.5}
+        self.assertTrue(result_processor.verify_result(passing, config))
+        self.assertFalse(result_processor.verify_result(failing, config))
+
+
+class ParsePerfBaselineRulesTests(unittest.TestCase):
+    def test_omitted_list_uses_legacy_output_tps_avg_band(self):
+        rules = result_processor.parse_perf_baseline_rules(
+            {"baseline": 100, "threshold": 0.1}
+        )
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["metric"], "output_tps_avg")
+        self.assertEqual(rules[0]["compare"], "band")
+        self.assertEqual(rules[0]["baseline"], 100)
+        self.assertEqual(rules[0]["threshold"], 0.1)
+
+    def test_empty_list_falls_back_to_legacy(self):
+        rules = result_processor.parse_perf_baseline_rules(
+            {"baseline": 100, "threshold": 0.1, "baseline_metrics": []}
+        )
+        self.assertEqual(rules[0]["metric"], "output_tps_avg")
+        self.assertEqual(rules[0]["baseline"], 100)
+
+    def test_non_empty_list_ignores_top_level_baseline(self):
+        rules = result_processor.parse_perf_baseline_rules(
+            {
+                "baseline": 999,
+                "threshold": 0.5,
+                "baseline_metrics": [
+                    {"metric": "e2el_avg", "baseline": 418, "compare": "gte"}
+                ],
+            }
+        )
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["metric"], "e2el_avg")
+        self.assertEqual(rules[0]["compare"], "gte")
+        self.assertEqual(rules[0]["baseline"], 418)
+        self.assertIsNone(rules[0]["threshold"])
+
+    def test_threshold_zero_is_exact_band(self):
+        rules = result_processor.parse_perf_baseline_rules(
+            {
+                "baseline_metrics": [
+                    {
+                        "metric": "output_tps_avg",
+                        "baseline": 100,
+                        "threshold": 0,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(rules[0]["threshold"], 0)
+        self.assertTrue(
+            result_processor._perf_rule_holds(100, rules[0])
+        )
+        self.assertFalse(
+            result_processor._perf_rule_holds(100.1, rules[0])
+        )
+
+    def test_bool_baseline_is_rejected(self):
+        with self.assertRaises(ValueError):
+            result_processor.parse_perf_baseline_rules(
+                {
+                    "baseline_metrics": [
+                        {"metric": "output_tps_avg", "baseline": True, "threshold": 0.1}
+                    ]
+                }
+            )
+
+    def test_unknown_metric_is_rejected(self):
+        with self.assertRaises(ValueError):
+            result_processor.parse_perf_baseline_rules(
+                {
+                    "baseline_metrics": [
+                        {"metric": "not_a_field", "baseline": 1, "compare": "lt"}
+                    ]
+                }
+            )
 
 
 class WriteResultTests(unittest.TestCase):
@@ -440,6 +670,52 @@ class WriteResultTests(unittest.TestCase):
         self.assertEqual(model_summary[result_processor.FAILURE_XLLM], 1)
         self.assertEqual(model_summary[result_processor.FAILURE_BASELINE], 1)
         self.assertEqual(model_summary[result_processor.FAILURE_OTHER], 1)
+
+    def test_metrics_only_failure_classified_as_baseline(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(
+            result_processor.os, "getcwd", return_value=root
+        ):
+            source = self._source_case(root)
+            config = {
+                "case_name": "case-a",
+                "engine_type": "xllm",
+                "metrics": "perf",
+                "host_addr": "11.87.191.75",
+                "benchmark": {
+                    "benchmark_type": "aisbench",
+                    "perf": {
+                        "baseline_metrics": [
+                            {
+                                "metric": "output_tps_avg",
+                                "baseline": 100,
+                                "threshold": 0.1,
+                            },
+                            {
+                                "metric": "e2el_avg",
+                                "baseline": 418,
+                                "compare": "lte",
+                            },
+                        ]
+                    },
+                },
+            }
+            failure = self._result(
+                config,
+                success=False,
+                perf=FakePerfResult(50, e2el_avg=500),
+            )
+            result_processor.write_result(failure, config, task_path=str(source))
+            rows = self._sheet_rows(
+                Path(root) / "outputs" / "result.xlsx", "qwen3_8b"
+            )
+
+        self.assertEqual(rows[0]["failure_category"], result_processor.FAILURE_BASELINE)
+        self.assertIn("output_tps_avg=50", rows[0]["failure_reason"])
+        self.assertIn("e2el_avg=500", rows[0]["failure_reason"])
+        self.assertIn("compare=lte", rows[0]["failure_reason"])
+        self.assertIn("output_tps_avg: actual=50.0000", rows[0]["baseline_difference"])
+        self.assertIn("e2el_avg: actual=500.0000", rows[0]["baseline_difference"])
+        self.assertIn("compare=lte", rows[0]["baseline_difference"])
 
     def test_failure_reason_with_control_characters_is_written(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(

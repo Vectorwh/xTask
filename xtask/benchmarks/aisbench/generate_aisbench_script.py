@@ -11,8 +11,10 @@ from xtask.utils.container_manager import path_mapping_in_container
 from xtask.utils.config_parser import get_xtask_config_data
 from xtask.datasets.dataset_downloader import download_dataset
 from xtask.datasets.dataset_manger import (
+    get_custom_dataset_output_path,
     get_sharegpt_fixed_output_path,
     get_sharegpt_prefix_cache_output_path,
+    is_custom_dataset_enabled,
     is_sharegpt_prefix_cache_enabled,
     is_sharegpt_fixed_length_enabled,
     preprocess_dataset,
@@ -72,8 +74,12 @@ def _aisbench_dataset_config_roots():
     yield Path(__file__).resolve().parents[3] / "benchmark"
 
 
+def _xtask_aisbench_dataset_config_root():
+    return Path(__file__).resolve().parent / "configs" / "datasets"
+
+
 def find_aisbench_dataset_config(dataset_conf):
-    """Find one bundled AISBench dataset config by its command-line name."""
+    """Find one AISBench dataset config by its command-line name."""
     dataset_conf, _ = _split_dataset_config_reference(dataset_conf)
     relative_root = Path("ais_bench/benchmark/configs/datasets")
     for root in _aisbench_dataset_config_roots():
@@ -93,9 +99,23 @@ def find_aisbench_dataset_config(dataset_conf):
             raise ValueError(
                 f"AISBench dataset config {dataset_conf!r} is ambiguous under {config_root}"
             )
+    xtask_root = _xtask_aisbench_dataset_config_root()
+    try:
+        if xtask_root.is_dir():
+            matches = sorted(xtask_root.rglob(f"{dataset_conf}.py"))
+        else:
+            matches = []
+    except PermissionError:
+        matches = []
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"AISBench dataset config {dataset_conf!r} is ambiguous under {xtask_root}"
+        )
     raise FileNotFoundError(
         f"AISBench dataset config {dataset_conf!r} was not found in the configured "
-        "AISBench source or the bundled benchmark tree"
+        "AISBench source, the bundled benchmark tree, or xTask AISBench dataset configs"
     )
 
 
@@ -218,6 +238,7 @@ def create_dataset_config_override(
     output_file_path,
     infer_mode=None,
     use_xtask_last_inferencer=False,
+    config_dir_name="aisbench_configs",
 ):
     """Create an isolated AISBench dataset config for per-case overrides."""
     config_name, config_suffix = _split_dataset_config_reference(dataset_conf)
@@ -252,7 +273,8 @@ def create_dataset_config_override(
         _add_last_inferencer_import(tree)
 
     custom_name = f"xtask_{config_name}"
-    custom_dir = Path(output_file_path) / "aisbench_configs" / "datasets"
+    config_dir_name = _validate_config_name(config_dir_name, "config_dir_name")
+    custom_dir = Path(output_file_path) / config_dir_name / "datasets"
     custom_dir.mkdir(parents=True, exist_ok=True)
     custom_config = custom_dir / f"{custom_name}.py"
     custom_config.write_text(
@@ -345,7 +367,8 @@ def generate_aisbench_script(
     task_config: Dict,
     output_file_path: str,
     output_shell_file: str = "run_aisbench_test.sh",
-    python_exec: str = "python3"  # 指定python解释器路径，适配不同环境
+    python_exec: str = "python3",
+    config_dir_name: str = "aisbench_configs",
 ) -> None:
     """
     生成ais-bench测试的shell脚本，包含配置修改、精度/性能测试命令生成
@@ -356,6 +379,7 @@ def generate_aisbench_script(
         python_exec: Python解释器路径（如python/python3/anaconda3/bin/python）
     """
     #output_file_path = os.path.join(os.getcwd(), "outputs", f"{task_config.get('case_name').lower()}")
+    config_dir_name = _validate_config_name(config_dir_name, "config_dir_name")
     output_file_path_incontainer = path_mapping_in_container(output_file_path)
     output_shell_path = os.path.join(output_file_path, output_shell_file)
     output_shell_path_incontainer = path_mapping_in_container(output_shell_path)
@@ -388,7 +412,7 @@ def generate_aisbench_script(
     shell_content.append('    exit 1')
     shell_content.append('fi')
     shell_content.append('echo "ais_bench安装路径：$AIS_BENCH_PATH"')
-    shell_content.append(f'AIS_BENCH_CONFIG_DIR="{output_file_path_incontainer}/aisbench_configs"')
+    shell_content.append(f'AIS_BENCH_CONFIG_DIR="{output_file_path_incontainer}/{config_dir_name}"')
     shell_content.append('mkdir -p "$AIS_BENCH_CONFIG_DIR/models" "$AIS_BENCH_CONFIG_DIR/datasets"')
 
     download_cmd = download_dataset(task_config)
@@ -438,7 +462,10 @@ def generate_aisbench_script(
         # metrics_str = ",".join(accuracy_metrics)
         dataset_conf = accuracy_cfg.get("dataset_conf") or dataset_name
         dataset_conf = create_dataset_config_override(
-            dataset_conf, dataset_path, output_file_path
+            dataset_conf,
+            dataset_path,
+            output_file_path,
+            config_dir_name=config_dir_name,
         )
         append_dataset_path_check(shell_content, dataset_path)
         # accuracy_metrics = accuracy_cfg.get("metrics", ["bleu", "rouge"])
@@ -608,6 +635,7 @@ def generate_aisbench_script(
                 output_file_path,
                 infer_mode=sharegpt_infer_mode,
                 use_xtask_last_inferencer=sharegpt_infer_mode == "last",
+                config_dir_name=config_dir_name,
             )
             if sharegpt_infer_mode == "last":
                 append_xtask_pythonpath(shell_content)
@@ -621,8 +649,20 @@ def generate_aisbench_script(
                 output_file_path,
                 infer_mode="last",
                 use_xtask_last_inferencer=True,
+                config_dir_name=config_dir_name,
             )
             append_xtask_pythonpath(shell_content)
+        elif is_custom_dataset_enabled(dataset_name, task_config):
+            generated_dataset_path = get_custom_dataset_output_path(
+                task_config, output_file_path
+            )
+            dataset_conf_type = create_dataset_config_override(
+                dataset_conf_type,
+                generated_dataset_path,
+                output_file_path,
+                config_dir_name=config_dir_name,
+            )
+            append_dataset_path_check(shell_content, dataset_path)
         elif not preprocessed_dataset_conf and dataset_name != "syn":
             dataset_conf_type = create_dataset_config_override(
                 dataset_conf_type,
@@ -630,6 +670,7 @@ def generate_aisbench_script(
                 output_file_path,
                 infer_mode=sharegpt_infer_mode,
                 use_xtask_last_inferencer=sharegpt_infer_mode == "last",
+                config_dir_name=config_dir_name,
             )
             if sharegpt_infer_mode == "last":
                 append_xtask_pythonpath(shell_content)

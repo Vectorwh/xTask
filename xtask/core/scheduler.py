@@ -483,11 +483,54 @@ def find_benchmark_rst_directory(directory_path=".", init_entries=list()):
     
     return date_dirs
 
+def _should_run_perf_warmup(task_config):
+    benchmark = task_config.get("benchmark") or {}
+    perf_cfg = benchmark.get("perf") or {}
+    if not perf_cfg.get("warmup_paras"):
+        return False
+    if benchmark.get("benchmark_type") == "evalscope":
+        return True
+    if benchmark.get("benchmark_type") == "aisbench":
+        from xtask.datasets.dataset_manger import is_custom_dataset_warmup_enabled
+
+        return is_custom_dataset_warmup_enabled(
+            task_config.get("dataset_name"), task_config
+        )
+    return False
+
+
+def _build_warmup_task_config(task_config):
+    """Copy formal perf config and overlay warmup_paras, matching EvalScope."""
+    warmup_task_config = copy.deepcopy(task_config)
+    warmup_paras = (task_config.get("benchmark") or {}).get("perf", {}).get(
+        "warmup_paras", {}
+    ) or {}
+    warmup_task_config["benchmark"]["perf"].update(warmup_paras)
+    warmup_task_config["benchmark"]["perf"].pop("warmup_paras", None)
+    return warmup_task_config, warmup_paras
+
+
 def _build_warmup_command(task_config, output_file_path):
     """构建预热命令：深拷贝配置并合并 warmup 参数"""
-    warmup_task_config = copy.deepcopy(task_config)
-    warmup_paras = task_config["benchmark"]["perf"].get("warmup_paras", {})
-    warmup_task_config["benchmark"]["perf"].update(warmup_paras)
+    warmup_task_config, warmup_paras = _build_warmup_task_config(task_config)
+    benchmark_type = (task_config.get("benchmark") or {}).get("benchmark_type")
+    if benchmark_type == "aisbench":
+        from xtask.benchmarks.aisbench.generate_aisbench_script import (
+            generate_aisbench_script,
+        )
+        from xtask.datasets.dataset_manger import is_custom_dataset_enabled
+
+        if is_custom_dataset_enabled(
+            task_config.get("dataset_name"), task_config
+        ) and "num_warmups" not in warmup_paras:
+            warmup_task_config["benchmark"]["perf"]["num_warmups"] = 0
+        return generate_aisbench_script(
+            task_config=warmup_task_config,
+            output_file_path=output_file_path,
+            output_shell_file="run_aisbench_warmup.sh",
+            python_exec="python",
+            config_dir_name="aisbench_configs_warmup",
+        )
 
     from xtask.benchmarks.evalscope.generate_evalscope_script import generate_evalscope_script
     return generate_evalscope_script(
@@ -2810,11 +2853,7 @@ def _run_benchmark_and_process(context):
 
     benchmark_result = None
     if benchmark_cmd:
-        perf_cfg = task_config.get("benchmark").get("perf", {})
-        if (
-            task_config.get("benchmark").get("benchmark_type") == "evalscope"
-            and perf_cfg.get("warmup_paras")
-        ):
+        if _should_run_perf_warmup(task_config):
             warmup_cmd = _build_warmup_command(task_config, context.output_file_path)
             _execute_warmup(
                 container_manager, container_config, engine_config, warmup_cmd

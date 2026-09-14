@@ -5,6 +5,11 @@ import shlex
 DEFAULT_SHAREGPT_DATASET = (
     "$AIS_BENCH_PATH/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json"
 )
+CUSTOM_DATASET_NAMES = frozenset({"custom", "custom_dataset"})
+DEFAULT_CUSTOM_DATASET_CONF = "custom_dataset_gen"
+RESERVED_DATASET_NAMES = frozenset(
+    {"gsm8k", "sharegpt", "ceavl", "syn", "textvqa"}
+)
 
 
 def _perf_config(task_config):
@@ -41,6 +46,84 @@ def get_sharegpt_fixed_output_path(task_config, output_path):
     num_prompts = perf_config.get("num_prompts", perf_config.get("batch_size"))
     return os.path.join(
         output_path, f"ShareGPT-in{input_len}-n{num_prompts}-last.json"
+    )
+
+
+def is_custom_dataset_enabled(dataset_name, task_config):
+    """AISBench custom jsonl path: dataset_name custom/custom_dataset, not a reserved pipeline."""
+    name = str(dataset_name or "").lower()
+    if name not in CUSTOM_DATASET_NAMES or name in RESERVED_DATASET_NAMES:
+        return False
+    benchmark = task_config.get("benchmark") or {}
+    return benchmark.get("benchmark_type") == "aisbench"
+
+
+def _custom_dataset_source(task_config):
+    return str(
+        _perf_config(task_config).get("dataset_path")
+        or task_config.get("dataset_path")
+        or ""
+    )
+
+
+def _custom_dataset_conf(task_config):
+    configured = str(_perf_config(task_config).get("dataset_conf") or "").strip()
+    if not configured:
+        return DEFAULT_CUSTOM_DATASET_CONF
+    lowered = configured.lower()
+    reserved_prefixes = ("gsm8k", "sharegpt", "synthetic", "ceval", "ceavl", "textvqa")
+    if any(lowered.startswith(prefix) for prefix in reserved_prefixes):
+        return DEFAULT_CUSTOM_DATASET_CONF
+    return configured
+
+
+def get_custom_dataset_output_path(task_config, output_path):
+    perf_config = _perf_config(task_config)
+    num_prompts = perf_config.get("num_prompts", perf_config.get("batch_size"))
+    source = _custom_dataset_source(task_config)
+    stem = os.path.splitext(os.path.basename(source.rstrip("/")))[0] or "custom_dataset"
+    return os.path.join(output_path, f"{stem}-n{num_prompts}.jsonl")
+
+
+def _require_positive_int(value, field_name):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return value
+
+
+def parse_custom_dataset_warmup_paras(task_config):
+    """Validate EvalScope-style warmup_paras for AISBench custom datasets.
+
+    Missing or empty warmup_paras is opt-in and returns None. When present it
+    must be a mapping with a positive num_prompts; dataset_path is optional and
+    overlays the formal jsonl for the warmup run. Repeat/pad uses the existing
+    custom-dataset num_prompts path after overlay.
+    """
+    warmup_paras = _perf_config(task_config).get("warmup_paras")
+    if not warmup_paras:
+        return None
+    if not isinstance(warmup_paras, dict):
+        raise ValueError(
+            "custom dataset benchmark.perf.warmup_paras must be a mapping"
+        )
+    _require_positive_int(
+        warmup_paras.get("num_prompts"),
+        "custom dataset benchmark.perf.warmup_paras.num_prompts",
+    )
+    if "dataset_path" in warmup_paras:
+        dataset_path = warmup_paras.get("dataset_path")
+        if not str(dataset_path or "").strip():
+            raise ValueError(
+                "custom dataset benchmark.perf.warmup_paras.dataset_path "
+                "must be a non-empty path"
+            )
+    return warmup_paras
+
+
+def is_custom_dataset_warmup_enabled(dataset_name, task_config):
+    return (
+        is_custom_dataset_enabled(dataset_name, task_config)
+        and parse_custom_dataset_warmup_paras(task_config) is not None
     )
 
 
@@ -85,6 +168,10 @@ def preprocess_dataset(dataset_name, task_config, output_path):
         )
     elif dataset_name == "ceavl" and benchmark_type == "aisbench":
         process_dataset_cmd, dataset_conf_type = preprocess_ceavl(process_dataset_cmd, task_config, output_path)
+    elif is_custom_dataset_enabled(dataset_name, task_config):
+        process_dataset_cmd, dataset_conf_type = preprocess_custom_dataset(
+            process_dataset_cmd, task_config, output_path
+        )
 
     return process_dataset_cmd, dataset_conf_type
 
@@ -118,6 +205,56 @@ def preprocess_gsm8k(process_dataset_cmd, task_config, output_path):
     # 拷贝生成的固定长度数据集到ais_bench数据集目录
     process_dataset_cmd.append(f'cp -f {output_file_path} $AIS_BENCH_PATH/datasets/gsm8k/test.jsonl')
 
+    return process_dataset_cmd, dataset_conf_type
+
+
+def preprocess_custom_dataset(process_dataset_cmd, task_config, output_path):
+    """Repeat a local custom jsonl to exactly num_prompts, like gsm8k padding."""
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    perf_config = _perf_config(task_config)
+    batch_size = perf_config.get("batch_size")
+    num_prompts = perf_config.get("num_prompts", batch_size)
+    _require_positive_int(
+        num_prompts, "custom dataset benchmark.perf.num_prompts"
+    )
+    parse_custom_dataset_warmup_paras(task_config)
+    source = _custom_dataset_source(task_config)
+    if not source:
+        raise ValueError(
+            "custom dataset requires benchmark.perf.dataset_path or dataset_path"
+        )
+
+    source_inside = path_mapping_in_container(str(source))
+    output_path_in_container = path_mapping_in_container(output_path)
+    output_file = path_mapping_in_container(
+        get_custom_dataset_output_path(task_config, output_path)
+    )
+    process_file = os.path.join(output_path_in_container, "repeat_jsonl.py")
+    quoted_source = shlex.quote(source_inside)
+    quoted_output = shlex.quote(output_file)
+    quoted_process = shlex.quote(process_file)
+
+    process_dataset_cmd.append('\necho "按 num_prompts 重复拼接自定义数据集 jsonl"')
+    process_dataset_cmd.append(
+        "cp -f /workspace/xtask/datasets/custom/repeat_jsonl.py "
+        f"{quoted_process}"
+    )
+    process_dataset_cmd.extend(
+        [
+            f"if [ ! -f {quoted_source} ]; then",
+            f'    echo "错误：自定义数据集不存在 {source_inside}" >&2',
+            "    exit 1",
+            "fi",
+            "if ! python "
+            f"{quoted_process} --source {quoted_source} "
+            f"--output {quoted_output} --num-prompts {num_prompts}; then",
+            '    echo "错误：自定义数据集按 num_prompts 拼接失败" >&2',
+            "    exit 1",
+            "fi",
+        ]
+    )
+    dataset_conf_type = _custom_dataset_conf(task_config)
     return process_dataset_cmd, dataset_conf_type
 
 

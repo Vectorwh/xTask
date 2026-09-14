@@ -3,10 +3,12 @@ import json
 import logging
 import math
 import os
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from xtask.benchmarks.base_benchmark import ResultSummary
 from xtask.core.model_identity import resolve_model_name, resolve_source_yaml
 from xtask.core.result_workbook import (
     MISSING_ACCURACY,
@@ -44,6 +46,11 @@ FAILURE_OTHER = "其他异常"
 CHINA_STANDARD_TIME = timezone(timedelta(hours=8))
 CASE_GROUP_WORKBOOK_PATH_ATTR = "_xtask_case_group_result_path"
 CASE_GROUP_WORKBOOK_INITIALIZED_ATTR = "_xtask_case_group_result_initialized"
+DEFAULT_PERF_BASELINE_METRIC = "output_tps_avg"
+PERF_BASELINE_METRICS = frozenset(field.name for field in fields(ResultSummary))
+PERF_BAND_COMPARE = "band"
+PERF_RELATIONAL_COMPARES = frozenset({"lt", "lte", "gt", "gte"})
+PERF_ALLOWED_COMPARES = frozenset({PERF_BAND_COMPARE}) | PERF_RELATIONAL_COMPARES
 
 
 def check_accuracy_within_threshold(baseline, threshold, result_value):
@@ -89,6 +96,304 @@ def check_accuracy_within_threshold(baseline, threshold, result_value):
         else:
             logging.error(f"✗ Test failed: Actual value {result_value:.4f} is above upper bound {upper_bound:.4f} ({deviation:.2f}%)")
         return ret
+
+
+def _as_positive_number(value, field_name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a positive number")
+    if value <= 0:
+        raise ValueError(f"{field_name} must be a positive number")
+    return value
+
+
+def _as_threshold(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("threshold must be a decimal between 0-1")
+    if value < 0 or value > 1:
+        raise ValueError("threshold must be a decimal between 0-1")
+    return float(value)
+
+
+def _perf_config(task_config):
+    return ((task_config.get("benchmark") or {}).get("perf") or {})
+
+
+def _has_perf_baseline_gate(perf_config):
+    if not isinstance(perf_config, Mapping):
+        return False
+    metrics = perf_config.get("baseline_metrics")
+    if isinstance(metrics, list) and metrics:
+        return True
+    return bool(perf_config.get("baseline"))
+
+
+def _parse_one_perf_baseline_rule(item, index):
+    if not isinstance(item, Mapping):
+        raise ValueError(f"baseline_metrics[{index}] must be a mapping")
+    metric = str(item.get("metric") or "").strip()
+    if metric not in PERF_BASELINE_METRICS:
+        raise ValueError(
+            f"baseline_metrics[{index}].metric must be one of: "
+            f"{', '.join(sorted(PERF_BASELINE_METRICS))}"
+        )
+    baseline = _as_positive_number(
+        item.get("baseline"), f"baseline_metrics[{index}].baseline"
+    )
+    compare_raw = item.get("compare")
+    threshold_raw = item.get("threshold")
+    has_compare = compare_raw not in (None, "")
+    has_threshold = threshold_raw is not None and threshold_raw != ""
+    if has_compare:
+        compare = str(compare_raw).strip().lower()
+        if compare not in PERF_ALLOWED_COMPARES:
+            raise ValueError(
+                f"baseline_metrics[{index}].compare must be one of: "
+                f"{', '.join(sorted(PERF_ALLOWED_COMPARES))}"
+            )
+    else:
+        compare = PERF_BAND_COMPARE if has_threshold else None
+    if compare is None:
+        raise ValueError(
+            f"baseline_metrics[{index}] must set threshold or compare"
+        )
+    if compare in PERF_RELATIONAL_COMPARES:
+        if has_threshold:
+            raise ValueError(
+                f"baseline_metrics[{index}] cannot set both threshold and compare"
+            )
+        return {
+            "metric": metric,
+            "baseline": baseline,
+            "compare": compare,
+            "threshold": None,
+        }
+    if not has_threshold:
+        raise ValueError(
+            f"baseline_metrics[{index}] band compare requires threshold"
+        )
+    return {
+        "metric": metric,
+        "baseline": baseline,
+        "compare": PERF_BAND_COMPARE,
+        "threshold": _as_threshold(threshold_raw),
+    }
+
+
+def _legacy_perf_baseline_rule(perf_config):
+    baseline = _as_positive_number(perf_config.get("baseline"), "baseline")
+    threshold = _as_threshold(perf_config.get("threshold"))
+    return {
+        "metric": DEFAULT_PERF_BASELINE_METRIC,
+        "baseline": baseline,
+        "compare": PERF_BAND_COMPARE,
+        "threshold": threshold,
+    }
+
+
+def parse_perf_baseline_rules(perf_config):
+    """Return perf baseline rules. Empty means no gate. Raises ValueError if invalid."""
+    if not isinstance(perf_config, Mapping):
+        return []
+    raw_metrics = perf_config.get("baseline_metrics")
+    if raw_metrics is None:
+        if not perf_config.get("baseline"):
+            return []
+        return [_legacy_perf_baseline_rule(perf_config)]
+    if not isinstance(raw_metrics, list):
+        raise ValueError("benchmark.perf.baseline_metrics must be a list")
+    if not raw_metrics:
+        if not perf_config.get("baseline"):
+            return []
+        return [_legacy_perf_baseline_rule(perf_config)]
+    return [
+        _parse_one_perf_baseline_rule(item, index)
+        for index, item in enumerate(raw_metrics)
+    ]
+
+
+def _perf_rule_actual(summary, metric):
+    if summary is None:
+        return None
+    actual = getattr(summary, metric, None)
+    if isinstance(actual, bool) or not isinstance(actual, (int, float)):
+        return None
+    return actual
+
+
+def _perf_rule_holds(actual, rule):
+    baseline = rule["baseline"]
+    compare = rule["compare"]
+    if compare == PERF_BAND_COMPARE:
+        lower = baseline * (1 - rule["threshold"])
+        upper = baseline * (1 + rule["threshold"])
+        return lower <= actual <= upper
+    if compare == "lt":
+        return actual < baseline
+    if compare == "lte":
+        return actual <= baseline
+    if compare == "gt":
+        return actual > baseline
+    if compare == "gte":
+        return actual >= baseline
+    raise ValueError(f"unsupported compare: {compare}")
+
+
+def _log_perf_rule_result(actual, rule, passed):
+    metric = rule["metric"]
+    baseline = rule["baseline"]
+    if rule["compare"] == PERF_BAND_COMPARE:
+        threshold = rule["threshold"]
+        lower = baseline * (1 - threshold)
+        upper = baseline * (1 + threshold)
+        bound = f"{lower:.4f}, {upper:.4f}"
+        if passed:
+            logging.info(
+                "✓ Test passed: %s %s is within allowed range [%s]",
+                metric,
+                f"{actual:.4f}",
+                bound,
+            )
+            return
+        deviation = ((actual - baseline) / baseline) * 100
+        if actual < lower:
+            logging.error(
+                "✗ Test failed: %s %s is below lower bound %s (%.2f%%)",
+                metric,
+                f"{actual:.4f}",
+                f"{lower:.4f}",
+                deviation,
+            )
+        else:
+            logging.error(
+                "✗ Test failed: %s %s is above upper bound %s (%.2f%%)",
+                metric,
+                f"{actual:.4f}",
+                f"{upper:.4f}",
+                deviation,
+            )
+        return
+    if rule["compare"] == "lt":
+        bound = f"< {baseline:.4f}"
+    elif rule["compare"] == "lte":
+        bound = f"<= {baseline:.4f}"
+    elif rule["compare"] == "gt":
+        bound = f"> {baseline:.4f}"
+    else:
+        bound = f">= {baseline:.4f}"
+    if passed:
+        logging.info(
+            "✓ Test passed: %s %s is within allowed range [%s]",
+            metric,
+            f"{actual:.4f}",
+            bound,
+        )
+    else:
+        logging.error(
+            "✗ Test failed: %s %s does not satisfy %s",
+            metric,
+            f"{actual:.4f}",
+            bound,
+        )
+
+
+def _evaluate_perf_baseline_rules(summary, rules):
+    if not rules:
+        return True
+    if summary is None:
+        return False
+    passed = True
+    for rule in rules:
+        actual = _perf_rule_actual(summary, rule["metric"])
+        if actual is None:
+            logging.error(
+                "✗ Test failed: missing perf summary field %s", rule["metric"]
+            )
+            passed = False
+            continue
+        rule_passed = _perf_rule_holds(actual, rule)
+        _log_perf_rule_result(actual, rule, rule_passed)
+        if not rule_passed:
+            passed = False
+    return passed
+
+
+def _perf_rule_failure_reason(actual, rule):
+    metric = rule["metric"]
+    baseline = rule["baseline"]
+    if rule["compare"] == PERF_BAND_COMPARE:
+        threshold = rule["threshold"]
+        try:
+            lower = baseline * (1 - threshold)
+            upper = baseline * (1 + threshold)
+            return (
+                f"{metric}={actual}, baseline={baseline}, "
+                f"allowed=[{lower:.4f}, {upper:.4f}]"
+            )
+        except (TypeError, ValueError):
+            return (
+                f"{metric}={actual}, baseline={baseline}, threshold={threshold}"
+            )
+    return (
+        f"{metric}={actual}, baseline={baseline}, compare={rule['compare']}"
+    )
+
+
+def _perf_rule_difference(actual, rule):
+    metric = rule["metric"]
+    baseline = rule["baseline"]
+    compare = rule["compare"]
+    try:
+        actual_value = float(actual)
+        baseline_value = float(baseline)
+        difference = actual_value - baseline_value
+        deviation = difference / baseline_value * 100
+    except (TypeError, ValueError, ZeroDivisionError):
+        if compare == PERF_BAND_COMPARE:
+            return (
+                f"{metric}: actual={actual}, baseline={baseline}, "
+                f"threshold={rule.get('threshold')}"
+            )
+        return (
+            f"{metric}: actual={actual}, baseline={baseline}, compare={compare}"
+        )
+    if compare == PERF_BAND_COMPARE:
+        threshold_value = float(rule["threshold"])
+        lower_bound = baseline_value * (1 - threshold_value)
+        upper_bound = baseline_value * (1 + threshold_value)
+        if actual_value < lower_bound:
+            comparison = f"below lower bound {lower_bound:.4f}"
+        elif actual_value > upper_bound:
+            comparison = f"above upper bound {upper_bound:.4f}"
+        else:
+            comparison = (
+                f"within allowed range [{lower_bound:.4f}, {upper_bound:.4f}]"
+            )
+        return (
+            f"{metric}: actual={actual_value:.4f}, "
+            f"baseline={baseline_value:.4f}, difference={difference:+.4f}, "
+            f"deviation={deviation:+.2f}%, {comparison}"
+        )
+    return (
+        f"{metric}: actual={actual_value:.4f}, "
+        f"baseline={baseline_value:.4f}, difference={difference:+.4f}, "
+        f"deviation={deviation:+.2f}%, compare={compare}"
+    )
+
+
+def _failed_perf_baseline_rules(result, task_config):
+    try:
+        rules = parse_perf_baseline_rules(_perf_config(task_config))
+    except ValueError:
+        return None
+    if not rules:
+        return None
+    summary = getattr(result.get("benchmark_perf_result"), "summary", None)
+    failed = []
+    for rule in rules:
+        actual = _perf_rule_actual(summary, rule["metric"])
+        if actual is None or not _perf_rule_holds(actual, rule):
+            failed.append((actual, rule))
+    return failed
 
 
 def verify_result(result, task_config):
@@ -146,13 +451,14 @@ def verify_result(result, task_config):
             logging.error("✗ Test failed: missing perf result summary")
             return False
 
-        baseline = task_config.get("benchmark").get("perf").get("baseline")
-        if baseline:
-            threshold = task_config.get("benchmark").get("perf").get("threshold")
-            benchmark_perf_result = float(perf_result.summary.output_tps_avg)
-            if check_accuracy_within_threshold(baseline, threshold, benchmark_perf_result):
-                return True
-        else:
+        try:
+            rules = parse_perf_baseline_rules(_perf_config(task_config))
+        except ValueError as exc:
+            logging.error("✗ Test failed: invalid perf baseline config: %s", exc)
+            return False
+        if not rules:
+            return True
+        if _evaluate_perf_baseline_rules(perf_result.summary, rules):
             return True
     else:
         return acc_flag
@@ -233,6 +539,8 @@ def _configured_baseline(task_config):
         if not _contains_metric(task_config, metric_name):
             continue
         metric_config = benchmark.get(metric_name) or {}
+        if metric_name == "perf" and _has_perf_baseline_gate(metric_config):
+            return metric_name, metric_config.get("baseline"), metric_config.get("threshold")
         baseline = metric_config.get("baseline")
         if baseline:
             return metric_name, baseline, metric_config.get("threshold")
@@ -274,9 +582,12 @@ def _baseline_failure_reason(result, task_config):
         actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
         metric_label = "vbench_total_score"
     else:
-        summary = getattr(result.get("benchmark_perf_result"), "summary", None)
-        actual = getattr(summary, "output_tps_avg", None)
-        metric_label = "output_tps_avg"
+        failed = _failed_perf_baseline_rules(result, task_config)
+        if not failed:
+            return "Benchmark result verification failed"
+        return "; ".join(
+            _perf_rule_failure_reason(actual, rule) for actual, rule in failed
+        )
     try:
         lower = float(baseline) * (1 - float(threshold))
         upper = float(baseline) * (1 + float(threshold))
@@ -301,9 +612,12 @@ def _baseline_difference(result, task_config):
         actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
         metric_label = "vbench_total_score"
     else:
-        summary = getattr(result.get("benchmark_perf_result"), "summary", None)
-        actual = getattr(summary, "output_tps_avg", None)
-        metric_label = "output_tps_avg"
+        failed = _failed_perf_baseline_rules(result, task_config)
+        if not failed:
+            return ""
+        return "; ".join(
+            _perf_rule_difference(actual, rule) for actual, rule in failed
+        )
 
     try:
         actual_value = float(actual)
@@ -342,8 +656,10 @@ def _baseline_result_failed(result, task_config):
     elif metric_name == "vbench":
         actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
     else:
-        summary = getattr(result.get("benchmark_perf_result"), "summary", None)
-        actual = getattr(summary, "output_tps_avg", None)
+        failed = _failed_perf_baseline_rules(result, task_config)
+        if failed is None:
+            return None
+        return bool(failed)
     try:
         actual_value = float(actual)
         baseline_value = float(baseline)
