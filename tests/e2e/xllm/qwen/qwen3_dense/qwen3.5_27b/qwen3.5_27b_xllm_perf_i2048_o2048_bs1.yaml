@@ -1,33 +1,43 @@
 additional_config: ''
 benchmark:
-  benchmark_type: evalscope
+  benchmark_type: aisbench
   perf:
+    acc_dataset_len: 0
+    api_type: vllm_api_general_stream
     baseline: 89.37
     batch_size: 1
     case_type: performance
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    dataset_path: null
+    dump_eval_details: false
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    input_len: 2048
+    max_num_worker: 1
     max_out_len: 2048
-    max_prompt_length: 2048
-    min_prompt_length: 2048
-    num_prompts: 40
+    merge_ds: false
+    num_prompts: 6
     output_len: 2048
-    request_rate: -1
-    seed: 42
-    stream: true
-    temperature: 0
-    tokenize_prompt: true
-    warmup_num: 10
+    pressure: false
+    request_rate: 1
+    threshold: 0.1
+    num_warmups: 20
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: true
 block_size: 128
 case_name: qwen3.5_27b_xllm_perf_i2048_o2048_bs1
 communication_backend: hccl
 dataset_format: json
-dataset_name: random
+dataset_name: gsm8k
 dataset_path: ''
 engine_type: xllm
 metrics: perf
 model_path: /export/home/models/Qwen3.5-27B
 served_model_name: Qwen3.5-27B
 userid: 1048
-serving_wait_time: 30
+serving_wait_time: 10
 deployment:
   master_host: 11.87.191.121
   benchmark:
