@@ -4,7 +4,7 @@ benchmark:
   perf:
     acc_dataset_len: 0
     api_type: vllm_api_general_stream
-    baseline: 89.37
+    baseline: 110.9108
     batch_size: 1
     case_type: performance
     dataset_conf: gsm8k_gen_0_shot_cot_str_perf

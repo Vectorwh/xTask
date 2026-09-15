@@ -4,7 +4,7 @@ benchmark:
   perf:
     acc_dataset_len: 0
     api_type: vllm_api_stream_chat_multiturn
-    baseline: null
+    baseline: 138.1913
     batch_size: 2
     case_type: performance
     dataset_conf: sharegpt_gen
