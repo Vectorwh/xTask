@@ -8,6 +8,7 @@ set -euo pipefail
 export http_proxy="http://bamboo-proxy.jd.com:80"
 export https_proxy="http://bamboo-proxy.jd.com:80"
 export no_proxy=".jd.com,.jd.local,.local"
+#export no_proxy=".jd.com,.jd.local,.local,repo.openeuler.org,mirrors.openeuler.org,dl-cdn.openeuler.openatom.cn"
 
 # 工作根目录：由外层 prepare_xllm.sh 通过 -e WORK_ROOT 传入（/export/home 已挂载，路径一致）
 if [[ -z "${WORK_ROOT:-}" ]]; then

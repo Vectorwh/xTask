@@ -305,6 +305,10 @@ command -v docker >/dev/null 2>&1 || {
   exit 1
 }
 
+# 容器名带编译时间，避免多人共用机器时 --name 冲突。
+CONTAINER_NAME="xllm_svc_daily_build_$(date +%Y%m%d_%H%M%S)"
+echo "[build-container] name: ${CONTAINER_NAME}"
+
 # The build container sees the same absolute paths through /export/home.
 case "${SERVICE_SOURCE_DIR}" in
   /export/home/*) ;;
@@ -318,7 +322,7 @@ RUN_OPTS=(
   --rm
   -t
   -u 0
-  --name xllm_service_build
+  --name "${CONTAINER_NAME}"
   --privileged
   --ipc=host
   --network=host

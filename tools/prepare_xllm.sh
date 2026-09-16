@@ -163,11 +163,15 @@ IN_CONTAINER_SCRIPT="${SCRIPT_DIR}/build_xllm_in_container.sh"
 [[ ! -f "${IN_CONTAINER_SCRIPT}" ]] && echo "ERROR: '${IN_CONTAINER_SCRIPT}' not found." && exit 1
 command -v docker >/dev/null 2>&1 || { echo "ERROR: 'docker' command is missing." && exit 1; }
 
+# 容器名带编译时间，避免多人共用机器时 --name 冲突。
+CONTAINER_NAME="xllm_daily_build_$(date +%Y%m%d_%H%M%S)"
+echo "[build-container] name: ${CONTAINER_NAME}"
+
 RUN_OPTS=(
   --rm
   -t
   -u 0
-  --name xllm_main_daily_build
+  --name "${CONTAINER_NAME}"
   --privileged
   --ipc=host
   --network=host
