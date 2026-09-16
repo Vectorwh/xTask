@@ -3,7 +3,7 @@ benchmark:
   benchmark_type: aisbench
   perf:
     api_type: vllm_api_stream_chat_multiturn
-    baseline: null
+    baseline: 73.2111
     batch_size: 1
     case_type: performance
     dataset_conf: sharegpt_gen
