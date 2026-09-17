@@ -1,0 +1,89 @@
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    api_type: vllm_api_stream_chat_multiturn
+    baseline: 69.6717
+    batch_size: 1
+    case_type: performance
+    dataset_conf: sharegpt_gen
+    dump_eval_details: false
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    infer_mode: last
+    input_len: 2048
+    max_out_len: 2048
+    num_prompts: 6
+    output_len: 2048
+    request_rate: 1
+    threshold: 0.1
+    num_warmups: 20
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: true
+block_size: 128
+case_name: qwen3.6_27b_xllm_pd_perf_i2048_o2048_sharegpt
+communication_backend: hccl
+dataset_format: json
+dataset_name: sharegpt
+dataset_path: ''
+engine_type: xllm
+metrics: perf
+model_path: /export/weights/Qwen3.6-27B
+served_model_name: Qwen3.6-27B
+userid: 1048
+serving_wait_time: 10
+deployment:
+  mode: pd_disaggregated
+  master_host: 11.87.191.74
+  pd_control:
+    host: 11.87.191.74
+    etcd_client_port: 13389
+    etcd_peer_port: 13390
+    http_server_port: 13888
+    rpc_server_port: 13889
+  benchmark:
+    runner_instance: prefill-0-node-0
+    health_path: /health
+  pd_instances:
+  - name: prefill-0
+    role: prefill
+    group_master_host: 11.87.191.74
+    progress_conn_port: 9590
+    transfer_port_base: 26000
+    disagg_pd_port: 7777
+    serving_extensiable_param: &qwen36_pd_param
+      max_memory_utilization: 0.8
+      max_tokens_per_batch: 16384
+      max_seqs_per_batch: 16
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_shm: true
+      enable_disagg_pd: true
+      enable_graph: true
+      dp_size: 1
+      draft_model: /export/weights/Qwen3.6-27B-mtp
+      num_speculative_tokens: 4
+    nodes:
+    nodes:
+    - name: prefill-0-node-0
+      host: 11.87.191.74
+      device_ids: [0, 1]
+      local_port: 48000
+      hccl_if_port: 43439
+  - name: decode-0
+    role: decode
+    group_master_host: 11.87.191.74
+    progress_conn_port: 9690
+    transfer_port_base: 27000
+    disagg_pd_port: 7787
+    serving_extensiable_param: *qwen36_pd_param
+    nodes:
+    - name: decode-0-node-0
+      host: 11.87.191.74
+      device_ids: [2, 3]
+      local_port: 48020
+      hccl_if_port: 43539
