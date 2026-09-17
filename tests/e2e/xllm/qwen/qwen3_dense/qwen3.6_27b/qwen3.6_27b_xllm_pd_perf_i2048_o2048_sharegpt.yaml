@@ -3,7 +3,7 @@ benchmark:
   benchmark_type: aisbench
   perf:
     api_type: vllm_api_stream_chat_multiturn
-    baseline: null
+    baseline: 33.6758
     batch_size: 1
     case_type: performance
     dataset_conf: sharegpt_gen
@@ -65,8 +65,9 @@ deployment:
       enable_disagg_pd: true
       enable_graph: true
       dp_size: 1
-      draft_model: /export/weights/Qwen3.6-27B-mtp
-      num_speculative_tokens: 4
+      # Qwen3.6-27B 为 VLM(mrope) 架构：0.11.0 引擎在 PD+MTP 下 KV cache 估算崩溃
+      # （SpeculativeEngine::allocate_kv_cache 报 available kv cache size must be > 0），暂不启用 MTP
+    nodes:
     nodes:
     - name: prefill-0-node-0
       host: 11.87.191.74
