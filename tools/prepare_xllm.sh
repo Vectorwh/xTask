@@ -38,6 +38,8 @@ echo "[build-image] xLLM image: ${IMAGE}"
 export http_proxy="http://bamboo-proxy.jd.com:80"
 export https_proxy="http://bamboo-proxy.jd.com:80"
 export no_proxy=".jd.com,.jd.local,.local"
+GIT_HTTP_PROXY="${http_proxy}"
+GIT_HTTPS_PROXY="${https_proxy}"
 
 cd "${WORK_ROOT}"
 
@@ -49,19 +51,42 @@ git config --global http.postBuffer 524288000
 
 # 网络操作重试参数：最大尝试次数与每次失败后的等待秒数（可通过环境变量覆盖）
 GIT_MAX_RETRIES="${GIT_MAX_RETRIES:-100}"
-GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-100}"
+GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-50}"
 
-# 通用重试封装：弱网/代理下 git clone/pull/submodule 易随机失败，重试可显著提高成功率
+# 通用重试封装：弱网/代理下 git clone/pull/submodule 易随机失败，重试可显著提高成功率。
+# 奇数次尝试带代理，偶数次取消代理，避免单一链路一直失败。
 # 用法：retry <描述> <命令...>
+_apply_git_proxy_mode() {
+  if [[ "$1" == "proxy" ]]; then
+    export http_proxy="${GIT_HTTP_PROXY}"
+    export https_proxy="${GIT_HTTPS_PROXY}"
+  else
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+  fi
+}
+
 retry() {
   local desc="$1"; shift
   local attempt=1
-  until "$@"; do
+  local mode_label="proxy"
+  while true; do
+    if (( attempt % 2 == 1 )); then
+      _apply_git_proxy_mode proxy
+      mode_label="proxy"
+    else
+      _apply_git_proxy_mode direct
+      mode_label="direct"
+    fi
+    if "$@"; then
+      _apply_git_proxy_mode proxy
+      return 0
+    fi
     if (( attempt >= GIT_MAX_RETRIES )); then
+      _apply_git_proxy_mode proxy
       echo "ERROR: ${desc} failed after ${GIT_MAX_RETRIES} attempts." >&2
       return 1
     fi
-    echo "WARN: ${desc} failed (attempt ${attempt}/${GIT_MAX_RETRIES}), retrying in ${GIT_RETRY_DELAY}s..." >&2
+    echo "WARN: ${desc} failed (attempt ${attempt}/${GIT_MAX_RETRIES}, mode=${mode_label}), retrying in ${GIT_RETRY_DELAY}s..." >&2
     sleep "${GIT_RETRY_DELAY}"
     (( attempt++ ))
   done

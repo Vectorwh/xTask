@@ -49,13 +49,13 @@ served_model_name: Qwen3.6-35B-A3B
 userid: 1048
 serving_wait_time: 10
 deployment:
-  master_host: 11.87.191.121
+  master_host: 11.87.191.75
   benchmark:
     runner_instance: master-0
     health_path: /health
   instances:
   - name: master-0
-    host: 11.87.191.121
+    host: 11.87.191.75
     role: master
     rank_start: 0
     device_ids: [0, 1]

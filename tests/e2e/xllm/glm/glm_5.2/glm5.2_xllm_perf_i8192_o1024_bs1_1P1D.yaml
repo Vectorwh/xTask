@@ -1,7 +1,7 @@
 case_name: glm5.2_xllm_perf_i8192_o1024_bs1_1P1D
 engine_type: xllm
-model_path: /export/home/models/GLM-5.2-w8a8
-served_model_name: GLM-5.2-w8a8
+model_path: /export/home/models/GLM-5.2-W8A8-EcoTech
+served_model_name: GLM-5.2-W8A8-EcoTech
 metrics: perf
 dataset_name: sharegpt
 dataset_path: ''
@@ -67,7 +67,7 @@ deployment:
       block_size: 128
       cp_size: 2
       ep_size: 16
-      draft_model: /export/home/models/GLM-5.2-w8a8-mtp
+      draft_model: /export/home/models/GLM-5.2-w8a8-mtponly
       num_speculative_tokens: 3
       kv_cache_transfer_type: LlmDataDist
       enable_graph: true
@@ -93,7 +93,7 @@ deployment:
       block_size: 128
       dp_size: 2
       ep_size: 16
-      draft_model: /export/home/models/GLM-5.2-w8a8-mtp
+      draft_model: /export/home/models/GLM-5.2-w8a8-mtponly
       num_speculative_tokens: 3
       enable_graph: true
       max_tokens_per_batch: 512

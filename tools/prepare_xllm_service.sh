@@ -50,19 +50,43 @@ esac
 export http_proxy="${http_proxy:-http://bamboo-proxy.jd.com:80}"
 export https_proxy="${https_proxy:-http://bamboo-proxy.jd.com:80}"
 export no_proxy="${no_proxy:-.jd.com,.jd.local,.local}"
+GIT_HTTP_PROXY="${http_proxy}"
+GIT_HTTPS_PROXY="${https_proxy}"
 
-GIT_MAX_RETRIES="${GIT_MAX_RETRIES:-50}"
-GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-30}"
+GIT_MAX_RETRIES="${GIT_MAX_RETRIES:-100}"
+GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-50}"
+_apply_git_proxy_mode() {
+  if [[ "$1" == "proxy" ]]; then
+    export http_proxy="${GIT_HTTP_PROXY}"
+    export https_proxy="${GIT_HTTPS_PROXY}"
+  else
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+  fi
+}
+
 retry() {
   local description="$1"
   shift
   local attempt=1
-  until "$@"; do
+  local mode_label="proxy"
+  while true; do
+    if (( attempt % 2 == 1 )); then
+      _apply_git_proxy_mode proxy
+      mode_label="proxy"
+    else
+      _apply_git_proxy_mode direct
+      mode_label="direct"
+    fi
+    if "$@"; then
+      _apply_git_proxy_mode proxy
+      return 0
+    fi
     if (( attempt >= GIT_MAX_RETRIES )); then
+      _apply_git_proxy_mode proxy
       echo "ERROR: ${description} failed after ${GIT_MAX_RETRIES} attempts." >&2
       return 1
     fi
-    echo "WARN: ${description} failed (attempt ${attempt}/${GIT_MAX_RETRIES}), retrying..." >&2
+    echo "WARN: ${description} failed (attempt ${attempt}/${GIT_MAX_RETRIES}, mode=${mode_label}), retrying in ${GIT_RETRY_DELAY}s..." >&2
     sleep "${GIT_RETRY_DELAY}"
     ((attempt++))
   done
