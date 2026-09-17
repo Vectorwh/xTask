@@ -30,7 +30,7 @@ dataset_name: sharegpt
 dataset_path: ''
 engine_type: xllm
 metrics: perf
-model_path: /export/home/models/Qwen3.6-27B
+model_path: /export/weights/Qwen3.6-27B
 served_model_name: Qwen3.6-27B
 userid: 1048
 serving_wait_time: 10
@@ -65,7 +65,7 @@ deployment:
       enable_disagg_pd: true
       enable_graph: true
       dp_size: 1
-      draft_model: /export/home/models/Qwen3.6-27B-mtp
+      draft_model: /export/weights/Qwen3.6-27B-mtp
       num_speculative_tokens: 4
     nodes:
     - name: prefill-0-node-0
