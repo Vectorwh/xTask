@@ -6,6 +6,8 @@
 #   bash tools/install_cleanup_crontab.sh
 #   CLEANUP_HOSTS="11.87.191.75 11.87.191.121" bash tools/install_cleanup_crontab.sh
 #   CRON_TIME="55 1 * * *" bash tools/install_cleanup_crontab.sh
+#   XTASK_BENCH_REPORT=1 BENCH_REPORTER_URL=http://124.222.187.33:8080 \
+#     bash tools/install_cleanup_crontab.sh
 # 卸载：
 #   bash tools/install_cleanup_crontab.sh --uninstall
 
@@ -18,6 +20,10 @@ CLEANUP_SCRIPT="${SCRIPT_DIR}/cleanup_npu_hosts.py"
 CRON_TIME="${CRON_TIME:-55 1 * * *}"
 CLEANUP_HOSTS="${CLEANUP_HOSTS:-11.87.191.75 11.87.191.121}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+# 基准结果上报（可选）：清理任务本身不上报，此处透传仅为保持与其他安装脚本一致；
+# 默认留空，不影响清理行为。
+XTASK_BENCH_REPORT="${XTASK_BENCH_REPORT:-}"
+BENCH_REPORTER_URL="${BENCH_REPORTER_URL:-}"
 TAG="# xllm_npu_cleanup"
 
 quote_cron_value() {
@@ -27,7 +33,9 @@ quote_cron_value() {
 }
 
 CRON_CLEANUP_HOSTS="$(quote_cron_value "${CLEANUP_HOSTS}")"
-CRON_LINE="${CRON_TIME} CLEANUP_HOSTS=${CRON_CLEANUP_HOSTS} cd ${PROJECT_ROOT} && ${PYTHON_BIN} ${CLEANUP_SCRIPT} ${CLEANUP_HOSTS} >> ${PROJECT_ROOT}/outputs/log/npu_cleanup_cron.log 2>&1 ${TAG}"
+CRON_XTASK_BENCH_REPORT="$(quote_cron_value "${XTASK_BENCH_REPORT}")"
+CRON_BENCH_REPORTER_URL="$(quote_cron_value "${BENCH_REPORTER_URL}")"
+CRON_LINE="${CRON_TIME} CLEANUP_HOSTS=${CRON_CLEANUP_HOSTS} XTASK_BENCH_REPORT=${CRON_XTASK_BENCH_REPORT} BENCH_REPORTER_URL=${CRON_BENCH_REPORTER_URL} cd ${PROJECT_ROOT} && ${PYTHON_BIN} ${CLEANUP_SCRIPT} ${CLEANUP_HOSTS} >> ${PROJECT_ROOT}/outputs/log/npu_cleanup_cron.log 2>&1 ${TAG}"
 
 CURRENT_USER="$(whoami)"
 if crontab -l >/dev/null 2>&1; then
