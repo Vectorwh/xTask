@@ -94,18 +94,37 @@ def find_case_file(case_name, case_dir):
     target_filename = f"{os.path.basename(normalized_case_name)}.yaml"
     target_suffix = f"{normalized_case_name}.yaml"
     found_files = []
-    
+
     # 递归遍历目录
     for root, dirs, files in os.walk(case_dir):
         # 跳过隐藏目录
         dirs[:] = [d for d in dirs if not d.startswith('.')]
-        
+
         # 在当前目录查找目标文件
         if target_filename in files:
             file_path = os.path.join(root, target_filename)
             relative_path = os.path.relpath(file_path, case_dir)
             if os.sep not in normalized_case_name or relative_path.endswith(target_suffix):
                 found_files.append(file_path)
+
+    # 精确匹配失败时，回退为大小写不敏感匹配。auto_assess/para_set 会把
+    # 生成用例名统一转成小写（如 xxx_1P1D_bs-4 → base xxx_1p1d），再用该名字
+    # 回查 tests/ 下的原始大小写 YAML（xxx_1P1D.yaml），精确匹配必然落空，
+    # 这里兜底命中。仅当大小写折叠后唯一命中时才采用，避免引入歧义。
+    if not found_files:
+        lowered_target = target_filename.lower()
+        lowered_suffix = target_suffix.lower()
+        found_files = []
+        for root, dirs, files in os.walk(case_dir):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            if lowered_target in (name.lower() for name in files):
+                file_path = next(
+                    name for name in files if name.lower() == lowered_target
+                )
+                file_path = os.path.join(root, file_path)
+                relative_path = os.path.relpath(file_path, case_dir)
+                if os.sep not in normalized_case_name or relative_path.lower().endswith(lowered_suffix):
+                    found_files.append(file_path)
     
     # 根据查找结果处理
     if len(found_files) == 0:

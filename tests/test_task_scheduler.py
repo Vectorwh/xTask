@@ -423,7 +423,7 @@ deployment:
             runtime.container_manager.exec_in_container.assert_called_once_with(
                 runtime.container_config.container_name,
                 "npu-smi info -t proc-mem -i 0 -c 0",
-                timeout=10,
+                timeout=30,
                 capture_output=True,
             )
             runtime.container_manager.executor.run.assert_not_called()

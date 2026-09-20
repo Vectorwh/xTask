@@ -583,7 +583,9 @@ def _execute_benchmark_with_npu_guard(container_manager, container_config,
                     rt.container_manager.exec_in_container(
                         rt.container_config.container_name,
                         cmd,
-                        timeout=10,
+                        # npu-smi proc-mem 查询：驱动繁忙时 10s 偏紧（与
+                        # NpuProcessGuard.NPU_SMI_TIMEOUT 保持一致），放宽到 30s
+                        timeout=30,
                         capture_output=True,
                     )
                 ),
@@ -605,7 +607,9 @@ def _execute_benchmark_with_npu_guard(container_manager, container_config,
         }
         if guard_container_manager is not None and guard_container_config is not None:
             guard_kwargs["command_executor"] = lambda cmd: guard_manager.exec_in_container(
-                guard_config.container_name, cmd, timeout=10, capture_output=True
+                # npu-smi proc-mem 查询：驱动繁忙时 10s 偏紧（与
+                # NpuProcessGuard.NPU_SMI_TIMEOUT 保持一致），放宽到 30s
+                guard_config.container_name, cmd, timeout=30, capture_output=True
             )
         else:
             guard_kwargs["container_name"] = guard_config.container_name
@@ -2523,12 +2527,16 @@ def _pd_listen_ports(plan) -> list:
     return sorted(set(ports))
 
 
+_LISTEN_PORT_PROBE_PATH = "PATH=/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 def _pd_listen_ports_probe_cmd(ports) -> str:
     """Host-side read-only LISTEN probe for the given TCP ports."""
     want = ",".join(str(int(port)) for port in ports)
+    path = _LISTEN_PORT_PROBE_PATH
     return (
-        "command -v ss >/dev/null 2>&1 || { echo UNREADABLE; exit 0; }; "
-        "ss -lnt 2>/dev/null | awk -v want="
+        f"{path} command -v ss >/dev/null 2>&1 || {{ echo UNREADABLE; exit 0; }}; "
+        f"{path} ss -lnt 2>/dev/null | awk -v want="
         + shlex.quote(want)
         + r""" '
 BEGIN { n=split(want, a, ","); for (i = 1; i <= n; i++) w[a[i]] = 1 }
@@ -2557,6 +2565,16 @@ def _read_pd_listen_ports_in_use(runtime, ports) -> Optional[list]:
         out = ""
     out = out.strip()
     if "UNREADABLE" in out:
+        stderr = getattr(result, "stderr", None) or ""
+        if not isinstance(stderr, str):
+            stderr = ""
+        logging.debug(
+            "Listen-port probe unreadable on %s: stdout=%r stderr=%r exit_code=%s",
+            host,
+            out,
+            stderr.strip(),
+            getattr(result, "exit_code", None),
+        )
         return None
     busy = []
     wanted = {int(port) for port in ports}
@@ -2645,6 +2663,114 @@ def _wait_pd_listen_ports_before_start(state, runtimes) -> None:
     run_on_runtimes_parallel(runtimes or [], _wait_pd_listen_ports_released)
 
 
+def _hccl_listen_ports(plan) -> list:
+    """Return HCCL bind ports (hccl_if_port + device_id) for this runtime plan.
+
+    xLLM exports ``hccl_if_port`` as ``HCCL_IF_BASE_PORT``; each local rank on
+    device *d* binds ``base + d`` (see Ascend HCCL ``EI0019`` bind errors).
+    """
+    if plan is None:
+        return []
+    cfg = getattr(plan, "instance_config", None)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if str(cfg.get("communication_backend", "hccl")).lower() != "hccl":
+        return []
+    try:
+        base = int(cfg.get("hccl_if_port", 43439))
+    except (TypeError, ValueError):
+        return []
+    devices = getattr(plan, "device_ids", None)
+    if not isinstance(devices, (list, tuple)) or not devices:
+        return []
+    ports = []
+    for raw in devices:
+        try:
+            device_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        port = base + device_id
+        if 1 <= port <= 65535:
+            ports.append(port)
+    return sorted(set(ports))
+
+
+def _wait_hccl_listen_ports_released(runtime, timeout_s=None, interval_s=1) -> None:
+    """Wait until this instance's HCCL ports leave LISTEN.
+
+    Timeout (default 30s, XTASK_HCCL_PORT_RELEASE_TIMEOUT) logs a warning and
+    proceeds; it does not fail the case or pkill. Already-free ports return
+    after one probe with no extra sleep.
+    """
+    plan = getattr(runtime, "plan", None)
+    host = getattr(plan, "host", "?")
+    name = getattr(plan, "instance_name", "?")
+    try:
+        ports = _hccl_listen_ports(plan)
+        if not ports:
+            return
+        if timeout_s is None:
+            try:
+                timeout_s = max(
+                    1, int(os.environ.get("XTASK_HCCL_PORT_RELEASE_TIMEOUT", "30"))
+                )
+            except ValueError:
+                timeout_s = 30
+        deadline = time.monotonic() + timeout_s
+        last_busy = None
+        while time.monotonic() < deadline:
+            busy = _read_pd_listen_ports_in_use(runtime, ports)
+            if busy is None:
+                logging.warning(
+                    "HCCL listen-port probe unreadable on %s (%s); skipping wait",
+                    host,
+                    name,
+                )
+                return
+            if not busy:
+                if last_busy:
+                    logging.info(
+                        "HCCL listen ports released on %s (%s)", host, name
+                    )
+                return
+            if busy != last_busy:
+                logging.info(
+                    "Waiting for HCCL listen ports on %s (%s): %s",
+                    host,
+                    name,
+                    busy,
+                )
+            last_busy = busy
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval_s, remaining))
+        logging.warning(
+            "HCCL listen ports still in use on %s (%s) after %ss (%s); "
+            "proceeding anyway",
+            host,
+            name,
+            timeout_s,
+            last_busy,
+        )
+    except Exception:
+        logging.warning(
+            "HCCL listen-port wait failed on %s (%s); proceeding anyway",
+            host,
+            name,
+            exc_info=True,
+        )
+
+
+def _wait_hccl_listen_ports_before_start(state, runtimes) -> None:
+    """Multi-host gate: wait for HCCL ports before xLLM start on each runtime."""
+    if not state.get("multi_host"):
+        return
+    from xtask.core.service_group import run_on_runtimes_parallel
+
+    run_on_runtimes_parallel(runtimes or [], _wait_hccl_listen_ports_released)
+
+
 def _start_and_wait_service_multi_host(context):
     from xtask.core.service_group import (
         get_benchmark_endpoint,
@@ -2707,6 +2833,9 @@ def _start_and_wait_service_multi_host(context):
     # PD leftover LISTEN on disagg_pd_port / transfer_listen_port prevents
     # pairing and keeps HTTP 28888 closed. Wait only for this case's ports.
     _wait_pd_listen_ports_before_start(state, runtimes)
+    # HCCL leftover LISTEN on hccl_if_port + device_id prevents
+    # HcclGetRootInfo on the next case sharing the same host/base port.
+    _wait_hccl_listen_ports_before_start(state, runtimes)
 
     def _start_one(runtime):
         cmd = runtime.plan.startup_cmd
@@ -3693,11 +3822,14 @@ def _cleanup_scheduler(context):
         except (TypeError, ValueError):
             shutdown_grace_s = 15
         try:
+            # 默认放宽到 15s：多卡 NPU 场景进程退出时的驱动级资源回收
+            # （KV 传输链路 unlink、设备上下文销毁）偶发超过 5s，SIGTERM
+            # 提前转 SIGKILL 会造成 "did not receive an exit event" 噪声报错。
             pd_stop_timeout = max(
-                1, int(deployment.get("container_stop_timeout_seconds", 5))
+                1, int(deployment.get("container_stop_timeout_seconds", 15))
             )
         except (TypeError, ValueError):
-            pd_stop_timeout = 5
+            pd_stop_timeout = 15
         try:
             if should_clean and control_service is not None:
                 # Stop routed data-plane processes before etcd/xllm-service,

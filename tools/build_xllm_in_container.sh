@@ -82,12 +82,30 @@ if [[ -z "${ASIO_SO_PATH}" || ! -f "${ASIO_SO_PATH}" ]]; then
   exit 1
 fi
 
+# Mooncake Store/TENT 启用 io_uring 后，xllm 二进制对 liburing.so.2 存在硬链接
+# 依赖（DT_NEEDED），但该库既未打入 wheel 也未随基础镜像分发，需一并归档。
+# /usr/lib64/liburing.so.2 可能是软链接，与 libxxhash.so.0 相同，解引用后归档，
+# 避免测试容器拿到断链。
+URING_SONAME_PATH="/usr/lib64/liburing.so.2"
+if [[ ! -e "${URING_SONAME_PATH}" ]]; then
+  echo "ERROR: '${URING_SONAME_PATH}' not found after xLLM build." >&2
+  echo "Hint: xllm links against liburing (io_uring) when the build environment" >&2
+  echo "has liburing-devel installed; the runtime library must be collectable here." >&2
+  exit 1
+fi
+URING_REAL_PATH="$(readlink -f "${URING_SONAME_PATH}")"
+if [[ -z "${URING_REAL_PATH}" || ! -f "${URING_REAL_PATH}" ]]; then
+  echo "ERROR: failed to resolve '${URING_SONAME_PATH}'." >&2
+  exit 1
+fi
+
 rm -rf "${RUNTIME_LIB_DIR}"
 mkdir -p "${RUNTIME_LIB_DIR}"
 install -m 0755 "${XXHASH_REAL_PATH}" "${RUNTIME_LIB_DIR}/libxxhash.so.0"
 install -m 0755 "${ASIO_SO_PATH}" "${RUNTIME_LIB_DIR}/libasio.so"
+install -m 0755 "${URING_REAL_PATH}" "${RUNTIME_LIB_DIR}/liburing.so.2"
 echo "Collected runtime libraries in '${RUNTIME_LIB_DIR}':"
-ls -l "${RUNTIME_LIB_DIR}/libxxhash.so.0" "${RUNTIME_LIB_DIR}/libasio.so"
+ls -l "${RUNTIME_LIB_DIR}/libxxhash.so.0" "${RUNTIME_LIB_DIR}/libasio.so" "${RUNTIME_LIB_DIR}/liburing.so.2"
 
 # 由外层 prepare_xllm.sh 通过 -e HOST_UID / -e HOST_GID 传入宿主机启动用户的 uid/gid，
 # 归档后把 pkg/xllm 目录及其子文件所有者改回宿主机用户。

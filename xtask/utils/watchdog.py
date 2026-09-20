@@ -1162,6 +1162,11 @@ class NpuProcessGuard:
         self._thread: Optional[threading.Thread] = None
         self.aborted_reason: Optional[str] = None
 
+    # npu-smi proc-mem 在共享环境/驱动繁忙时可能远超 10 秒（曾观察到 DMP halHdcRecv
+    # timeout 导致查询挂起），10s 超时过紧会被误判为探测失败，放宽到 30s。
+    # 仅影响本守护器的 npu-smi 查询，不影响其他命令。
+    NPU_SMI_TIMEOUT = 30
+
     def _run_command(self, cmd: str):
         """执行 npu-smi 命令：本地 subprocess 或外部 command_executor。"""
         if self.command_executor is not None:
@@ -1180,10 +1185,10 @@ class NpuProcessGuard:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
-            timeout=10,
+            timeout=self.NPU_SMI_TIMEOUT,
         )
 
-    def _get_npu_processes(self, card_id: int) -> List[dict]:
+    def _get_npu_processes(self, card_id: int) -> Optional[List[dict]]:
         """调用 npu-smi 获取指定 NPU 卡上的进程信息。
 
         实际执行命令：
@@ -1206,7 +1211,9 @@ class NpuProcessGuard:
                 - process_id:        进程号（字符串）
                 - process_name:      进程名
                 - process_memory_mb: 进程占用显存(MB)，解析失败时为空字符串
-            无进程或异常时返回空列表 []。
+            确认无进程时返回空列表 []；
+            探测失败（超时/非零退出/异常，状态未知）时返回 None，
+            调用方必须区分这两种情况，不得把 None 当作"无进程"。
         """
         try:
             safe_card_id = int(card_id)
@@ -1216,14 +1223,14 @@ class NpuProcessGuard:
             result = self._run_command(cmd)
             if result.returncode != 0:
                 logging.error(f"执行npu-smi失败（NPU卡{card_id}）：{result.stderr}")
-                return []
+                return None
 
             processes = []
             for raw_line in result.stdout.splitlines():
                 line = raw_line.strip()
                 if not line:
                     continue
-                # 无进程标志：直接返回空列表
+                # 无进程标志：确认无进程，返回空列表
                 if "No process in device" in line:
                     return []
                 # 仅解析包含进程信息的行
@@ -1232,14 +1239,19 @@ class NpuProcessGuard:
                 proc = self._parse_proc_mem_line(line)
                 if proc.get("process_id"):
                     processes.append(proc)
-            return processes
+            if processes:
+                return processes
+            # returncode=0 但输出既无 "No process in device" 也未解析到任何进程行，
+            # 不符合文档化的两种回显形态之一（如驱动异常时输出错误信息），
+            # 视为状态未知而非"确认无进程"，避免误判
+            return None
 
         except subprocess.TimeoutExpired:
             logging.error(f"npu-smi命令执行超时（NPU卡{card_id}）")
-            return []
+            return None
         except Exception as e:
             logging.error(f"解析npu-smi输出异常（NPU卡{card_id}）：{str(e)}", exc_info=True)
-            return []
+            return None
 
     def _build_npu_smi_command(self, chip_id: int, core_id: int) -> str:
         """构造最终要执行的 shell 命令字符串。
@@ -1282,10 +1294,40 @@ class NpuProcessGuard:
             proc["process_memory_mb"] = mem_match.group(1)
         return proc
 
+    # 单轮检查内对"探测结果未知"的卡的重试次数与间隔。
+    # npu-smi 超时/失败仅代表状态未知，不代表无进程；重试仍未知则跳过本轮，
+    # 留待下一个检查周期，避免共享环境下驱动繁忙导致的误判中断。
+    PROBE_RETRY_COUNT = 2
+    PROBE_RETRY_DELAY = 5.0
+
     def _check_abnormal_card(self) -> Optional[str]:
-        """检查是否存在异常的 NPU 卡。任一卡异常即返回异常描述，正常返回 None。"""
+        """检查是否存在异常的 NPU 卡。任一卡异常即返回异常描述，正常返回 None。
+
+        仅当 npu-smi 确认无进程/未找到目标进程时才判异常；
+        探测失败（超时/非零退出/异常，状态未知）不判异常：先重试，仍未知则
+        跳过本轮检查（返回 None），留待下个周期，避免误报中断 benchmark。
+        """
         for card_id in self.npu_card_ids:
             npu_processes = self._get_npu_processes(card_id)
+            if npu_processes is None:
+                # 探测失败，状态未知：短暂重试（可被 stop 提前打断）
+                recovered = False
+                for _ in range(self.PROBE_RETRY_COUNT):
+                    if self._stop_event.is_set() or self.abort_event.is_set():
+                        return None
+                    self._stop_event.wait(self.PROBE_RETRY_DELAY)
+                    if self._stop_event.is_set() or self.abort_event.is_set():
+                        return None
+                    npu_processes = self._get_npu_processes(card_id)
+                    if npu_processes is not None:
+                        recovered = True
+                        break
+                if not recovered:
+                    logging.warning(
+                        f"NPU卡{card_id}进程状态探测失败（npu-smi超时/异常），"
+                        f"跳过本轮检查，下个周期重试"
+                    )
+                    continue
             if self.target_process_name:
                 found = any(
                     proc.get("process_name", "").lower() == self.target_process_name.lower()

@@ -11,8 +11,9 @@
 #   MAIN_ARGS="--case_group base_case_group" bash tools/install_crontab.sh   # 指定 main.py 参数
 #   XLLM_BRANCH=main XLLM_SERVICE_BRANCH=main STAGES="build service_build test" \
 #     bash tools/install_crontab.sh                               # 固化两个编译分支
-#   # 基准结果上报（可选）：XTASK_BENCH_REPORT=1 开启，BENCH_REPORTER_URL 指定上报服务
-#   XTASK_BENCH_REPORT=1 BENCH_REPORTER_URL=http://124.222.187.33:8080 \
+#   # 基准结果上报（可选）：XTASK_BENCH_REPORT=1 开启，BENCH_REPORTER_URL 指定上报服务，
+#   # BENCH_REPORTER_API_KEY 指定上报鉴权 key（可选，服务无鉴权时留空）
+#   XTASK_BENCH_REPORT=1 BENCH_REPORTER_URL=http://124.222.187.33:8080 BENCH_REPORTER_API_KEY=xxx \
 #     STAGES="build test" bash tools/install_crontab.sh
 #   # 定时依次执行多组用例（分号分隔，每组各跑一次 main.py）：
 #   MAIN_ARGS_LIST="--case_name case1 ; --case_name case2" bash tools/install_crontab.sh
@@ -36,9 +37,11 @@ MAIN_ARGS_LIST="${MAIN_ARGS_LIST:-}"
 XLLM_BRANCH="${XLLM_BRANCH:-}"
 XLLM_SERVICE_BRANCH="${XLLM_SERVICE_BRANCH:-}"
 # 基准结果上报（可选）：XTASK_BENCH_REPORT 非空且为 1/true/on/yes 时 main.py 会上报；
-# BENCH_REPORTER_URL 为上报服务地址。两者默认留空，保持历史"不上报"行为。
+# BENCH_REPORTER_URL 为上报服务地址，BENCH_REPORTER_API_KEY 为上报鉴权 key（可选）。
+# 三者默认留空，保持历史"不上报"行为。
 XTASK_BENCH_REPORT="${XTASK_BENCH_REPORT:-}"
 BENCH_REPORTER_URL="${BENCH_REPORTER_URL:-}"
+BENCH_REPORTER_API_KEY="${BENCH_REPORTER_API_KEY:-}"
 # 用于识别/去重的标记
 TAG="# xllm_daily_build"
 
@@ -52,10 +55,11 @@ CRON_XLLM_BRANCH="$(quote_cron_value "${XLLM_BRANCH}")"
 CRON_XLLM_SERVICE_BRANCH="$(quote_cron_value "${XLLM_SERVICE_BRANCH}")"
 CRON_XTASK_BENCH_REPORT="$(quote_cron_value "${XTASK_BENCH_REPORT}")"
 CRON_BENCH_REPORTER_URL="$(quote_cron_value "${BENCH_REPORTER_URL}")"
+CRON_BENCH_REPORTER_API_KEY="$(quote_cron_value "${BENCH_REPORTER_API_KEY}")"
 CRON_MAIN_ARGS="$(quote_cron_value "${MAIN_ARGS}")"
 CRON_MAIN_ARGS_LIST="$(quote_cron_value "${MAIN_ARGS_LIST}")"
 # 把测试参数和构建分支写入 cron 行，保证 cron 的精简环境下仍能拿到配置。
-CRON_LINE="${CRON_TIME} XTASK_BENCH_REPORT=${CRON_XTASK_BENCH_REPORT} BENCH_REPORTER_URL=${CRON_BENCH_REPORTER_URL} XLLM_BRANCH=${CRON_XLLM_BRANCH} XLLM_SERVICE_BRANCH=${CRON_XLLM_SERVICE_BRANCH} MAIN_ARGS=${CRON_MAIN_ARGS} MAIN_ARGS_LIST=${CRON_MAIN_ARGS_LIST} /bin/bash ${CRON_SCRIPT} ${STAGES} ${TAG}"
+CRON_LINE="${CRON_TIME} XTASK_BENCH_REPORT=${CRON_XTASK_BENCH_REPORT} BENCH_REPORTER_URL=${CRON_BENCH_REPORTER_URL} BENCH_REPORTER_API_KEY=${CRON_BENCH_REPORTER_API_KEY} XLLM_BRANCH=${CRON_XLLM_BRANCH} XLLM_SERVICE_BRANCH=${CRON_XLLM_SERVICE_BRANCH} MAIN_ARGS=${CRON_MAIN_ARGS} MAIN_ARGS_LIST=${CRON_MAIN_ARGS_LIST} /bin/bash ${CRON_SCRIPT} ${STAGES} ${TAG}"
 
 # 检测当前用户是否有 crontab 权限，自动选择 crontab 命令
 # 优先尝试普通 crontab，失败则尝试 sudo crontab -u $USER

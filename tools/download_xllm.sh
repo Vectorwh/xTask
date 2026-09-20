@@ -92,7 +92,7 @@ install_xllm_runtime_libraries() {
         return 0
     fi
 
-    for lib_name in libxxhash.so.0 libasio.so; do
+    for lib_name in libxxhash.so.0 libasio.so liburing.so.2; do
         source_path="$XLLM_RUNTIME_LIB_DIR/$lib_name"
         if [ ! -f "$source_path" ]; then
             echo "Error: Required xLLM runtime library not found: $source_path" >&2
@@ -102,7 +102,7 @@ install_xllm_runtime_libraries() {
     done
 
     ldconfig
-    echo "xLLM runtime libraries installed to /usr/lib64: libxxhash.so.0 libasio.so"
+    echo "xLLM runtime libraries installed to /usr/lib64: libxxhash.so.0 libasio.so liburing.so.2"
 }
 
 if ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/dev/null 2>&1 && [ -d "$XLLM_VENDORS_DIR" ]; then

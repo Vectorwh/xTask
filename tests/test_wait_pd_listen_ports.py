@@ -115,6 +115,7 @@ class PdListenPortsTests(unittest.TestCase):
     def test_probe_cmd_contains_case_ports_not_hardcoded_defaults(self):
         cmd = scheduler._pd_listen_ports_probe_cmd([7787, 27000, 27001])
         self.assertIn("7787,27000,27001", cmd)
+        self.assertIn("PATH=/usr/sbin:/usr/bin:/sbin:/bin", cmd)
         self.assertIn("command -v ss", cmd)
         self.assertIn("ss -lnt", cmd)
         self.assertNotIn("7777", cmd)

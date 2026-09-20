@@ -10,6 +10,7 @@ from xtask.tasks.task_parser import (
     _normalize_assess_parameters,
     _update_config_by_path,
     dynamic_loops_from_dict,
+    gen_group_autoassess_task,
     gen_group_paraset_task,
 )
 from xtask.tasks.topology_search import normalize_assess_topologies
@@ -427,6 +428,91 @@ class TaskParserTests(unittest.TestCase):
                 )
                 combinations.append(metadata["current_combination"]["input_len"])
             self.assertEqual(combinations, ["a/b", "a b"])
+
+    def test_find_case_file_matches_exact_name_first(self):
+        from xtask.tasks.task_parser import find_case_file
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            case_dir = Path(temporary_directory) / "tests"
+            nested = case_dir / "glm"
+            nested.mkdir(parents=True)
+            (nested / "case_1P1D.yaml").write_text("case_name: exact\n", encoding="utf-8")
+
+            self.assertEqual(
+                Path(find_case_file("case_1P1D", str(case_dir))).name,
+                "case_1P1D.yaml",
+            )
+
+    def test_find_case_file_falls_back_to_case_insensitive_match(self):
+        from xtask.tasks.task_parser import find_case_file
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            case_dir = Path(temporary_directory) / "tests"
+            nested = case_dir / "glm" / "glm_5.2"
+            nested.mkdir(parents=True)
+            (nested / "case_1P1D.yaml").write_text(
+                "case_name: original\n", encoding="utf-8"
+            )
+
+            found = find_case_file("case_1p1d", str(case_dir))
+            self.assertIsNotNone(found)
+            self.assertEqual(Path(found).name, "case_1P1D.yaml")
+
+    def test_find_case_file_insensitive_match_with_dir_prefix(self):
+        from xtask.tasks.task_parser import find_case_file
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            case_dir = Path(temporary_directory) / "tests"
+            nested = case_dir / "glm" / "glm_5.2"
+            nested.mkdir(parents=True)
+            (nested / "case_1P1D.yaml").write_text(
+                "case_name: original\n", encoding="utf-8"
+            )
+
+            # 带目录前缀的小写查找也应命中原始大小写文件
+            found = find_case_file("glm/glm_5.2/case_1p1d", str(case_dir))
+            self.assertIsNotNone(found)
+            self.assertEqual(Path(found).name, "case_1P1D.yaml")
+
+    def test_find_case_file_returns_none_when_no_case_insensitive_hit(self):
+        from xtask.tasks.task_parser import find_case_file
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            case_dir = Path(temporary_directory) / "tests"
+            case_dir.mkdir()
+            (case_dir / "case_1P1D.yaml").write_text("case_name: x\n", encoding="utf-8")
+
+            self.assertIsNone(find_case_file("case_bs32", str(case_dir)))
+
+    def test_auto_assess_roundtrip_with_uppercase_base_case(self):
+        """复现 auto_assess 断链：小写生成名回查原始大小写基础 YAML。"""
+        config = _pd_config({})
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            case_dir = root / "tests"
+            case_dir.mkdir()
+            # 基础用例名含大写，auto_assess 生成名会被 lower() 成小写
+            (case_dir / "dsv4_flash_pd_dspark_acc_1P1D.yaml").write_text(
+                yaml.safe_dump(config), encoding="utf-8"
+            )
+            tasks = {}
+            with mock.patch(
+                "xtask.tasks.task_parser.Path.cwd", return_value=root
+            ):
+                self.assertTrue(
+                    gen_group_autoassess_task(
+                        "dsv4_flash_pd_dspark_acc_1p1d",  # 第二轮传入的小写 base case
+                        str(root / "out"),
+                        tasks,
+                        {"batch_size": 4},
+                    )
+                )
+            self.assertEqual(len(tasks), 1)
+            generated_path = Path(next(iter(tasks)))
+            self.assertEqual(
+                generated_path.stem, "dsv4_flash_pd_dspark_acc_1p1d_bs-4"
+            )
 
 
 if __name__ == "__main__":
