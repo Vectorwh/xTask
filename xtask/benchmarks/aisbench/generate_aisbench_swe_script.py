@@ -1,0 +1,373 @@
+"""Generate and execute an isolated AISBench SWE-bench runner on an x86 host.
+
+AISBench (mini-swe-agent infer + official harness eval) is not installed into
+the xLLM/NPU container. The generated Python config follows the official
+``mini_swe_agent_swe_bench_verified_mini.py`` example; execution uses
+HostExecutor so a remote x86 runner can be used from an ARM scheduler.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import shlex
+from typing import Any, Dict, List, Mapping, Optional
+
+from xtask.benchmarks.aisbench.swebench import (
+    DEFAULT_SWEBENCH_BATCH_SIZE,
+    DEFAULT_SWEBENCH_SPLIT,
+    DEFAULT_SWEBENCH_STEP_LIMIT,
+    swebench_config,
+    swebench_dataset_name,
+    swebench_mode,
+    swebench_runner,
+    swebench_timeout_s,
+    validate_aisbench_swebench_task,
+)
+from xtask.utils.container_manager import CommandResult
+from xtask.utils.host_executor import create_host_executor, is_local_host
+
+
+CONFIG_FILENAME = "aisbench_swe_config.py"
+SHELL_FILENAME = "run_aisbench_swe.sh"
+_SAFE_ARG = re.compile(r"^[A-Za-z0-9_./:=+-]+$")
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _quote(value: Any) -> str:
+    return shlex.quote(str(value))
+
+
+def _py_str(value: Any) -> str:
+    return repr(str(value))
+
+
+def _safe_name(value: Any, field: str) -> str:
+    text = str(value or "")
+    if not text or not _SAFE_NAME.fullmatch(text):
+        raise ValueError(
+            f"SWE-bench {field} must contain only letters, numbers, '.', '_' or '-': {text!r}"
+        )
+    return text
+
+
+def _safe_extra_args(raw: Any) -> List[str]:
+    if raw in (None, "", []):
+        return []
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        raise ValueError("benchmark.swebench.extra_args must be a string or list")
+    checked = []
+    for item in items:
+        token = str(item).strip()
+        if not token:
+            continue
+        if not _SAFE_ARG.fullmatch(token):
+            raise ValueError(
+                f"benchmark.swebench.extra_args contains an unsafe token: {token!r}"
+            )
+        checked.append(token)
+    return checked
+
+
+def _remote_home(executor) -> tuple[Optional[str], Optional[CommandResult]]:
+    """Read the login user's HOME on a remote runner."""
+    result = executor.run('printf %s "$HOME"', timeout=10)
+    if not result.success:
+        error = CommandResult(
+            success=False,
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr or "Failed to read $HOME on the x86 runner",
+            execution_time=result.execution_time,
+        )
+        return None, error
+
+    home = result.stdout.strip().rstrip("/")
+    if not home.startswith("/"):
+        return None, CommandResult(
+            success=False,
+            exit_code=-1,
+            stdout=result.stdout,
+            stderr=f"Invalid $HOME on the x86 runner: {home!r}",
+            execution_time=result.execution_time,
+        )
+    return home, None
+
+
+def _api_url(task_config: Mapping[str, Any], config: Mapping[str, Any]) -> str:
+    explicit = str(config.get("url") or config.get("api_url") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    host = str(task_config.get("host_addr") or "127.0.0.1").strip() or "127.0.0.1"
+    port = task_config.get("port", 8800)
+    return f"http://{host}:{port}/v1"
+
+
+def _generation_kwargs_repr(config: Mapping[str, Any]) -> str:
+    raw = config.get("generation_kwargs") or {}
+    if not isinstance(raw, Mapping) or not raw:
+        return "dict()"
+    if all(str(key).isidentifier() for key in raw):
+        return "dict(" + ", ".join(f"{key}={value!r}" for key, value in raw.items()) + ")"
+    return repr(dict(raw))
+
+
+def _render_python_config(task_config: Mapping[str, Any]) -> str:
+    config = swebench_config(task_config)
+    dataset = swebench_dataset_name(task_config)
+    abbr = f"swebench_{dataset}"
+    model = str(
+        config.get("model") or task_config.get("served_model_name") or ""
+    ).strip()
+    api_key = str(config.get("api_key") or "EMPTY")
+    url = _api_url(task_config, config)
+    split = str(config.get("split") or DEFAULT_SWEBENCH_SPLIT)
+    try:
+        step_limit = int(config.get("step_limit") or DEFAULT_SWEBENCH_STEP_LIMIT)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("benchmark.swebench.step_limit must be an integer") from exc
+    try:
+        batch_size = int(config.get("batch_size") or DEFAULT_SWEBENCH_BATCH_SIZE)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("benchmark.swebench.batch_size must be an integer") from exc
+    dataset_path = str(config.get("dataset_path") or "")
+    filter_spec = str(config.get("filter_spec") or "")
+    shuffle = bool(config.get("shuffle", False))
+    return f"""# Generated by xTask for AISBench SWE-bench. Do not use for GSM8K perf/acc.
+import os
+from ais_bench.benchmark.datasets import SWEBenchDataset
+from ais_bench.benchmark.partitioners import NaivePartitioner
+from ais_bench.benchmark.runners import LocalRunner
+from ais_bench.benchmark.tasks import SWEBenchInferTask, SWEBenchEvalTask
+from ais_bench.benchmark.summarizers import SWEBenchSummarizer
+
+_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+work_dir = os.environ.get("SWE_WORK_DIR", _CONFIG_DIR)
+
+STEP_LIMIT = {step_limit}
+
+models = [
+    dict(
+        attr="local",
+        abbr="swebench",
+        type="LiteLLMChat",
+        model={_py_str(model)},
+        api_key={_py_str(api_key)},
+        url={_py_str(url)},
+        batch_size={batch_size},
+        generation_kwargs={_generation_kwargs_repr(config)},
+    )
+]
+
+datasets = [
+    dict(
+        type=SWEBenchDataset,
+        abbr={_py_str(abbr)},
+        path={_py_str(dataset_path)},
+        name={_py_str(dataset)},
+        split={_py_str(split)},
+        step_limit=STEP_LIMIT,
+        filter_spec={_py_str(filter_spec)},
+        shuffle={shuffle!r},
+    )
+]
+
+summarizer = dict(
+    attr="accuracy",
+    type=SWEBenchSummarizer,
+)
+
+infer = dict(
+    partitioner=dict(type=NaivePartitioner),
+    runner=dict(
+        type=LocalRunner,
+        task=dict(type=SWEBenchInferTask),
+    ),
+)
+
+eval = dict(
+    partitioner=dict(type=NaivePartitioner),
+    runner=dict(
+        type=LocalRunner,
+        task=dict(type=SWEBenchEvalTask),
+    ),
+)
+"""
+
+
+def _render_shell(task_config: Mapping[str, Any]) -> str:
+    config = swebench_config(task_config)
+    mode = swebench_mode(task_config)
+    reuse = bool(config.get("reuse", True))
+    ais_bench_bin = str(config.get("ais_bench_bin") or "ais_bench")
+    extra_args = _safe_extra_args(config.get("extra_args"))
+    command_parts = [
+        '"$AIS_BENCH_BIN"',
+        '"$CONFIG_FILE"',
+        "-m",
+        _quote(mode),
+    ]
+    if reuse:
+        command_parts.append("--reuse")
+    command_parts.extend(_quote(item) for item in extra_args)
+    command = " ".join(command_parts)
+    return "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"',
+            f'CONFIG_FILE="$SCRIPT_DIR/{CONFIG_FILENAME}"',
+            'WORK_DIR="${SWE_WORK_DIR:-$SCRIPT_DIR}"',
+            f'AIS_BENCH_BIN="${{AIS_BENCH_BIN:-{_quote(ais_bench_bin)}}}"',
+            'export SWE_WORK_DIR="$WORK_DIR"',
+            'mkdir -p "$WORK_DIR"',
+            'cd "$WORK_DIR"',
+            'if [ ! -f "$CONFIG_FILE" ]; then',
+            '    echo "SWE-bench AISBench config is missing: $CONFIG_FILE" >&2',
+            "    exit 1",
+            "fi",
+            f"if ! {command}; then",
+            '    echo "AISBench SWE-bench execution failed" >&2',
+            "    exit 1",
+            "fi",
+            'echo "AISBench SWE-bench finished; results under $WORK_DIR"',
+            "",
+        ]
+    )
+
+
+def generate_aisbench_swe_script(
+    task_config: Dict[str, Any],
+    output_file_path: str,
+    output_shell_file: str = SHELL_FILENAME,
+) -> str:
+    """Write AISBench SWE config + host-side runner script. Return bash command."""
+    validate_aisbench_swebench_task(task_config)
+    _safe_name(output_shell_file, "output_shell_file")
+    os.makedirs(output_file_path, exist_ok=True)
+    config_path = os.path.join(output_file_path, CONFIG_FILENAME)
+    shell_path = os.path.join(output_file_path, output_shell_file)
+    with open(config_path, "w", encoding="utf-8") as stream:
+        stream.write(_render_python_config(task_config))
+    with open(shell_path, "w", encoding="utf-8") as stream:
+        stream.write(_render_shell(task_config))
+    os.chmod(shell_path, 0o755)
+    logging.info("SWE-bench AISBench script generated: %s", shell_path)
+    return f"bash {shlex.quote(shell_path)}"
+
+
+def execute_aisbench_swe_benchmark(
+    task_config: Mapping[str, Any],
+    output_file_path: str,
+    timeout: Optional[int] = None,
+    output_shell_file: str = SHELL_FILENAME,
+) -> CommandResult:
+    """Run the generated SWE script on the configured x86 host.
+
+    Syncs AISBench source from the control node and pip-installs AISBench,
+    mini-swe-agent and the SWE-bench harness on the runner first. Docker must
+    already be available on that host.
+
+    Local runner: execute in the case output directory.
+    Remote runner: upload the case directory, run, then download results.
+    Never execs into the xLLM/NPU container.
+    """
+    validate_aisbench_swebench_task(task_config)
+    runner = swebench_runner(task_config)
+    host = str(runner.get("host") or "").strip()
+    user = runner.get("user")
+    try:
+        port = int(runner.get("port") or 22)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("benchmark.swebench.runner.port must be an integer") from exc
+    timeout_s = timeout if timeout is not None else swebench_timeout_s(task_config)
+    local_script = os.path.join(output_file_path, output_shell_file)
+    if not os.path.isfile(local_script):
+        generate_aisbench_swe_script(
+            dict(task_config), output_file_path, output_shell_file=output_shell_file
+        )
+
+    executor = create_host_executor(host, user=user, port=port)
+    from xtask.benchmarks.aisbench.swebench_x86_setup import setup_aisbench_swe_runner
+
+    config = swebench_config(task_config)
+    raw_setup = config.get("setup") or {}
+    setup_config = raw_setup if isinstance(raw_setup, Mapping) else {}
+    explicit_work_dir = str(runner.get("work_dir") or "").strip()
+    explicit_install_dir = str(
+        setup_config.get("install_dir") or runner.get("install_dir") or ""
+    ).strip()
+
+    remote_home = None
+    if not is_local_host(host) and (not explicit_work_dir or not explicit_install_dir):
+        remote_home, home_error = _remote_home(executor)
+        if home_error is not None:
+            return home_error
+
+    if explicit_work_dir:
+        work_dir = explicit_work_dir
+    elif remote_home:
+        case_name = _safe_name(
+            task_config.get("case_name") or "swebench", "case_name"
+        )
+        work_dir = f"{remote_home}/xtask_swe/{case_name}"
+    else:
+        work_dir = output_file_path
+
+    install_dir = explicit_install_dir or (
+        f"{remote_home}/xtask_swe/runtime" if remote_home else None
+    )
+    setup = setup_aisbench_swe_runner(
+        task_config,
+        executor,
+        host,
+        work_dir,
+        install_dir=install_dir,
+    )
+    if not setup.command.success:
+        return setup.command
+
+    ais_bench_prefix = ""
+    if setup.ais_bench_bin:
+        ais_bench_prefix = f"AIS_BENCH_BIN={shlex.quote(setup.ais_bench_bin)} "
+    if is_local_host(host):
+        logging.info("SWE-bench: running AISBench on local x86 host %s", host)
+        return executor.run(
+            f"{ais_bench_prefix}bash {shlex.quote(local_script)}",
+            timeout=timeout_s,
+        )
+
+    logging.info("SWE-bench: running AISBench on remote x86 host %s", host)
+    if not executor.upload(output_file_path, work_dir):
+        return CommandResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr=f"Failed to upload SWE-bench work dir to {host}:{work_dir}",
+            execution_time=0.0,
+        )
+    remote_script = os.path.join(work_dir, output_shell_file)
+    command = (
+        f"{ais_bench_prefix}SWE_WORK_DIR={shlex.quote(work_dir)} "
+        f"bash {shlex.quote(remote_script)}"
+    )
+    result = executor.run(command, timeout=timeout_s)
+    if not executor.download(work_dir, output_file_path):
+        logging.error(
+            "SWE-bench: AISBench finished on %s but result download failed", host
+        )
+        if result.success:
+            return CommandResult(
+                success=False,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=(result.stderr or "")
+                + f"\nFailed to download SWE-bench results from {host}:{work_dir}",
+                execution_time=result.execution_time,
+            )
+    return result

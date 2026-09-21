@@ -4,7 +4,7 @@
 
 1. 先写模型和数据集。
 2. 再选一个 benchmark：AISBench、EvalScope 或 VBench。
-3. 再选一种测试：性能 `perf`、精度 `acc` 或视频质量 `vbench`。
+3. 再选一种测试：性能 `perf`、精度 `acc`、视频质量 `vbench`，或 SWE-bench `swebench`。
 4. 最后选部署：单机、普通多机、普通实例统一路由，或者 PD 分离；需要搜索时再加搜索段。
 
 ## 1. 可参考示例
@@ -38,6 +38,8 @@
 | 单机 Wan2.2 I2V + VBench 质量评测 | `25_single_vbench_wan_i2v.yaml` |
 | 外部已有服务 + AISBench 性能 | `26_external_aisbench_perf.yaml` |
 | 外部已有 Wan2.2 + VBench | `27_external_vbench_wan_i2v.yaml` |
+| 单机起 xLLM + AISBench SWE-bench（x86 Agent/打分） | `28_single_aisbench_swebench.yaml` |
+| 外部已有服务 + AISBench SWE-bench | `29_external_aisbench_swebench.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
 
@@ -48,7 +50,7 @@ case_name: qwen3_8b_xllm_perf_i1024_o1024_bs1
 engine_type: xllm
 model_path: /export/home/models/Qwen3-8B
 served_model_name: Qwen3-8B
-metrics: perf                 # perf=性能，acc=精度，vbench=视频质量
+metrics: perf                 # perf=性能，acc=精度，vbench=视频质量，swebench=SWE-bench
 dataset_name: gsm8k
 dataset_path: ''
 dataset_format: json
@@ -67,7 +69,7 @@ deployment: {}
 | `engine_type` | 是 | 要启动哪个推理引擎 | 本文只讲 `xllm`。写成其他值会走其他引擎流程。 |
 | `model_path` | 是 | 模型权重在宿主机上的目录 | 所有参与启动 xLLM 的服务器都要有这个目录。工程不会自动同步整个模型目录；容器内会通过路径映射访问它。 |
 | `served_model_name` | 是 | 请求接口里传给 `model` 的名字 | AISBench 和 EvalScope 都会使用它。它可以与目录名不同，但必须是当前 xLLM 服务接受的模型名。 |
-| `metrics` | 是 | 选择性能、精度或视频质量 | `perf` 表示性能，`acc` 表示精度，`vbench` 表示视频质量。真正决定执行分支的是这个字段，不是 `case_type`。当前用例建议一次只写一种。 |
+| `metrics` | 是 | 选择性能、精度、视频质量或 SWE-bench | `perf` 表示性能，`acc` 表示精度，`vbench` 表示视频质量，`swebench` 表示 AISBench SWE-bench。真正决定执行分支的是这个字段，不是 `case_type`。当前用例建议一次只写一种。 |
 | `dataset_name` | 是 | benchmark 使用的数据集或数据生成器名称 | AISBench 性能常用 `gsm8k`、`syn`、`sharegpt`；EvalScope 精度直接把它传给 `--datasets`，性能传给 `--dataset`。 |
 | `dataset_path` | 按数据集需要 | 顶层数据集路径 | AISBench 配置了本地路径时会生成用例级数据集配置，优先使用 `benchmark.perf/acc.dataset_path`，否则使用此处路径；EvalScope 精度更常在 `dataset_args` 中指定。多机资源同步建议填写 `/xllm_test_060/...` 容器路径。 |
 | `dataset_format` | 建议 | 数据文件格式说明 | 常写 `json`。它主要作为任务元数据保留，具体解析方式仍由 benchmark 和数据集配置决定。 |
@@ -104,7 +106,8 @@ deployment: {}
 
 `benchmark.benchmark_type` 决定使用哪个测试工具，目前本文覆盖 `aisbench`、`evalscope` 和
 `vbench`。`metrics: perf` 时必须提供 `benchmark.perf`，`metrics: acc` 时必须提供
-`benchmark.acc`，`metrics: vbench` 时必须提供 `benchmark.vbench`。
+`benchmark.acc`，`metrics: vbench` 时必须提供 `benchmark.vbench`，`metrics: swebench`
+时必须提供 `benchmark.swebench`，且 `benchmark_type` 仍为 `aisbench`。
 
 `benchmark.perf/acc.case_type` 建议分别写成 `performance`、`accuracy`，便于阅读和结果归类；但切换执行流程的仍是顶层 `metrics`。
 
@@ -321,6 +324,53 @@ GPQA Diamond 可以直接复用 AISBench 内置的 `gpqa_gen_0_shot_cot_chat_pro
 `dataset_path` 为空时，会沿用 AISBench 默认的相对路径。参考用例为
 `24_single_aisbench_gpqa_acc.yaml`。GPQA 评测结果按百分数记录，`baseline` 应使用实测百分数，
 不要写成 0 到 1 的小数。
+
+### AISBench SWE-bench
+
+SWE-bench 是独立评测类型，不能写成 `metrics: acc` 的 GSM8K 精度。必须同时设置
+`metrics: swebench`、`benchmark.benchmark_type: aisbench` 和 `benchmark.swebench`，
+现有性能/精度 YAML 不会进入这条路径。
+
+**不需要拆成两份 xTask。** 主路径就是一份 YAML、一次执行：
+
+1. xTask 按 `deployment.instances` 在 NPU 机器启动 xLLM（启动参数写法和 `01_single_aisbench_perf.yaml` 一样）。
+2. 同一轮调度把 AISBench SWE（mini-swe-agent infer + 官方 harness 打分）派到
+   `benchmark.swebench.runner.host` 这台 **x86** 机器。
+3. NPU 容器不安装 AISBench，也不跑 SWE 镜像。x86 需要能访问 xLLM 的 HTTP 地址。
+
+```yaml
+metrics: swebench
+benchmark:
+  benchmark_type: aisbench
+  swebench:
+    mode: all                 # infer | eval | all；默认一次做完，不必拆两次
+    dataset: verified_mini
+    step_limit: 200
+    reuse: true
+    timeout: 86400
+    runner:
+      host: 11.87.48.253      # x86；Docker 需已装，AISBench/SWE 由 xTask 自动安装
+deployment:
+  master_host: 11.87.191.75
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    device_ids: [0, 1]
+    local_port: 8800
+    serving_extensiable_param: { ... }
+```
+
+完整端到端示例：`28_single_aisbench_swebench.yaml`。
+
+xTask 会把主节点上的 AISBench 源码（`DEPENDENCE_PACKAGE_PATH/benchmark`，与
+`download_ais_bench.sh` 同一棵树）同步到 x86，并在 x86 本机 `pip install`
+AISBench、mini-swe-agent 和 SWE-bench harness。不需要事先手装这三样。
+x86 仍需 Docker 可用，`docker ps` 能通过；instance 镜像首次评测时再 pull。
+不要把 ARM NPU 机器上的 binfmt 当作生产路径。
+
+只有服务已经在跑时，才用 `external_service` 写法，见 `29_external_aisbench_swebench.yaml`，
+语义和 `26_external_aisbench_perf.yaml` 相同。`mode: infer` / `mode: eval` 也可以拆开做，
+那是可选的断点续跑，不是默认要求。
 
 ### EvalScope 性能
 

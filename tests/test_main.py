@@ -134,9 +134,11 @@ class RunValidatedWorkflowTest(unittest.TestCase):
 
     def test_non_para_set_runs_task_workflow_without_strategy(self):
         args = _make_args(assess_test_type="normal")
+        self.mock_workflow.return_value = False
 
-        main.run_validated_workflow(args, {"cfg": 1})
+        result = main.run_validated_workflow(args, {"cfg": 1})
 
+        self.assertFalse(result)
         self.mock_resolve.assert_not_called()
         self.mock_tpe.assert_not_called()
         self.mock_workflow.assert_called_once_with(
@@ -234,6 +236,41 @@ class MainEntryTest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 1)
         mock_run.assert_not_called()
+
+    @mock.patch.object(main, "run_validated_workflow")
+    @mock.patch.object(main, "parse_and_validate_arguments")
+    @mock.patch.object(main, "init_logger")
+    def test_exits_when_workflow_fails(
+        self, mock_init, mock_parse, mock_run
+    ):
+        mock_parse.return_value = (
+            _make_args(),
+            SimpleNamespace(is_valid=True),
+            {"cfg": 1},
+        )
+        mock_run.return_value = False
+
+        with self.assertRaises(SystemExit) as ctx:
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 1)
+        mock_run.assert_called_once()
+
+    @mock.patch.object(main, "run_validated_workflow")
+    @mock.patch.object(main, "parse_and_validate_arguments")
+    @mock.patch.object(main, "init_logger")
+    def test_does_not_exit_when_workflow_succeeds(
+        self, mock_init, mock_parse, mock_run
+    ):
+        mock_parse.return_value = (
+            _make_args(),
+            SimpleNamespace(is_valid=True),
+            {"cfg": 1},
+        )
+        mock_run.return_value = True
+
+        self.assertIsNone(main.main())
+        mock_run.assert_called_once()
 
     @mock.patch.object(main, "parse_and_validate_arguments")
     @mock.patch.object(main, "init_logger")

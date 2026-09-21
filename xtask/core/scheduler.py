@@ -321,6 +321,17 @@ def generate_benchmark_command(
     benchmark = task_config.get("benchmark") or {}
     benchmark_type = benchmark.get("benchmark_type")
     if benchmark_type == "aisbench":
+        from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
+
+        if is_aisbench_swebench_task(task_config):
+            from xtask.benchmarks.aisbench.generate_aisbench_swe_script import (
+                generate_aisbench_swe_script,
+            )
+
+            return generate_aisbench_swe_script(
+                task_config=_bench_task_config_with_endpoint(),
+                output_file_path=output_file_path,
+            )
         from xtask.benchmarks.aisbench.generate_aisbench_script import generate_aisbench_script
 
         return generate_aisbench_script(
@@ -619,10 +630,16 @@ def _execute_benchmark_with_npu_guard(container_manager, container_config,
         abort_event = guard.abort_event
 
     try:
+        # Per-case YAML ``benchmark_timeout`` wins; otherwise keep the engine
+        # default (xllm_config.json: 7200).  Long VBench mini runs (107 videos)
+        # set this explicitly; other cases are unchanged when the key is absent.
+        timeout = (task_config or {}).get("benchmark_timeout")
+        if timeout in (None, ""):
+            timeout = engine_config.get("benchmark_timeout", 3600)
         benchmark_result = container_manager.exec_in_container(
             container_config.container_name,
             benchmark_cmd,
-            timeout=engine_config.get("benchmark_timeout", 3600),
+            timeout=int(timeout),
             abort_event=abort_event,
             abort_poll_interval=engine_config.get("npu_guard_abort_poll_interval", 120.0),
         )
@@ -1446,6 +1463,18 @@ def _is_vbench_task(task_config):
     return str((task_config.get("benchmark") or {}).get("benchmark_type", "")).lower() == "vbench"
 
 
+def _is_aisbench_swebench_task(task_config):
+    from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
+
+    return is_aisbench_swebench_task(task_config)
+
+
+def _is_swebench_eval_only(task_config):
+    from xtask.benchmarks.aisbench.swebench import is_swebench_eval_only
+
+    return is_swebench_eval_only(task_config)
+
+
 def _vbench_container_config(context, service_manager, service_config):
     """Build an isolated VBench runner config for the benchmark host.
 
@@ -1607,10 +1636,19 @@ def _prepare_external_client_container(context):
 
     AISBench/EvalScope reuse the engine image as a client. VBench uses its
     dedicated runner image and does not keep a dummy serving container.
+    SWE-bench infer/eval runs on a dedicated x86 host via AISBench, so it
+    does not use the xLLM image as a client.
     """
     state = context.state
     task_config = state["task_config"]
     engine_config = state["engine_config"]
+    if _is_aisbench_swebench_task(task_config):
+        os.makedirs(context.output_file_path, exist_ok=True)
+        state["init_entries"] = os.listdir(context.output_file_path)
+        logging.info(
+            "SWE-bench: skip AISBench client container; infer/eval run on x86 host"
+        )
+        return
     if _is_vbench_task(task_config):
         _prepare_vbench_container(context, None, engine_config)
         if context.complete:
@@ -1719,6 +1757,11 @@ def _prepare_container(context):
     state = context.state
     if state.get("external_service"):
         _prepare_external_client_container(context)
+        return
+    if _is_swebench_eval_only(state.get("task_config") or {}):
+        os.makedirs(context.output_file_path, exist_ok=True)
+        state["init_entries"] = os.listdir(context.output_file_path)
+        logging.info("SWE-bench eval-only: skip xLLM serving container")
         return
     if state.get("multi_host"):
         _prepare_container_multi_host(context)
@@ -1911,6 +1954,9 @@ def _prepare_runtime_dependencies(context):
 
     task_config = state["task_config"]
     engine_config = state["engine_config"]
+    if _is_swebench_eval_only(task_config):
+        logging.info("SWE-bench eval-only: skip xLLM/AISBench container dependency prep")
+        return
     container_config = state["container_config"]
     container_manager = state["container_manager"]
     timeout = engine_config.get("startup_timeout", 300)
@@ -1929,7 +1975,7 @@ def _prepare_runtime_dependencies(context):
 
     benchmark_type = task_config.get("benchmark").get("benchmark_type")
     down_benchmark_cmd = ""
-    if benchmark_type == "aisbench":
+    if benchmark_type == "aisbench" and not _is_aisbench_swebench_task(task_config):
         down_benchmark_cmd = "bash /workspace/tools/download_ais_bench.sh;"
     elif benchmark_type == "evalscope":
         down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
@@ -2057,7 +2103,7 @@ def _prepare_runtime_dependencies_multi_host(context):
         transformers_version = json.load(config_file).get("transformers_version")
 
     benchmark_type = task_config.get("benchmark").get("benchmark_type")
-    if benchmark_type == "aisbench":
+    if benchmark_type == "aisbench" and not _is_aisbench_swebench_task(task_config):
         down_benchmark_cmd = "bash /workspace/tools/download_ais_bench.sh;"
     elif benchmark_type == "evalscope":
         down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
@@ -2153,6 +2199,9 @@ def _prepare_external_runtime_dependencies(context):
     state = context.state
     task_config = state["task_config"]
     engine_config = state["engine_config"]
+    if _is_aisbench_swebench_task(task_config):
+        logging.info("SWE-bench: skip AISBench install in the xLLM/client container")
+        return
     container_config = state.get("container_config")
     container_manager = state.get("container_manager")
     if container_manager is None or container_config is None:
@@ -2205,9 +2254,9 @@ def _probe_external_service(context) -> bool:
 
     state = context.state
     task_config = state["task_config"]
-    if is_vbench_evaluate_only(task_config):
+    if is_vbench_evaluate_only(task_config) or _is_swebench_eval_only(task_config):
         logging.info(
-            "external_service: VBench evaluate-only, skip live endpoint probe"
+            "external_service: evaluate-only SWE/VBench task, skip live endpoint probe"
         )
         state["service_healthy"] = True
         return True
@@ -2221,6 +2270,39 @@ def _probe_external_service(context) -> bool:
     manager = state.get("container_manager")
     container_config = state.get("container_config")
     if manager is None or container_config is None:
+        if _is_aisbench_swebench_task(task_config):
+            from xtask.utils.host_executor import LocalHostExecutor
+
+            try:
+                origin = get_benchmark_endpoint(
+                    task_config, state.get("service_plans") or []
+                )
+            except Exception:
+                origin = resolve_external_origin(task_config)
+            check_url = origin.rstrip("/") + health_path
+            check_cmd = (
+                f"curl --noproxy '*' -sS -o /dev/null -w '%{{http_code}}' "
+                f"--max-time 10 {shlex.quote(check_url)}"
+            )
+            logging.info(
+                "SWE-bench: probing live endpoint from scheduler host %s", check_url
+            )
+            health_result = LocalHostExecutor().run(check_cmd, timeout=30)
+            state["health_result"] = health_result
+            healthy = bool(
+                health_result.success and _http_status_is_success(health_result.stdout)
+            )
+            state["service_healthy"] = healthy
+            if healthy:
+                logging.info("SWE-bench endpoint is healthy: %s", check_url)
+                return True
+            message = (
+                f"SWE-bench health check failed for {check_url}: "
+                f"{health_result.stderr or health_result.stdout}"
+            )
+            context.result["message"] = message
+            logging.error(message)
+            return False
         _fail_stage(context, "external_service has no client container for health probe")
         state["service_healthy"] = False
         return False
@@ -2290,6 +2372,10 @@ def _start_and_wait_service(context):
     state = context.state
     if state.get("external_service"):
         _probe_external_service(context)
+        return
+    if _is_swebench_eval_only(state.get("task_config") or {}):
+        logging.info("SWE-bench eval-only: skip xLLM startup")
+        state["service_healthy"] = True
         return
     if state.get("multi_host"):
         _start_and_wait_service_multi_host(context)
@@ -2965,12 +3051,100 @@ def _start_and_wait_service_multi_host(context):
             )
 
 
+def _run_aisbench_swe_and_process(context):
+    """Run AISBench SWE-bench on the x86 host and verify resolved_rate.
+
+    Isolated from the AISBench GSM8K acc/perf container path: no NPU guard,
+    no download_ais_bench, and no acc/perf postprocess.
+    """
+    from xtask.benchmarks.aisbench.aisbench_swe_postprocess import (
+        aisbench_swe_post_process,
+    )
+    from xtask.benchmarks.aisbench.generate_aisbench_swe_script import (
+        execute_aisbench_swe_benchmark,
+    )
+    from xtask.benchmarks.aisbench.swebench import swebench_timeout_s
+
+    state = context.state
+    task_config = state["task_config"]
+    os.makedirs(context.output_file_path, exist_ok=True)
+    init_entries = os.listdir(context.output_file_path)
+    state["init_entries"] = init_entries
+    logging.info("Executing AISBench SWE-bench on the configured x86 runner")
+    benchmark_result = execute_aisbench_swe_benchmark(
+        task_config,
+        context.output_file_path,
+        timeout=swebench_timeout_s(task_config),
+    )
+    state["benchmark_result"] = benchmark_result
+    context.result.update(
+        benchmark_success=benchmark_result.success,
+        benchmark_exit_code=benchmark_result.exit_code,
+        benchmark_stdout=benchmark_result.stdout,
+        benchmark_stderr=benchmark_result.stderr,
+        benchmark_execution_time=benchmark_result.execution_time,
+    )
+    if benchmark_result.success:
+        try:
+            swe_result, output_dir = aisbench_swe_post_process(
+                task_config, context.output_file_path, init_entries
+            )
+            context.result["benchmark_swebench_result"] = swe_result
+            if output_dir:
+                context.result["benchmark_output_path"] = output_dir
+                _record_service_group_archive_path(state, output_dir)
+        except Exception as exc:
+            context.result["benchmark_swebench_result"] = None
+            context.result["message"] = f"SWE-bench result processing failed: {exc}"
+            logging.error(context.result["message"], exc_info=True)
+    else:
+        context.result["message"] = (
+            f"Benchmark command failed with exit code {benchmark_result.exit_code}"
+        )
+        if benchmark_result.stdout:
+            logging.error("SWE-bench stdout:\n%s", benchmark_result.stdout)
+        if benchmark_result.stderr:
+            logging.error("SWE-bench stderr:\n%s", benchmark_result.stderr)
+        logging.error(context.result["message"])
+
+    container_manager = state.get("container_manager")
+    container_id = context.result.get("container_id")
+    if container_manager is not None and container_id:
+        try:
+            context.result["logs"] = container_manager.get_container_logs(
+                container_id, tail=100
+            )
+        except Exception:
+            logging.warning("Failed to collect xLLM logs for SWE-bench case", exc_info=True)
+            context.result["logs"] = ""
+    else:
+        context.result["logs"] = ""
+
+    context.result["success"] = False
+    if verify_result(context.result, task_config):
+        context.result["success"] = True
+        if not context.result.get("message"):
+            context.result["message"] = (
+                f"Task scheduled successfully in container {container_id}"
+                if container_id
+                else "SWE-bench task completed successfully"
+            )
+    else:
+        if benchmark_result.success and not context.result.get("message"):
+            context.result["message"] = "Benchmark result verification failed"
+        logging.error("verify result failed.")
+
+
 def _run_benchmark_and_process(context):
     state = context.state
     if not state["service_healthy"]:
         return
 
     task_config = state["task_config"]
+    if _is_aisbench_swebench_task(task_config):
+        _run_aisbench_swe_and_process(context)
+        return
+
     engine_config = state["engine_config"]
     container_config = state["container_config"]
     container_manager = state["container_manager"]

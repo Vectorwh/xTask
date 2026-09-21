@@ -68,5 +68,79 @@ class TaskExecutionWorkflowTests(unittest.TestCase):
         self.assertEqual(reporter.record_result.call_count, 2)
 
 
+def _make_workflow(args, tasks, execute, assess=lambda **kwargs: None):
+    return TaskExecutionWorkflow(
+        args=args,
+        xtask_config={},
+        openme_client=mock.Mock(),
+        para_strategy=None,
+        task_loader=lambda *loader_args: tasks,
+        task_executor=execute,
+        auto_assessor=assess,
+        reporter_factory=lambda *args, **kwargs: None,
+        session_closer=mock.Mock(),
+    )
+
+
+class TaskExecutionWorkflowStatusTests(unittest.TestCase):
+    def test_normal_failed_task_returns_false(self):
+        workflow = _make_workflow(
+            args=SimpleNamespace(assess_test_type="normal"),
+            tasks={"/tmp/case.yaml": "/tmp/case"},
+            execute=lambda *args: ({"success": False}, None),
+        )
+
+        self.assertFalse(workflow.run())
+
+    def test_normal_successful_task_returns_true(self):
+        workflow = _make_workflow(
+            args=SimpleNamespace(assess_test_type="normal"),
+            tasks={"/tmp/case.yaml": "/tmp/case"},
+            execute=lambda *args: ({"success": True}, None),
+        )
+
+        self.assertTrue(workflow.run())
+
+    def test_result_without_success_field_keeps_legacy_success(self):
+        workflow = _make_workflow(
+            args=SimpleNamespace(assess_test_type="normal"),
+            tasks={"/tmp/case.yaml": "/tmp/case"},
+            execute=lambda *args: ({"task_config": {}}, None),
+        )
+
+        self.assertTrue(workflow.run())
+
+    def test_executor_exception_returns_false(self):
+        def execute(*args):
+            raise RuntimeError("boom")
+
+        workflow = _make_workflow(
+            args=SimpleNamespace(assess_test_type="normal"),
+            tasks={"/tmp/case.yaml": "/tmp/case"},
+            execute=execute,
+        )
+
+        with self.assertLogs(level="ERROR"):
+            self.assertFalse(workflow.run())
+
+    def test_auto_assess_uses_latest_result_for_base_case(self):
+        tasks = {
+            "/tmp/case_bs-1.yaml": "/tmp/case_bs-1",
+            "/tmp/case_bs-2.yaml": "/tmp/case_bs-2",
+        }
+        results = iter([{"success": False}, {"success": True}])
+
+        def execute(*args):
+            return next(results), None
+
+        workflow = _make_workflow(
+            args=SimpleNamespace(assess_test_type="auto_assess"),
+            tasks=tasks,
+            execute=execute,
+        )
+
+        self.assertTrue(workflow.run())
+
+
 if __name__ == "__main__":
     unittest.main()

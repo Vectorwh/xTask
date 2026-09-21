@@ -1,0 +1,38 @@
+case_name: 29_external_aisbench_swebench
+engine_type: xllm
+external_service: true
+model_path: /export/home/models/Qwen3-8B
+served_model_name: Qwen3-8B
+metrics: swebench
+dataset_name: swebench
+dataset_path: ''
+dataset_format: json
+userid: 1048
+
+# 仅当 xLLM 已经在跑时使用，写法同 26_external_aisbench_perf。
+# xTask 不再启动服务，只把 AISBench SWE 派到 x86 runner。
+# AISBench / mini-swe-agent / SWE harness 仍由 xTask 自动同步并 pip，不必手装。
+# 日常端到端请用 28_single_aisbench_swebench.yaml，不要把主路径拆成两次 xTask。
+benchmark:
+  benchmark_type: aisbench
+  swebench:
+    case_type: swebench
+    mode: all
+    dataset: verified_mini
+    dataset_path: ''
+    split: test
+    step_limit: 200
+    batch_size: 1
+    reuse: true
+    timeout: 86400
+    generation_kwargs:
+      temperature: 0.0
+    baseline: null
+    threshold: 0.10
+    runner:
+      host: 11.87.48.253      # x86；凭据走 ~/.xtask.env
+
+deployment:
+  benchmark:
+    endpoint: http://11.87.191.75:8800
+    health_path: /health

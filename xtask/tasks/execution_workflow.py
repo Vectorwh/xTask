@@ -2,6 +2,7 @@
 
 import logging
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -42,6 +43,8 @@ class TaskExecutionWorkflow:
         self.reporter = None
         self.scheduler_session = None
         self.active_auto_assess_case = None
+        self._execution_success = True
+        self._auto_assess_case_success = {}
 
     def run(self):
         """Generate the initial queue, execute it, and always close resources."""
@@ -62,6 +65,43 @@ class TaskExecutionWorkflow:
                     break
         finally:
             self._close()
+
+        if getattr(self.args, "assess_test_type", None) == "auto_assess":
+            return self._execution_success and all(
+                self._auto_assess_case_success.values()
+            )
+        return self._execution_success
+
+    def _record_execution_status(self, result) -> None:
+        """Aggregate task status without changing scheduler behavior."""
+        # Keep compatibility with internal callers and tests that use a
+        # simplified result without a top-level ``success`` field. Scheduler
+        # results produced by ``_initial_result`` always contain the field.
+        if not isinstance(result, Mapping):
+            success = False
+        elif "success" in result:
+            success = bool(result["success"])
+        else:
+            success = True
+        if getattr(self.args, "assess_test_type", None) == "auto_assess":
+            if self.active_auto_assess_case:
+                # Auto-assessment may run several search trials per base case.
+                # Only the latest terminal result for each base case should
+                # determine the overall workflow status.
+                self._auto_assess_case_success[self.active_auto_assess_case] = success
+            else:
+                self._execution_success = self._execution_success and success
+            return
+
+        self._execution_success = self._execution_success and success
+
+    def _record_execution_exception(self) -> None:
+        self._execution_success = False
+        if (
+            getattr(self.args, "assess_test_type", None) == "auto_assess"
+            and self.active_auto_assess_case
+        ):
+            self._auto_assess_case_success[self.active_auto_assess_case] = False
 
     def _initialize_queue(self):
         self.tasks = self.task_loader(
@@ -95,6 +135,7 @@ class TaskExecutionWorkflow:
                 self.args,
                 self.scheduler_session,
             )
+            self._record_execution_status(result)
             self.openme_client.AddCaseResult(
                 result, task_path=current_task_key
             )
@@ -132,6 +173,7 @@ class TaskExecutionWorkflow:
                 error,
             )
             traceback.print_exc()
+            self._record_execution_exception()
             self._record_failure(current_task_key, error)
             return None
 

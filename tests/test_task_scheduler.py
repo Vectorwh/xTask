@@ -473,6 +473,40 @@ deployment:
 
         self.assertEqual(intervals, [45])
 
+    def test_case_yaml_benchmark_timeout_overrides_engine_default(self):
+        from xtask.core import scheduler
+
+        manager = mock.Mock()
+        manager.exec_in_container.return_value = SimpleNamespace(
+            success=True, exit_code=0, stdout="", stderr="", execution_time=0.1
+        )
+
+        class FakeGuard:
+            aborted_reason = None
+            abort_event = None
+
+            def __init__(self, **kwargs):
+                import threading
+                self.abort_event = threading.Event()
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        with mock.patch("xtask.utils.watchdog.NpuProcessGuard", FakeGuard):
+            scheduler._execute_benchmark_with_npu_guard(
+                manager,
+                SimpleNamespace(container_name="vbench-runner"),
+                {"benchmark_timeout": 86400},
+                {"benchmark_timeout": 7200},
+                "run-vbench",
+                npu_card_ids=[0],
+            )
+        manager.exec_in_container.assert_called_once()
+        self.assertEqual(manager.exec_in_container.call_args.kwargs["timeout"], 86400)
+
     def test_pd_group_worker_readiness_checks_process_only(self):
         from xtask.core import scheduler
 

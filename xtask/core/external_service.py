@@ -94,7 +94,11 @@ def is_vbench_evaluate_only(task_config: Optional[Dict[str, Any]]) -> bool:
 def requires_external_endpoint(task_config: Dict[str, Any]) -> bool:
     if not is_external_service_enabled(task_config):
         return False
-    return not is_vbench_evaluate_only(task_config)
+    if is_vbench_evaluate_only(task_config):
+        return False
+    from xtask.benchmarks.aisbench.swebench import is_swebench_eval_only
+
+    return not is_swebench_eval_only(task_config)
 
 
 def _external_block(task_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -266,6 +270,10 @@ def apply_external_service_to_task_config(task_config: Dict[str, Any]) -> None:
     if not is_external_service_enabled(task_config):
         return
     if is_vbench_evaluate_only(task_config) and not _raw_endpoint_spec(task_config):
+        return
+    from xtask.benchmarks.aisbench.swebench import is_swebench_eval_only
+
+    if is_swebench_eval_only(task_config) and not _raw_endpoint_spec(task_config):
         return
     location = resolve_external_location(task_config)
     task_config["host_addr"] = location.host

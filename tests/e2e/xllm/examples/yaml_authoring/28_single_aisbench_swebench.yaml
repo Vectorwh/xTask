@@ -1,0 +1,61 @@
+case_name: 28_single_aisbench_swebench
+engine_type: xllm
+model_path: /export/home/models/Qwen3-8B
+served_model_name: Qwen3-8B
+metrics: swebench
+dataset_name: swebench
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+# 一份 YAML、一次 xTask：先在 NPU 机器拉起 xLLM，再把 AISBench SWE
+#（mini-swe-agent infer + 官方 harness eval）派到 x86 runner 上执行。
+# xTask 会从主节点同步 AISBench 源码，并在 x86 上自动 pip 安装
+# AISBench / mini-swe-agent / SWE-bench harness。x86 只需 Docker 可用。
+benchmark:
+  benchmark_type: aisbench
+  swebench:
+    case_type: swebench
+    mode: all                 # infer | eval | all；默认 all=推理+打分一次做完
+    dataset: verified_mini    # verified_mini / lite / verified / full / multilingual
+    dataset_path: ''          # 空则 AISBench 从 Hugging Face 拉取；可改为本地 parquet
+    split: test
+    step_limit: 200
+    batch_size: 1
+    reuse: true
+    timeout: 86400
+    generation_kwargs:
+      temperature: 0.0
+    baseline: null            # 配置后按 resolved_rate 做 baseline * (1 ± threshold)
+    threshold: 0.10
+    runner:
+      host: 11.87.48.253      # 必填：x86 机器。Docker 需已装；AISBench/SWE 由 xTask 自动安装
+      # user: ext.jiangenbao1  # 省略时用 ~/.xtask.env 里的 XTASK_SSH_USER/PASS
+    ais_bench_bin: /export/home/ext.jiangenbao1/xtask_swe/runtime/ais_bench-docker
+    setup:
+      python: /export/home/ext.jiangenbao1/xtask_swe/runtime/python3.11-docker
+
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [14, 15]
+    local_port: 8800
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_seqs_per_batch: 10
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: true
+      enable_shm: true
+      block_size: 128
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true

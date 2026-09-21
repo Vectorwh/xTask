@@ -437,6 +437,39 @@ def verify_result(result, task_config):
             return False
         return check_accuracy_within_threshold(baseline_value, threshold, actual_value)
 
+    from xtask.benchmarks.aisbench.swebench import (
+        is_aisbench_swebench_task,
+        swebench_mode,
+    )
+
+    if is_aisbench_swebench_task(task_config):
+        swe_result = result.get("benchmark_swebench_result")
+        if not isinstance(swe_result, Mapping):
+            logging.error("✗ Test failed: missing SWE-bench result")
+            return False
+        mode = swebench_mode(task_config)
+        if mode in {"eval", "all"} and swe_result.get("resolved_rate") is None:
+            logging.error("✗ Test failed: SWE-bench resolved_rate is missing")
+            return False
+        if mode == "infer" and not (
+            swe_result.get("predictions_file")
+            or swe_result.get("submitted_instances")
+            or swe_result.get("completed_ratio") is not None
+        ):
+            logging.error("✗ Test failed: SWE-bench infer produced no predictions")
+            return False
+        baseline = _swebench_baseline(task_config)
+        actual = swe_result.get("resolved_rate")
+        if baseline is None or actual is None:
+            return True
+        baseline_value, threshold = baseline
+        try:
+            actual_value = float(actual)
+        except (TypeError, ValueError):
+            logging.error("✗ Test failed: invalid SWE-bench resolved_rate: %r", actual)
+            return False
+        return check_accuracy_within_threshold(baseline_value, threshold, actual_value)
+
     if "acc" in task_config.get("metrics"):
         baseline = task_config.get("benchmark").get("acc").get("baseline")
         if baseline:
@@ -547,6 +580,16 @@ def _configured_baseline(task_config):
     # A vbench block may be present as metadata in a non-VBench task.  Only
     # an explicit VBench metric is allowed to select its baseline.
     if not _contains_metric(task_config, "vbench"):
+        if not _contains_metric(task_config, "swebench"):
+            return None
+        from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
+
+        if not is_aisbench_swebench_task(task_config):
+            return None
+        swebench = (benchmark.get("swebench") or {}) if isinstance(benchmark, Mapping) else {}
+        baseline = swebench.get("baseline")
+        if baseline not in (None, ""):
+            return "swebench", baseline, swebench.get("threshold", 0.1)
         return None
     vbench = (benchmark.get("vbench") or {}) if isinstance(benchmark, Mapping) else {}
     evaluation = vbench.get("evaluation") or {}
@@ -570,6 +613,20 @@ def _vbench_baseline(task_config):
     return baseline, threshold
 
 
+def _swebench_baseline(task_config):
+    configured = _configured_baseline(task_config)
+    if configured is None or configured[0] != "swebench":
+        return None
+    try:
+        baseline = float(configured[1])
+        threshold = float(configured[2])
+    except (TypeError, ValueError):
+        return None
+    if baseline <= 0 or threshold < 0 or threshold > 1:
+        return None
+    return baseline, threshold
+
+
 def _baseline_failure_reason(result, task_config):
     configured = _configured_baseline(task_config)
     if configured is None:
@@ -581,6 +638,9 @@ def _baseline_failure_reason(result, task_config):
     elif metric_name == "vbench":
         actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
         metric_label = "vbench_total_score"
+    elif metric_name == "swebench":
+        actual = (result.get("benchmark_swebench_result") or {}).get("resolved_rate")
+        metric_label = "swebench_resolved_rate"
     else:
         failed = _failed_perf_baseline_rules(result, task_config)
         if not failed:
@@ -611,6 +671,9 @@ def _baseline_difference(result, task_config):
     elif metric_name == "vbench":
         actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
         metric_label = "vbench_total_score"
+    elif metric_name == "swebench":
+        actual = (result.get("benchmark_swebench_result") or {}).get("resolved_rate")
+        metric_label = "swebench_resolved_rate"
     else:
         failed = _failed_perf_baseline_rules(result, task_config)
         if not failed:
@@ -655,6 +718,8 @@ def _baseline_result_failed(result, task_config):
         actual = result.get("benchmark_acc_result")
     elif metric_name == "vbench":
         actual = (result.get("benchmark_vbench_result") or {}).get("total_score")
+    elif metric_name == "swebench":
+        actual = (result.get("benchmark_swebench_result") or {}).get("resolved_rate")
     else:
         failed = _failed_perf_baseline_rules(result, task_config)
         if failed is None:
@@ -728,6 +793,22 @@ def _classify_failure(result, task_config):
                     and vbench_result.get("total_score") is None
                 )
             )
+        elif _contains_metric(task_config, "swebench"):
+            from xtask.benchmarks.aisbench.swebench import swebench_mode
+
+            raw_swe_result = result.get("benchmark_swebench_result")
+            swe_result = raw_swe_result if isinstance(raw_swe_result, Mapping) else {}
+            mode = swebench_mode(task_config)
+            if not isinstance(raw_swe_result, Mapping):
+                missing_result = True
+            elif mode in {"eval", "all"}:
+                missing_result = swe_result.get("resolved_rate") is None
+            else:
+                missing_result = not (
+                    swe_result.get("predictions_file")
+                    or swe_result.get("submitted_instances")
+                    or swe_result.get("completed_ratio") is not None
+                )
         else:
             missing_result = (
                 result.get("benchmark_acc_result") in (None, "")
@@ -765,6 +846,15 @@ def _result_payload(result, task_config=None):
             "eval_results_file",
         )
         return {field: vbench_result.get(field) for field in fields if field in vbench_result}
+    swe_result = result.get("benchmark_swebench_result")
+    if benchmark_type == "aisbench" and isinstance(swe_result, Mapping):
+        from xtask.benchmarks.aisbench.aisbench_swe_postprocess import (
+            swebench_payload_fields,
+        )
+        from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
+
+        if is_aisbench_swebench_task(task_config):
+            return swebench_payload_fields(swe_result)
     perf_result = result.get("benchmark_perf_result")
     if perf_result is None:
         return {}
