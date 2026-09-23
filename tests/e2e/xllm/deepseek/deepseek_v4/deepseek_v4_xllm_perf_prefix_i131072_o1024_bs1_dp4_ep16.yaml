@@ -43,8 +43,10 @@ benchmark:
       prefix_min_units: 30  # 99% ratio 窄窗口(1280)需足够 source-unit 候选供 fragment-fitting 命中
       seed_requests: true
       order: grouped
-    baseline: 52.6274
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 47.36466
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:

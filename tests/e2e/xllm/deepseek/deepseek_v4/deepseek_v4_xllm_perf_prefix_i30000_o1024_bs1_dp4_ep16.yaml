@@ -43,8 +43,10 @@ benchmark:
       prefix_min_units: 30  # 保持与 i131072 prefix 用例参数一致
       seed_requests: true
       order: grouped
-    baseline: 58.6937
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 52.82433
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:

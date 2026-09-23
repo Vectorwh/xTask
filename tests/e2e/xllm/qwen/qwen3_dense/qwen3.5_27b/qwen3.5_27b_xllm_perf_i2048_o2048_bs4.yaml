@@ -4,7 +4,10 @@ benchmark:
   perf:
     acc_dataset_len: 0
     api_type: vllm_api_general_stream
-    baseline: 86.46
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 77.814
+        compare: gte
     batch_size: 4
     case_type: performance
     dataset_conf: gsm8k_gen_0_shot_cot_str_perf
@@ -21,7 +24,6 @@ benchmark:
     output_len: 2048
     pressure: false
     request_rate: 12
-    threshold: 0.1
     num_warmups: 20
     generation_kwargs:
       temperature: 0

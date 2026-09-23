@@ -31,8 +31,10 @@ benchmark:
     num_prompts: 4
     num_warmups: 10
     # baseline: 20260828 重跑(max_seqs=16) output_tps_avg
-    baseline: 77.3809
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 69.64281
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:

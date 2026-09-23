@@ -4,7 +4,10 @@ benchmark:
   perf:
     acc_dataset_len: 0
     api_type: vllm_api_stream_chat_multiturn
-    baseline: 96.20
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 86.58
+        compare: gte
     batch_size: 1
     case_type: performance
     dataset_conf: sharegpt_gen
@@ -22,7 +25,6 @@ benchmark:
     output_len: 2048
     pressure: false
     request_rate: 1
-    threshold: 0.1
     num_warmups: 20
     generation_kwargs:
       temperature: 0

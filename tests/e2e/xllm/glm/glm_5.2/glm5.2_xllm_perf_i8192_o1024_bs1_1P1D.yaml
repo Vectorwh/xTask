@@ -27,8 +27,10 @@ benchmark:
     request_rate: 0
     num_prompts: 4
     num_warmups: 4
-    baseline: 14
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 12.6
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:

@@ -34,8 +34,10 @@ benchmark:
     num_prompts: 16
     num_warmups: 4
     # baseline=output_tps_avg 实测值，threshold 0.10=±10% 容差。
-    baseline: 45.07
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 40.563
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:

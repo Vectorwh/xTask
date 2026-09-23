@@ -34,8 +34,10 @@ benchmark:
     num_warmups: 4
     # baseline=10.5574（2026-09-01 实测，output_tps_avg，bs64/256prompts/i30000）；
     # threshold 0.10 → 允许区间 9.50~11.61。
-    baseline: 10.5574
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 9.50166
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:
