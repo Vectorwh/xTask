@@ -56,6 +56,9 @@ GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-50}"
 # 通用重试封装：弱网/代理下 git clone/pull/submodule 易随机失败，重试可显著提高成功率。
 # 奇数次尝试带代理，偶数次取消代理，避免单一链路一直失败。
 # 用法：retry <描述> <命令...>
+# 若命令可能返回"本地状态需人工处理"的 125，调用方须显式声明：
+#   RETRY_STOP_ON_LOCAL_STATE=1 retry <描述> <命令...>
+# 不声明时 125 按普通失败重试，避免误把网络错误当作不可恢复。
 _apply_git_proxy_mode() {
   if [[ "$1" == "proxy" ]]; then
     export http_proxy="${GIT_HTTP_PROXY}"
@@ -69,6 +72,7 @@ retry() {
   local desc="$1"; shift
   local attempt=1
   local mode_label="proxy"
+  local exit_code=0
   while true; do
     if (( attempt % 2 == 1 )); then
       _apply_git_proxy_mode proxy
@@ -80,6 +84,14 @@ retry() {
     if "$@"; then
       _apply_git_proxy_mode proxy
       return 0
+    else
+      exit_code=$?
+    fi
+    # 仅显式声明的调用使用 125 表示需要人工处理，其他 Git 命令保持原重试行为。
+    if [[ "${RETRY_STOP_ON_LOCAL_STATE:-0}" == "1" ]] && (( exit_code == 125 )); then
+      _apply_git_proxy_mode proxy
+      echo "ERROR: ${desc} stopped: local repository state requires manual attention." >&2
+      return "${exit_code}"
     fi
     if (( attempt >= GIT_MAX_RETRIES )); then
       _apply_git_proxy_mode proxy
@@ -92,24 +104,42 @@ retry() {
   done
 }
 
+# 恢复脚本失败时返回的退出码，表示本地仓库状态需人工处理、重试无意义。
+readonly RETRY_LOCAL_STATE_EXIT_CODE=125
+
+repair_xllm_submodule_heads() {
+  # 只恢复对象已在本地且目录为空的异常子模块；不 fetch、不删目录、不强制检出。
+  if ! "${PYTHON_EXEC:-python}" "${SCRIPT_DIR}/repair_submodule_heads.py" "${XLLM_DIR}"; then
+    return "${RETRY_LOCAL_STATE_EXIT_CODE}"
+  fi
+}
+
+update_xllm_submodules() {
+  # 每轮重试前恢复上次递归 clone 中断留下的异常 HEAD。
+  repair_xllm_submodule_heads || return "$?"
+  git -C "${XLLM_DIR}" submodule update --init --recursive --progress
+}
+
 update_xllm_checkout() {
+  # 主仓库更新不隐式操作子模块，避免先于恢复步骤触发无效 HEAD。
+  # 子模块的检出和必要的 fetch 统一由后面的显式 update --recursive 处理。
   if [[ -z "${XLLM_TARGET_BRANCH}" ]]; then
     echo "xLLM already exists at '${XLLM_DIR}', pulling its current branch..."
-    retry "git pull" git -C "${XLLM_DIR}" pull --ff-only
+    retry "git pull" git -C "${XLLM_DIR}" pull --ff-only --no-recurse-submodules
     return
   fi
 
   echo "Updating xLLM branch '${XLLM_TARGET_BRANCH}' in '${XLLM_DIR}'..."
   if git -C "${XLLM_DIR}" show-ref --verify --quiet \
     "refs/heads/${XLLM_TARGET_BRANCH}"; then
-    git -C "${XLLM_DIR}" checkout "${XLLM_TARGET_BRANCH}"
+    git -C "${XLLM_DIR}" checkout --no-recurse-submodules "${XLLM_TARGET_BRANCH}"
     retry "git pull branch ${XLLM_TARGET_BRANCH}" \
-      git -C "${XLLM_DIR}" pull --ff-only origin "${XLLM_TARGET_BRANCH}"
+      git -C "${XLLM_DIR}" pull --ff-only --no-recurse-submodules origin "${XLLM_TARGET_BRANCH}"
   else
     retry "git fetch branch ${XLLM_TARGET_BRANCH}" \
-      git -C "${XLLM_DIR}" fetch origin \
+      git -C "${XLLM_DIR}" fetch --no-recurse-submodules origin \
       "refs/heads/${XLLM_TARGET_BRANCH}:refs/remotes/origin/${XLLM_TARGET_BRANCH}"
-    git -C "${XLLM_DIR}" checkout -b "${XLLM_TARGET_BRANCH}" \
+    git -C "${XLLM_DIR}" checkout --no-recurse-submodules -b "${XLLM_TARGET_BRANCH}" \
       --track "origin/${XLLM_TARGET_BRANCH}"
   fi
 }
@@ -142,9 +172,10 @@ if [[ -d "${XLLM_DIR}/.git" ]]; then
   fi
 fi
 
-# 若 xLLM 已存在则仅更新（git pull），否则克隆
+# 已有仓库稍后在安全目录注册和 HEAD 恢复之后更新；新仓库先克隆。
+XLLM_REUSE_CHECKOUT=0
 if [[ -d "${XLLM_DIR}/.git" ]]; then
-  update_xllm_checkout
+  XLLM_REUSE_CHECKOUT=1
 elif [[ -d "${XLLM_DIR}" ]]; then
   echo "ERROR: '${XLLM_DIR}' exists but is not a git repository." && exit 1
 else
@@ -171,8 +202,15 @@ for dep in "${THIRD_PARTY_DIRS[@]}"; do
   git config --global --add safe.directory "${XLLM_DIR}/third_party/${dep}"
 done
 
+if (( XLLM_REUSE_CHECKOUT )); then
+  # 先按当前父仓库锁定提交恢复 HEAD，再更新主仓库。
+  # 若新版本引用尚未下载的子模块提交，后面的正常 update 可以从有效 HEAD 继续 fetch。
+  repair_xllm_submodule_heads
+  update_xllm_checkout
+fi
+
 # 初始化并递归更新所有子模块
-retry "git submodule update" git submodule update --init --recursive
+RETRY_STOP_ON_LOCAL_STATE=1 retry "git submodule update" update_xllm_submodules
 
 # 记录实际进入容器编译的源码版本。该输出会由 cron 同时写入 build.log
 # 和 case_framework.log，便于将归档产物与源码提交精确对应。

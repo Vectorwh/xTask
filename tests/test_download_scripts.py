@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -238,14 +239,14 @@ class PrepareXllmScriptTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-    def _git(self, *args, cwd=None):
+    def _git(self, *args, cwd=None, check=True):
         return subprocess.run(
             ["git", *args],
             cwd=cwd,
             text=True,
             capture_output=True,
             timeout=30,
-            check=True,
+            check=check,
         )
 
     def _create_remote(self, root: Path, name: str, content: str) -> Path:
@@ -270,17 +271,21 @@ class PrepareXllmScriptTests(unittest.TestCase):
         self._git("symbolic-ref", "HEAD", "refs/heads/main", cwd=remote)
         return remote
 
-    def _run_prepare(self, project: Path, repository: Path):
+    def _run_prepare(self, project: Path, repository: Path, branch="main"):
         tools_dir = project / "tools"
         tools_dir.mkdir(parents=True)
         shutil.copy2(self.root / "tools" / "prepare_xllm.sh", tools_dir)
+        shutil.copy2(self.root / "tools" / "repair_submodule_heads.py", tools_dir)
         (tools_dir / "build_xllm_in_container.sh").write_text(
             "#!/bin/bash\nexit 0\n", encoding="utf-8"
         )
         fake_bin = project / "fake-bin"
         fake_bin.mkdir()
         docker = fake_bin / "docker"
-        docker.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        docker.write_text(
+            f'#!/bin/bash\ntouch "{project / "docker-called"}"\nexit 0\n',
+            encoding="utf-8",
+        )
         docker.chmod(0o755)
         env = os.environ.copy()
         env.update(
@@ -288,10 +293,18 @@ class PrepareXllmScriptTests(unittest.TestCase):
             XLLM_BUILD_IMAGE="xtask-test/xllm-build:latest",
             GIT_MAX_RETRIES="1",
             GIT_RETRY_DELAY="0",
+            GIT_CONFIG_GLOBAL=str(project / "test.gitconfig"),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_ALLOW_PROTOCOL="file",
+            PYTHON_EXEC=sys.executable,
             PATH=f"{fake_bin}:{env['PATH']}",
         )
+        env.pop("XLLM_BRANCH", None)
+        command = ["bash", "tools/prepare_xllm.sh"]
+        if branch is not None:
+            command.append(branch)
         return subprocess.run(
-            ["bash", "tools/prepare_xllm.sh", "main"],
+            command,
             cwd=project,
             env=env,
             text=True,
@@ -299,6 +312,156 @@ class PrepareXllmScriptTests(unittest.TestCase):
             timeout=30,
             check=False,
         )
+
+    def _assert_recursive_update_recovers(
+        self, requested_branch, existing_local_branch=False, protect_worktree=False
+    ):
+        # All remotes and Docker are local fixtures; no real build or NPU use.
+        with tempfile.TemporaryDirectory(prefix="prepare-recursive-test-") as temporary:
+            root = Path(temporary)
+            child_remote = self._create_remote(root, "llvm", "old LLVM")
+            child_source = root / "llvm-source"
+            old_child = self._git("rev-parse", "HEAD", cwd=child_source).stdout.strip()
+            self._git(
+                "symbolic-ref", "HEAD", "refs/heads/missing", cwd=child_remote
+            )
+            parent_remote = self._create_remote(root, "parent", "parent")
+            parent_source = root / "parent-source"
+            for name, url in [("llvm", child_remote), ("triton", root / "missing.git")]:
+                self._git(
+                    "config", "-f", ".gitmodules", f"submodule.{name}.path",
+                    name, cwd=parent_source,
+                )
+                self._git(
+                    "config", "-f", ".gitmodules", f"submodule.{name}.url",
+                    str(url), cwd=parent_source,
+                )
+                self._git(
+                    "update-index", "--add", "--cacheinfo",
+                    f"160000,{old_child},{name}", cwd=parent_source,
+                )
+            self._git("add", ".gitmodules", cwd=parent_source)
+            self._git(
+                "-c", "user.name=xTask Test", "-c",
+                "user.email=xtask@example.invalid", "commit", "-m",
+                "add nested dependencies", cwd=parent_source,
+            )
+            self._git("push", "origin", "main", cwd=parent_source)
+            project = root / "project"
+            project.mkdir()
+            checkout = project / "xllm"
+            self._git("clone", str(parent_remote), str(checkout))
+            interrupted = self._git(
+                "-c", "protocol.file.allow=always", "submodule", "update",
+                "--init", "--recursive", cwd=checkout, check=False,
+            )
+            self.assertNotEqual(interrupted.returncode, 0)
+            llvm = checkout / "llvm"
+            self.assertNotEqual(
+                self._git("rev-parse", "--verify", "HEAD", cwd=llvm, check=False).returncode,
+                0,
+            )
+            # The other dependency's download has recovered, as in the log.
+            self._git("config", "submodule.triton.url", str(child_source), cwd=checkout)
+            self._git(
+                "-c", "protocol.file.allow=always", "submodule", "update",
+                "--init", "--", "triton", cwd=checkout,
+            )
+            sentinel = checkout / "keep-local-file"
+            sentinel.write_text("user data", encoding="utf-8")
+
+            # Publish a new gitlink whose object was not in the initial clone.
+            (child_source / "repository.txt").write_text("new LLVM", encoding="utf-8")
+            self._git("add", "repository.txt", cwd=child_source)
+            self._git(
+                "-c", "user.name=xTask Test", "-c",
+                "user.email=xtask@example.invalid", "commit", "-m",
+                "new LLVM commit", cwd=child_source,
+            )
+            self._git("push", "origin", "main", cwd=child_source)
+            new_child = self._git("rev-parse", "HEAD", cwd=child_source).stdout.strip()
+            self.assertNotEqual(
+                self._git("cat-file", "-e", new_child, cwd=llvm, check=False).returncode,
+                0,
+            )
+            target_branch = requested_branch or "main"
+            if existing_local_branch:
+                self._git("branch", target_branch, cwd=checkout)
+            if target_branch != "main":
+                self._git("checkout", "-b", target_branch, cwd=parent_source)
+            self._git(
+                "update-index", "--cacheinfo", f"160000,{new_child},llvm",
+                cwd=parent_source,
+            )
+            self._git(
+                "-c", "user.name=xTask Test", "-c",
+                "user.email=xtask@example.invalid", "commit", "-m",
+                "update LLVM gitlink", cwd=parent_source,
+            )
+            self._git("push", "origin", target_branch, cwd=parent_source)
+            expected_parent = self._git("rev-parse", "HEAD", cwd=parent_source).stdout.strip()
+            # Exercise both inherited global settings and repository settings.
+            for key in ["submodule.recurse", "fetch.recurseSubmodules"]:
+                self._git("config", key, "true", cwd=checkout)
+                self._git(
+                    "config", "--file", str(project / "test.gitconfig"), key, "true"
+                )
+
+            original_parent = self._git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+            if protect_worktree:
+                (llvm / "keep-me.txt").write_text("protected data", encoding="utf-8")
+
+            result = self._run_prepare(project, parent_remote, branch=requested_branch)
+
+            if protect_worktree:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("worktree is not empty", result.stderr)
+                self.assertFalse((project / "docker-called").exists())
+                self.assertEqual(
+                    self._git("rev-parse", "HEAD", cwd=checkout).stdout.strip(),
+                    original_parent,
+                )
+                self.assertEqual((llvm / "keep-me.txt").read_text(), "protected data")
+                return
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("[submodule-repair] Recovered 1", result.stdout)
+            self.assertIn(f"at pinned commit {old_child}", result.stdout)
+            self.assertTrue((project / "docker-called").exists())
+            self.assertEqual(
+                self._git("rev-parse", "HEAD", cwd=checkout).stdout.strip(), expected_parent
+            )
+            self.assertEqual(
+                self._git("rev-parse", "HEAD", cwd=llvm).stdout.strip(), new_child
+            )
+            self.assertEqual((llvm / "repository.txt").read_text(), "new LLVM")
+            self.assertEqual(sentinel.read_text(), "user data")
+            for key in ["submodule.recurse", "fetch.recurseSubmodules"]:
+                self.assertEqual(
+                    self._git("config", "--local", "--get", key, cwd=checkout).stdout.strip(),
+                    "true",
+                )
+                self.assertEqual(
+                    self._git(
+                        "config", "--file", str(project / "test.gitconfig"), "--get", key
+                    ).stdout.strip(),
+                    "true",
+                )
+
+    def test_recursive_pull_on_named_branch_recovers_invalid_head(self):
+        self._assert_recursive_update_recovers("main")
+
+    def test_recursive_pull_on_current_branch_recovers_invalid_head(self):
+        self._assert_recursive_update_recovers(None)
+
+    def test_recursive_fetch_and_new_branch_checkout_recovers_invalid_head(self):
+        self._assert_recursive_update_recovers("feature")
+
+    def test_recursive_checkout_of_existing_branch_recovers_invalid_head(self):
+        self._assert_recursive_update_recovers("feature", existing_local_branch=True)
+
+    def test_unsafe_submodule_stops_before_parent_update(self):
+        self._assert_recursive_update_recovers("main", protect_worktree=True)
 
     def test_default_repository_is_internal_xllm_repository(self):
         self.assertIn(
@@ -311,7 +474,7 @@ class PrepareXllmScriptTests(unittest.TestCase):
         self.assertIn(commit, self.script)
         self.assertIn('echo "[source-version] xLLM commit: ${XLLM_COMPILE_COMMIT}"', self.script)
         self.assertLess(
-            self.script.index('git submodule update --init --recursive'),
+            self.script.index('retry "git submodule update" update_xllm_submodules'),
             self.script.index(commit),
         )
 
