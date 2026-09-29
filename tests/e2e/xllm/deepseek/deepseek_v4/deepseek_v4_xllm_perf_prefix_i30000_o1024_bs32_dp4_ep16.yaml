@@ -1,4 +1,4 @@
-# 拓扑: 66:pd_p1_dspark.sh(P) / 68:pd_d_dspark.sh(D). para_set 每档重启PD服务
+# prefix 单case (PD 1P1D, DSpark). para_set 每档重启PD服务. serving 参数=最优栈(xllm/p.sh+d.sh), P/D 已分化
 case_name: deepseek_v4_xllm_perf_prefix_i30000_o1024_bs32_dp4_ep16
 engine_type: xllm
 model_path: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
@@ -43,8 +43,10 @@ benchmark:
       prefix_min_units: 30  # 保持与 i131072 prefix 用例参数一致
       seed_requests: true
       order: grouped
-    baseline: 31.984
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 28.7856
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:
@@ -69,22 +71,27 @@ deployment:
   - name: prefill-0
     role: prefill
     group_master_host: 11.87.191.75
-    serving_extensiable_param: &pd_param
-      max_memory_utilization: 0.8
-      max_tokens_per_batch: 16384
-      max_seqs_per_batch: 16
+    serving_extensiable_param:
+      # 最优性能配置(P 侧): 02_运行脚本/dsv4最优性能脚本/xllm/p.sh;
+      # prefix 用例 P 侧 enable_prefix_cache=true(同 p2b6_pfx90 变体), D 侧关闭
+      max_memory_utilization: 0.78
+      max_tokens_per_batch: 57344
+      max_cache_size: 13958643712
+      enable_dp_fair_token_budget: true
+      max_seqs_per_batch: 64
       block_size: 128
       enable_prefix_cache: true
       enable_chunked_prefill: true
-      max_tokens_per_chunk_for_prefill: 4096
+      max_tokens_per_chunk_for_prefill: 8192
       enable_schedule_overlap: true
-      enable_graph: true
+      enable_graph: false
       ep_size: 16
+      cp_size: 2
       dp_size: 4
       enable_disagg_pd: true
       speculative_algorithm: DSpark
       draft_model: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
-      num_speculative_tokens: 5
+      num_speculative_tokens: 7
       enable_flashcomm1: true
       flashcomm1_min_prefill_tokens: 1000
       tool_call_parser: deepseekv4
@@ -98,7 +105,29 @@ deployment:
   - name: decode-0
     role: decode
     group_master_host: 11.87.191.121
-    serving_extensiable_param: *pd_param
+    serving_extensiable_param:
+      # 最优性能配置(D 侧): 02_运行脚本/dsv4最优性能脚本/xllm/d.sh
+      max_memory_utilization: 0.8
+      max_tokens_per_batch: 8192
+      max_seqs_per_batch: 64
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      max_tokens_per_chunk_for_prefill: 4096
+      enable_schedule_overlap: true
+      enable_graph: true
+      enable_graph_double_buffer: false
+      ep_size: 16
+      dp_size: 4
+      enable_disagg_pd: true
+      speculative_algorithm: DSpark
+      draft_model: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
+      num_speculative_tokens: 7
+      enable_flashcomm1: true
+      flashcomm1_min_prefill_tokens: 1000
+      tool_call_parser: deepseekv4
+      reasoning_parser: deepseek-v4
+      disagg_pd_port: 7777
     nodes:
     - name: decode-0-node-0
       host: 11.87.191.121

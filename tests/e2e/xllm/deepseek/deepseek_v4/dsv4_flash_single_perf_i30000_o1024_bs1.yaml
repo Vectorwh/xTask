@@ -1,4 +1,5 @@
-# 66单机 bs1 perf: DSV4-Flash, i30000_o1024_bs1 (单机16卡, 非PD)
+# 单机混部 bs1 perf: DSV4-Flash, i30000_o1024_bs1 (单机16卡, 非PD)
+# serving 参数=最优单机配置(02_运行脚本/dsv4最优性能脚本/xllm/single.sh)
 case_name: dsv4_flash_single_perf_i30000_o1024_bs1
 engine_type: xllm
 model_path: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
@@ -33,8 +34,10 @@ benchmark:
     num_warmups: 4
     # baseline=output_tps_avg 实测值，threshold 0.10=±10% 容差。
     # 实测: output_tps_avg=73.43, tpot_p90=12.2ms
-    baseline: 73.43
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 66.087
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:
@@ -57,15 +60,17 @@ deployment:
     device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
     local_port: 18004
     serving_extensiable_param:
-      max_memory_utilization: 0.8
-      max_seqs_per_batch: 16
-      max_tokens_per_batch: 16384
+      # 最优性能配置(单机混部): 02_运行脚本/dsv4最优性能脚本/xllm/single.sh
+      max_memory_utilization: 0.7
+      max_seqs_per_batch: 64
+      max_tokens_per_batch: 10240
       block_size: 128
       enable_prefix_cache: false
       enable_chunked_prefill: true
       max_tokens_per_chunk_for_prefill: 4096
       enable_schedule_overlap: true
       enable_graph: true
+      enable_graph_double_buffer: false
       ep_size: 16
       dp_size: 4
       speculative_algorithm: DSpark

@@ -29,8 +29,10 @@ benchmark:
     # 这里显式写 256(=64*4) 与规则一致，避免首轮被 yaml 的 4 误导。
     num_prompts: 128
     num_warmups: 4
-    baseline: 20
-    threshold: 0.10
+    baseline_metrics:
+      - metric: output_tps_avg
+        baseline: 18
+        compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:

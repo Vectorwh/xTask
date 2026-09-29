@@ -2857,6 +2857,334 @@ def _wait_hccl_listen_ports_before_start(state, runtimes) -> None:
     run_on_runtimes_parallel(runtimes or [], _wait_hccl_listen_ports_released)
 
 
+def _tcpstore_listen_ports(plan) -> list:
+    """Return the xLLM c10d TCPStore rendezvous window for this runtime plan.
+
+    xLLM derives fixed TCPStore ports from the group master address
+    (``master_node_addr`` = ``master_host:progress_conn_port``) plus one
+    window per process group (world/tp/dp/moe-tp/moe-ep/...; see xllm
+    collective_communicator.cpp ``create_process_groups``). The exact window
+    depends on the parallel topology, so use a deliberately generous upper
+    bound: probing a few extra free ports costs one ``ss`` invocation.
+    Single-rank groups use ephemeral ports, so world_size 1 has no window.
+    """
+    if plan is None:
+        return []
+    cfg = getattr(plan, "instance_config", None)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    try:
+        base = int(cfg.get("progress_conn_port", 9590))
+    except (TypeError, ValueError):
+        return []
+    if not 1 <= base <= 65535:
+        return []
+    world_size = len(getattr(plan, "device_ids", None) or []) or 1
+    try:
+        world_size = max(world_size, int(cfg.get("world_size", 0) or 0))
+    except (TypeError, ValueError):
+        pass
+    if world_size <= 1:
+        return []
+    # Worst observed window: world +1 (world group), tp window (<= world),
+    # single-rank reservation (2*world), dp/dcp windows (<= 2*world),
+    # moe windows (<= ep + 3*moe_tp <= world + 3). 5*world + 16 covers all
+    # of them with margin (e.g. 16-card dp4/ep16 decode binds <= master+60).
+    width = 5 * world_size + 16
+    upper = min(base + width, 65535)
+    if upper <= base:
+        return []
+    return list(range(base + 1, upper + 1))
+
+
+def _wait_tcpstore_listen_ports_released(runtime, timeout_s=None, interval_s=1) -> None:
+    """Wait until this instance's xLLM TCPStore window leaves LISTEN.
+
+    A leftover TCPStore listener from an abnormally exited previous case
+    makes the next same-topology case abort during HCCL process-group
+    creation with ``c10d::SocketError`` EADDRINUSE (fixed ports such as
+    ``progress_conn_port + 40``; one observed incident held the port for
+    4-15 minutes after SIGKILL). Timeout (default 600s,
+    XTASK_TCPSTORE_PORT_RELEASE_TIMEOUT) logs a warning and proceeds; it
+    does not fail the case or pkill. Already-free ports return after one
+    probe with no extra sleep.
+    """
+    plan = getattr(runtime, "plan", None)
+    host = getattr(plan, "host", "?")
+    name = getattr(plan, "instance_name", "?")
+    try:
+        ports = _tcpstore_listen_ports(plan)
+        if not ports:
+            return
+        if timeout_s is None:
+            try:
+                timeout_s = max(
+                    1,
+                    int(
+                        os.environ.get(
+                            "XTASK_TCPSTORE_PORT_RELEASE_TIMEOUT", "600"
+                        )
+                    ),
+                )
+            except ValueError:
+                timeout_s = 600
+        deadline = time.monotonic() + timeout_s
+        last_busy = None
+        while time.monotonic() < deadline:
+            busy = _read_pd_listen_ports_in_use(runtime, ports)
+            if busy is None:
+                logging.warning(
+                    "TCPStore listen-port probe unreadable on %s (%s); "
+                    "skipping wait",
+                    host,
+                    name,
+                )
+                return
+            if not busy:
+                if last_busy:
+                    logging.info(
+                        "TCPStore listen ports released on %s (%s)", host, name
+                    )
+                return
+            if busy != last_busy:
+                logging.info(
+                    "Waiting for xLLM TCPStore ports on %s (%s): %s",
+                    host,
+                    name,
+                    busy,
+                )
+            last_busy = busy
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval_s, remaining))
+        logging.warning(
+            "TCPStore listen ports still in use on %s (%s) after %ss (%s); "
+            "proceeding anyway",
+            host,
+            name,
+            timeout_s,
+            last_busy,
+        )
+    except Exception:
+        logging.warning(
+            "TCPStore listen-port wait failed on %s (%s); proceeding anyway",
+            host,
+            name,
+            exc_info=True,
+        )
+
+
+def _wait_tcpstore_listen_ports_before_start(state, runtimes) -> None:
+    """Multi-host gate: wait for xLLM TCPStore ports before xLLM start."""
+    if not state.get("multi_host"):
+        return
+    from xtask.core.service_group import run_on_runtimes_parallel
+
+    run_on_runtimes_parallel(runtimes or [], _wait_tcpstore_listen_ports_released)
+
+
+_RESERVED_PORTS_PATH = "/proc/sys/net/ipv4/ip_local_reserved_ports"
+
+
+def _parse_reserved_ports(value) -> set:
+    """Parse an ip_local_reserved_ports value ("a,b-c,d") into a port set."""
+    ports = set()
+    if not isinstance(value, str):
+        return ports
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "-" in item:
+            lo, _, hi = item.partition("-")
+            try:
+                lo_i, hi_i = int(lo), int(hi)
+            except ValueError:
+                continue
+            if 1 <= lo_i <= hi_i <= 65535:
+                ports.update(range(lo_i, hi_i + 1))
+        else:
+            try:
+                port = int(item)
+            except ValueError:
+                continue
+            if 1 <= port <= 65535:
+                ports.add(port)
+    return ports
+
+
+def _format_reserved_ports(ports) -> str:
+    """Format a port set as a compact sorted comma list with ranges."""
+    ordered = sorted({int(port) for port in ports if 1 <= int(port) <= 65535})
+    parts = []
+    index = 0
+    while index < len(ordered):
+        start = ordered[index]
+        while index + 1 < len(ordered) and ordered[index + 1] == ordered[index] + 1:
+            index += 1
+        end = ordered[index]
+        parts.append(str(start) if start == end else f"{start}-{end}")
+        index += 1
+    return ",".join(parts)
+
+
+def _control_plane_ports(task_config) -> set:
+    """PD/service control ports (etcd, xservice) from the task config."""
+    ports = set()
+    if not isinstance(task_config, dict):
+        return ports
+    deployment = task_config.get("deployment")
+    if not isinstance(deployment, dict):
+        return ports
+    for section in ("pd_control", "service_control"):
+        control = deployment.get(section)
+        if not isinstance(control, dict):
+            continue
+        for field in (
+            "etcd_client_port",
+            "etcd_peer_port",
+            "http_server_port",
+            "rpc_server_port",
+        ):
+            try:
+                port = int(control[field])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535:
+                ports.add(port)
+    return ports
+
+
+def _xllm_fixed_ports(plan, task_config=None) -> list:
+    """Fixed ports this xLLM instance binds on its host.
+
+    Covers the group master (``progress_conn_port``), the c10d TCPStore
+    windows derived from it in xllm's ``create_process_groups`` (the
+    YAML-invisible ports that caused EADDRINUSE incidents), PD
+    disaggregation/transfer ports, HCCL IF ports, per-rank node service
+    ports, and the control plane (etcd/xservice). Used only for
+    ``ip_local_reserved_ports``; explicit binds are unaffected.
+    """
+    if plan is None:
+        return []
+    cfg = getattr(plan, "instance_config", None)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    ports = set()
+    # Group master + derived TCPStore window.
+    try:
+        base = int(cfg.get("progress_conn_port", 9590))
+    except (TypeError, ValueError):
+        base = 0
+    if 1 <= base <= 65535:
+        ports.add(base)
+    ports.update(_tcpstore_listen_ports(plan))
+    # PD disagg/transfer and HCCL IF ports.
+    ports.update(_pd_listen_ports(plan))
+    ports.update(_hccl_listen_ports(plan))
+    # Per-rank node service ports (START_PORT + local rank).
+    devices = getattr(plan, "device_ids", None)
+    rank_count = (
+        len(devices) if isinstance(devices, (list, tuple)) and devices else 1
+    )
+    try:
+        node_base = int(cfg.get("port", 14830) or 14830)
+    except (TypeError, ValueError):
+        node_base = 14830
+    for offset in range(rank_count):
+        port = node_base + offset
+        if 1 <= port <= 65535:
+            ports.add(port)
+    # Control plane ports; reserving them on every host is harmless.
+    ports.update(_control_plane_ports(task_config))
+    return sorted(ports)
+
+
+def _reserve_ports_on_runtime(runtime, ports, timeout=20) -> None:
+    """Merge ports into the host's ip_local_reserved_ports (best effort).
+
+    Runs via the runtime's own privileged host-network container, so the
+    write targets the host network namespace. The current value is always
+    read first and merged (never overwritten), so other services'
+    reservations survive. Any failure logs a warning and proceeds; this
+    gate must never fail the case.
+    """
+    plan = getattr(runtime, "plan", None)
+    host = getattr(plan, "host", "?")
+    name = getattr(plan, "instance_name", "?")
+    if not ports:
+        return
+    try:
+        manager = runtime.container_manager
+        read = manager.exec_in_container(
+            cmd=f"cat {_RESERVED_PORTS_PATH}", timeout=timeout
+        )
+        if not read.success:
+            logging.warning(
+                "Cannot read %s on %s (%s); skipping xLLM port reservation",
+                _RESERVED_PORTS_PATH,
+                host,
+                name,
+            )
+            return
+        current = _parse_reserved_ports(read.stdout or "")
+        wanted = current | set(ports)
+        if wanted == current:
+            return
+        value = _format_reserved_ports(wanted)
+        write = manager.exec_in_container(
+            cmd=f"printf '%s' {shlex.quote(value)} > {_RESERVED_PORTS_PATH}",
+            timeout=timeout,
+        )
+        if write.success:
+            logging.info(
+                "Reserved xLLM fixed ports on %s (%s): %s", host, name, value
+            )
+        else:
+            logging.warning(
+                "Failed to reserve xLLM ports on %s (%s): %s",
+                host,
+                name,
+                (write.stderr or write.stdout or "unknown error")[:200],
+            )
+    except Exception:
+        logging.warning(
+            "xLLM port reservation failed on %s (%s); proceeding anyway",
+            host,
+            name,
+            exc_info=True,
+        )
+
+
+def _reserve_xllm_ports_before_start(state, runtimes) -> None:
+    """Multi-host gate: reserve xLLM fixed ports before xLLM start.
+
+    Ephemeral source ports drawn from a wide ip_local_port_range can
+    collide with xLLM's fixed TCPStore ports and abort process-group
+    creation with EADDRINUSE (observed 2026-09-08/19/21/22). Reserving
+    those ports stops the kernel from auto-assigning them while leaving
+    explicit binds untouched. Re-established at every case start, so the
+    protection also survives host reboots. Disable with
+    XTASK_RESERVE_XLLM_PORTS=0.
+    """
+    flag = str(os.environ.get("XTASK_RESERVE_XLLM_PORTS", "1"))
+    if flag.strip().lower() in {"0", "false", "no", "off"}:
+        return
+    task_config = state.get("task_config") if isinstance(state, dict) else None
+    by_host = {}
+    for runtime in runtimes or []:
+        plan = getattr(runtime, "plan", None)
+        host = str(getattr(plan, "host", "?"))
+        ports = _xllm_fixed_ports(plan, task_config)
+        if not ports:
+            continue
+        entry = by_host.setdefault(host, {"runtime": runtime, "ports": set()})
+        entry["ports"].update(ports)
+    for entry in by_host.values():
+        _reserve_ports_on_runtime(entry["runtime"], sorted(entry["ports"]))
+
+
 def _start_and_wait_service_multi_host(context):
     from xtask.core.service_group import (
         get_benchmark_endpoint,
@@ -2916,12 +3244,20 @@ def _start_and_wait_service_multi_host(context):
         if task_config.get("serving_wait_time")
         else state["config_data"].get("XLLM_CONFIG").get("serving_wait_time")
     )
+    # Ephemeral source ports from a wide ip_local_port_range can collide
+    # with xLLM's fixed ports (TCPStore EADDRINUSE aborts process-group
+    # creation). Reserve them first; merged, best-effort, reboot-safe.
+    _reserve_xllm_ports_before_start(state, runtimes)
     # PD leftover LISTEN on disagg_pd_port / transfer_listen_port prevents
     # pairing and keeps HTTP 28888 closed. Wait only for this case's ports.
     _wait_pd_listen_ports_before_start(state, runtimes)
     # HCCL leftover LISTEN on hccl_if_port + device_id prevents
     # HcclGetRootInfo on the next case sharing the same host/base port.
     _wait_hccl_listen_ports_before_start(state, runtimes)
+    # Leftover c10d TCPStore LISTEN (progress_conn_port + process-group
+    # window offsets, e.g. 8813) aborts process-group creation on the next
+    # same-topology case with c10d::SocketError EADDRINUSE.
+    _wait_tcpstore_listen_ports_before_start(state, runtimes)
 
     def _start_one(runtime):
         cmd = runtime.plan.startup_cmd
