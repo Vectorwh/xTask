@@ -21,6 +21,49 @@ XLLM_PKG_DIR="${WORK_ROOT}/pkg/xllm"
 XLLM_DIST_DIR="${XLLM_DIR}/dist"
 RUNTIME_LIB_DIR="${XLLM_PKG_DIR}/runtime_libs"
 
+# root 容器中的 git submodule sync/config 会替换宿主机 .git 内的文件。
+# 成功和失败退出都归还这些元数据，避免下一轮普通用户无法继续增量更新。
+restore_git_metadata_ownership() {
+  local git_dir="${XLLM_DIR}/.git"
+  if [[ -z "${HOST_UID:-}" || -z "${HOST_GID:-}" ]]; then
+    echo "WARN: HOST_UID/HOST_GID not set; cannot restore Git metadata ownership." >&2
+    return 0
+  fi
+  if [[ ! "${HOST_UID}" =~ ^[0-9]+$ || ! "${HOST_GID}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: HOST_UID/HOST_GID must be numeric; refusing ownership changes." >&2
+    return 1
+  fi
+  if [[ -L "${XLLM_DIR}" || -L "${git_dir}" ]]; then
+    echo "ERROR: refusing Git ownership cleanup through a symlink: ${git_dir}" >&2
+    return 1
+  fi
+  if [[ ! -e "${git_dir}" ]]; then
+    return 0
+  fi
+  if [[ ! -d "${git_dir}" ]]; then
+    echo "ERROR: expected a .git directory; refusing external Git metadata cleanup: ${git_dir}" >&2
+    return 1
+  fi
+  echo "[git-ownership] Restore root-owned Git metadata to ${HOST_UID}:${HOST_GID}: ${git_dir}"
+  # 不跟随符号链接、不跨文件系统、不修改非 root 属主，也不调整文件权限。
+  # --from 在 chown 时再次检查属主，避免覆盖并发发生的属主变更。
+  find -P "${git_dir}" -xdev -uid 0 \
+    -exec chown -h --from=0 -- "${HOST_UID}:${HOST_GID}" {} +
+}
+
+on_build_exit() {
+  local build_status=$?
+  trap - EXIT
+  if ! restore_git_metadata_ownership; then
+    echo "ERROR: Git metadata ownership cleanup failed; repair it before the next build." >&2
+    if (( build_status == 0 )); then
+      build_status=1
+    fi
+  fi
+  exit "${build_status}"
+}
+trap on_build_exit EXIT
+
 if [[ ! -f "${XLLM_DIR}/setup.py" ]]; then
   echo "ERROR: '${XLLM_DIR}/setup.py' not found. Is the xLLM source prepared?" >&2
   exit 1
