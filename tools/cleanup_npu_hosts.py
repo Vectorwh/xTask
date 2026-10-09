@@ -8,7 +8,7 @@ Examples:
   # Query only
   python3 tools/cleanup_npu_hosts.py --query-only 11.87.191.75 11.87.191.121
 
-  # Query, kill NPU processes, stop all running containers
+  # Stop running containers, then kill remaining NPU processes
   python3 tools/cleanup_npu_hosts.py 11.87.191.75 11.87.191.121
 
   # Dry run (show what would be done)
@@ -199,49 +199,91 @@ def _command_error(result) -> str:
     return "unknown error"
 
 
+def _signal_npu_pids(executor, pids: List[int], signal_name: str):
+    if signal_name not in {"TERM", "KILL"}:
+        raise ValueError(f"Unsupported cleanup signal: {signal_name}")
+    if not pids or any(type(pid) is not int or pid <= 1 for pid in pids):
+        raise ValueError("Cleanup signals require explicit PIDs greater than 1")
+    pid_list = " ".join(str(pid) for pid in pids)
+    # One remote shell invocation avoids opening an SSH connection per PID.
+    # Try the current identity first. sudo checks authorization for the exact
+    # kill command; -n must never prompt or consume an SSH password in cron.
+    # /proc visibility is not a liveness test (e.g. hidepid can hide root PIDs).
+    # Only a C-locale diagnostic from kill itself confirms an absent process;
+    # a sudo authorization/execution error must never be mistaken for that.
+    command = f"""failed=0
+cleanup_pid_missing() {{
+    case "$1" in
+        "kill: "*"No such process"|/*/"kill: "*"No such process") return 0 ;;
+        *) return 1 ;;
+    esac
+}}
+for pid in {pid_list}; do
+    if kill_output=$(LC_ALL=C /bin/kill -{signal_name} -- "$pid" 2>&1); then
+        if [ -n "$kill_output" ]; then printf '%s\\n' "$kill_output"; fi
+        continue
+    fi
+    if [ -n "$kill_output" ]; then printf '%s\\n' "$kill_output" >&2; fi
+    if cleanup_pid_missing "$kill_output"; then
+        continue
+    fi
+    printf '[SUDO] retry SIG{signal_name} for PID %s\\n' "$pid"
+    if sudo_output=$(LC_ALL=C sudo -n -u root -- /bin/kill -{signal_name} -- "$pid" 2>&1); then
+        if [ -n "$sudo_output" ]; then printf '%s\\n' "$sudo_output"; fi
+        continue
+    fi
+    if [ -n "$sudo_output" ]; then printf '%s\\n' "$sudo_output" >&2; fi
+    if cleanup_pid_missing "$sudo_output"; then
+        continue
+    fi
+    printf '[FAILED] unable to signal PID %s with SIG{signal_name}\\n' "$pid" >&2
+    failed=1
+done
+exit "$failed"
+"""
+    return _run(executor, command, timeout=30)
+
+
 def kill_npu_processes(
     executor,
     host: str,
     processes: Iterable[NpuProcess],
     dry_run: bool,
 ) -> Tuple[List[int], List[str]]:
-    pids = sorted({proc.pid for proc in processes if proc.pid > 0})
-    failures: List[str] = []
-    if not pids:
-        return [], failures
-
-    if dry_run:
+    process_list = list(processes)
+    pids = sorted({proc.pid for proc in process_list if proc.pid > 1})
+    protected = sorted({proc.pid for proc in process_list if proc.pid <= 1})
+    failures = [f"refusing to signal protected PID {pid}" for pid in protected]
+    if not pids or dry_run:
         return pids, failures
 
-    pid_list = " ".join(str(pid) for pid in pids)
-    term_result = _run(
-        executor,
-        f"kill -TERM {pid_list} 2>/dev/null || true; "
-        "pkill -TERM -x xllm 2>/dev/null || true",
-        timeout=30,
-    )
-    if not term_result.success:
-        failures.append(
-            f"kill NPU processes (TERM) failed: {_command_error(term_result)}"
-        )
+    def send_signal(targets: List[int], signal_name: str) -> None:
+        result = _signal_npu_pids(executor, targets, signal_name)
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if stdout:
+            print(f"[{host}] {stdout}")
+        if result.success:
+            # A normal kill may fail before an authorized sudo retry succeeds.
+            if stderr:
+                print(
+                    f"[WARN] {host}: SIG{signal_name} diagnostics: {stderr}",
+                    file=sys.stderr,
+                )
+        else:
+            message = f"signal NPU processes ({signal_name}) failed: {_command_error(result)}"
+            failures.append(message)
+            print(f"[FAILED] {host}: {message}", file=sys.stderr)
 
+    send_signal(pids, "TERM")
     time.sleep(3)
 
     remaining = query_npu_processes(executor, discover_devices(executor))
-    remaining_pids = sorted({proc.pid for proc in remaining})
+    remaining_pids = sorted({proc.pid for proc in remaining if proc.pid > 1})
     if remaining_pids:
-        remain_list = " ".join(str(pid) for pid in remaining_pids)
-        kill_result = _run(
-            executor,
-            f"kill -KILL {remain_list} 2>/dev/null || true; "
-            "pkill -KILL -x xllm 2>/dev/null || true",
-            timeout=30,
-        )
-        if not kill_result.success:
-            failures.append(
-                f"kill NPU processes (KILL) failed: {_command_error(kill_result)}"
-            )
-
+        send_signal(remaining_pids, "KILL")
+        # Allow NPU runtime teardown before declaring the process still alive.
+        time.sleep(3)
         remaining = query_npu_processes(executor, discover_devices(executor))
         remaining_pids = sorted({proc.pid for proc in remaining})
         if remaining_pids:
@@ -256,7 +298,7 @@ def kill_npu_processes(
     return pids, failures
 
 
-def stop_containers(
+def stop_running_containers(
     executor,
     host: str,
     names: Iterable[str],
@@ -341,22 +383,10 @@ def process_host(
         return before
 
     action = "DRY-RUN" if dry_run else "ACTION"
-    if kill_processes and before.processes:
-        try:
-            killed, kill_failures = kill_npu_processes(
-                executor, host, before.processes, dry_run=dry_run
-            )
-            print(f"\n[{action}] {host}: kill NPU processes -> {killed}")
-            before.cleanup_failures.extend(kill_failures)
-        except Exception as exc:
-            msg = f"kill NPU processes raised: {exc}"
-            before.cleanup_failures.append(msg)
-            print(f"[FAILED] {host}: {msg}", file=sys.stderr)
-
     containers = before.containers
     if stop_containers and containers:
         try:
-            stopped, stop_failures = stop_containers(
+            stopped, stop_failures = stop_running_containers(
                 executor, host, containers, dry_run=dry_run
             )
             print(f"[{action}] {host}: stop containers -> {stopped}")
@@ -368,6 +398,27 @@ def process_host(
             before.cleanup_failures.extend(stop_failures)
         except Exception as exc:
             msg = f"stop containers raised: {exc}"
+            before.cleanup_failures.append(msg)
+            print(f"[FAILED] {host}: {msg}", file=sys.stderr)
+
+    if kill_processes:
+        try:
+            # Container shutdown can remove most PIDs. Never signal the stale
+            # pre-stop list; re-query every device immediately before cleanup.
+            # Dry-run does not actually stop containers, so retain its snapshot.
+            remaining = (
+                before.processes
+                if dry_run
+                else query_npu_processes(executor, discover_devices(executor))
+            )
+            if remaining:
+                targeted, kill_failures = kill_npu_processes(
+                    executor, host, remaining, dry_run=dry_run
+                )
+                print(f"\n[{action}] {host}: signal NPU processes -> {targeted}")
+                before.cleanup_failures.extend(kill_failures)
+        except Exception as exc:
+            msg = f"kill NPU processes raised: {exc}"
             before.cleanup_failures.append(msg)
             print(f"[FAILED] {host}: {msg}", file=sys.stderr)
 
@@ -386,8 +437,8 @@ def process_host(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Query NPU occupancy on remote hosts, kill occupying processes, "
-            "and stop all running containers."
+            "Stop running containers on remote hosts, then clear remaining NPU "
+            "processes; retry unauthorized signals with non-interactive sudo."
         )
     )
     parser.add_argument(
