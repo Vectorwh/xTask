@@ -142,6 +142,10 @@ def _extract_video(response: Dict[str, Any]) -> str:
     if not isinstance(results, list) or not results or not isinstance(results[0], dict):
         raise RuntimeError("xLLM video response contains no output.results[0]")
     video = results[0].get("video")
+    # Current xLLM returns MediaSource: {"type": "base64", "base64": "..."}.
+    # Older builds returned the Base64 string directly for compatibility.
+    if isinstance(video, dict):
+        video = video.get("base64")
     if not isinstance(video, str) or not video:
         raise RuntimeError("xLLM video response contains no Base64 video")
     if "," in video and video.startswith("data:"):
@@ -276,7 +280,16 @@ def generate(args: argparse.Namespace) -> int:
             )
             input_data: Dict[str, Any] = {
                 "prompt": prompt,
-                "image": _encode_image(image_path),
+                # Current xLLM uses the unified media_sources schema.  Keep
+                # the semantic name "image" so Wan I2V selects the first frame.
+                "media_sources": [
+                    {
+                        "type": "base64",
+                        "name": "image",
+                        "base64": _encode_image(image_path),
+                        "modality": "image",
+                    }
+                ],
             }
             negative_prompt = _first_value(record, ("negative_prompt", "negative"))
             if negative_prompt not in (None, ""):

@@ -36,13 +36,13 @@ benchmark:
       threshold: 0.10
 
 deployment:
-  master_host: 11.87.191.75
+  master_host: 11.87.191.121
   benchmark:
     runner_instance: master-0
     health_path: /health
   instances:
   - name: master-0
-    host: 11.87.191.75
+    host: 11.87.191.121
     role: master
     rank_start: 0
     # Wan2.2 I2V（非蒸馏）双卡：按交付报告 4.1 的 8 卡典型配置
