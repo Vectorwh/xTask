@@ -73,6 +73,7 @@ export HCCL_IF_BASE_PORT={HCCL_IF_PORT}
 MASTER_NODE_ADDR="$MASTER_HOST:$PROGRESS_CONN_PORT"
 LOG_DIR="log"
 chown "$USERID" "$LOG_DIR"
+{STARTUP_ENVIRONMENT}
 IFS=',' read -r -a DEVICE_IDS <<< "$ASCEND_RT_VISIBLE_DEVICES"
 if [ "${#DEVICE_IDS[@]}" -ne "$LOCAL_NNODES" ]; then
   echo "device_ids count (${#DEVICE_IDS[@]}) does not match LOCAL_NNODES ($LOCAL_NNODES)" >&2

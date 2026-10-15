@@ -496,9 +496,10 @@ def merge_instance_task_config(
     """Overlay one deployment instance onto the shared task config.
 
     Per-instance fields (host / device_ids / local_port / communication ports /
-    serving_extensiable_param) take precedence. Top-level host_addr / num_devices /
-    start_device_id / world_size / communication ports / serving_extensiable_param
-    are optional fallbacks for older YAMLs.
+    serving_extensiable_param / startup_environment) take precedence. Top-level
+    host_addr / num_devices / start_device_id / world_size / communication ports /
+    serving_extensiable_param / startup_environment are optional fallbacks for
+    older YAMLs.
     """
     normalize_pd_deployment(task_config)
     cfg = copy.deepcopy(task_config)
@@ -527,6 +528,11 @@ def merge_instance_task_config(
     for field_name in ("ipc_mode", "shm_size"):
         if instance.get(field_name) is not None:
             cfg[field_name] = str(instance[field_name])
+
+    # A node list replaces the task-level list. Omitting the key keeps the
+    # task-level list. An empty list inserts nothing for this node.
+    if "startup_environment" in instance:
+        cfg["startup_environment"] = copy.deepcopy(instance["startup_environment"])
 
     # Instance-level serving_extensiable_param is the primary source; top-level
     # remains a shared default for backward-compatible multihost YAMLs.

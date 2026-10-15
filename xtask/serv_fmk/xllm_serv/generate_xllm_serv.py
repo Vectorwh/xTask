@@ -113,6 +113,33 @@ def _select_template_path(local_nnodes, allow_large_world: bool = False, world_s
     return ""
 
 
+def _format_startup_environment(config):
+    """Render YAML startup_environment as shell lines.
+
+    Absent or empty means the caller inserts nothing. Entries are copied
+    verbatim so they can override exports the template already wrote.
+    """
+    raw = config.get("startup_environment", None)
+    if raw is None:
+        return ""
+    if not isinstance(raw, list):
+        raise ValueError("startup_environment must be a list of shell command strings")
+    lines = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, str):
+            raise ValueError(
+                f"startup_environment[{index}] must be a shell command string"
+            )
+        if "\n" in item or "\r" in item:
+            raise ValueError(
+                f"startup_environment[{index}] must be a single-line shell command"
+            )
+        lines.append(item)
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
 def generate_xllm_script(config, output_file_path: str, output_file="xllm_serv_single_card.sh",
                          allow_large_world: bool = False):
     """生成 xLLM 启动脚本（单机或多机实例）。"""
@@ -185,6 +212,14 @@ def generate_xllm_script(config, output_file_path: str, output_file="xllm_serv_s
     script_content = script_content.replace(
         f"{space_str}$SERVING_EXTENSIABLE_PARAM\n", extense_str
     )
+
+    startup_block = _format_startup_environment(config)
+    placeholder = "{STARTUP_ENVIRONMENT}\n"
+    if placeholder not in script_content:
+        raise RuntimeError(
+            f"{template_name} is missing the startup_environment placeholder"
+        )
+    script_content = script_content.replace(placeholder, startup_block)
 
     os.makedirs(output_file_path, exist_ok=True)
     with open(os.path.join(output_file_path, output_file), 'w', encoding='utf-8') as f:

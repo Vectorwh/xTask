@@ -34,3 +34,4 @@
 | `25` | 单机 xLLM Wan2.2 I2V 视频生成与 VBench 质量评测 |
 | `26` | 外部已有 OpenAI 兼容服务 + AISBench 性能（不启动 xLLM） |
 | `27` | 外部已有 Wan2.2 + 独立 VBench runner 质量评测（不启动 xLLM） |
+| `28` | `startup_environment`：按逻辑实例继承、按 node 整段替换的启动脚本 shell 行 |
