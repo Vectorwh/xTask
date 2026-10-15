@@ -8,7 +8,14 @@ set -euo pipefail
 export http_proxy="http://bamboo-proxy.jd.com:80"
 export https_proxy="http://bamboo-proxy.jd.com:80"
 export no_proxy=".jd.com,.jd.local,.local"
+export NO_PROXY="${no_proxy}"
 #export no_proxy=".jd.com,.jd.local,.local,repo.openeuler.org,mirrors.openeuler.org,dl-cdn.openeuler.openatom.cn"
+
+# 源码包与 binary cache 共用 prepare_xllm.sh 挂载的 /root/.cache/vcpkg
+# （宿主机 /export/home/npu_vcpkg_cache_abi_1）。vcpkg 读 VCPKG_DOWNLOADS，
+# 跨次 docker run 复用 distfile，不必每次再下 x264 等 tarball。
+export VCPKG_DOWNLOADS="${VCPKG_DOWNLOADS:-/root/.cache/vcpkg/downloads}"
+mkdir -p "${VCPKG_DOWNLOADS}"
 
 # 工作根目录：由外层 prepare_xllm.sh 通过 -e WORK_ROOT 传入（/export/home 已挂载，路径一致）
 if [[ -z "${WORK_ROOT:-}" ]]; then
@@ -76,6 +83,28 @@ cd "${XLLM_DIR}"
 # 且 setup.py 会调用 `git submodule status`，故在容器内为 root 配置 safe.directory。
 # 用通配符一次性覆盖主仓库与所有（含嵌套）子模块目录，避免逐个枚举遗漏。
 git config --global --add safe.directory '*'
+
+# vcpkg 默认拉 github.com/.../archive/...tar.gz，经 bamboo 代理常 503，容器内直连 GitHub 亦不可用。
+# codeload.github.com 经代理可下；预置 distfile 后 vcpkg 会跳过下载。
+prefetch_vcpkg_distfile_via_codeload() {
+  local org_repo="$1" git_ref="$2" distfile_name="$3"
+  local downloads_dir="${VCPKG_DOWNLOADS:-/vcpkg-src/downloads}"
+  local dest="${downloads_dir}/${distfile_name}"
+  if [[ -f "${dest}" ]]; then
+    echo "[vcpkg-prefetch] already present: ${distfile_name}"
+    return 0
+  fi
+  mkdir -p "${downloads_dir}"
+  local url="https://codeload.github.com/${org_repo}/tar.gz/${git_ref}"
+  echo "[vcpkg-prefetch] ${distfile_name} <- ${url}"
+  curl --fail -L --connect-timeout 60 --max-time 900 \
+    -x "${https_proxy}" \
+    -o "${dest}.part" "${url}"
+  mv -f "${dest}.part" "${dest}"
+}
+prefetch_vcpkg_distfile_via_codeload \
+  "mirror/x264" "eaa68fad9e5d201d42fde51665f2d137ae96baf0" \
+  "mirror-x264-eaa68fad9e5d201d42fde51665f2d137ae96baf0.tar.gz"
 
 # 编译：安装 pre-commit 后执行 setup.py 构建
 pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple
