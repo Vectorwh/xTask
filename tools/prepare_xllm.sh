@@ -251,6 +251,7 @@ RUN_OPTS=(
   -v /var/log/npu/profiling/:/var/log/npu/profiling
   -v /var/log/npu/dump/:/var/log/npu/dump
   -v /export/home:/export/home
+  # archives/: vcpkg binary cache；downloads/: VCPKG_DOWNLOADS distfile（容器脚本设置）  
   -v /export/home/npu_vcpkg_cache_abi_1:/root/.cache/vcpkg # cached vcpkg installed dir
   -v /etc/hccn.conf:/etc/hccn.conf
   -e WORK_ROOT="${WORK_ROOT}"
