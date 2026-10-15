@@ -21,7 +21,7 @@ from xtask.benchmarks.aisbench.swebench import swebench_mode
 
 
 _DATE_DIR = re.compile(r"^\d{8}_\d{6}$")
-_RESULT_JSON_HINTS = ("accuracy", "resolved_instances", "submitted_accuracy")
+_RESULT_JSON_HINTS = ("accuracy", "resolved_instances", "submitted_accuracy", "harness_exit_code")
 _PAYLOAD_FIELDS = (
     "resolved_rate",
     "accuracy",
@@ -158,6 +158,34 @@ def _output_dir_for(root: Path, result_file: Optional[Path]) -> str:
     return str(root)
 
 
+def _new_direct_run_dir(root: Path, init_entries: Iterable[str]) -> Path:
+    """Select this invocation's AISBench directory, never an older result.
+
+    Historical SWE runs may still exist at ``outputs/default/<timestamp>``.
+    Searching the entire case tree would prefer those paths lexically over a
+    new ``<case>/<timestamp>`` result, even when the new run succeeded.
+    """
+    previous = set(init_entries)
+    try:
+        runs = sorted(
+            path for path in root.iterdir()
+            if path.is_dir()
+            and _DATE_DIR.fullmatch(path.name)
+            and path.name not in previous
+            and (path / "configs").is_dir()
+        )
+    except OSError as exc:
+        raise FileNotFoundError(
+            f"Cannot inspect current SWE-bench AISBench run under {root}"
+        ) from exc
+    if len(runs) != 1:
+        raise FileNotFoundError(
+            f"Expected one new SWE-bench AISBench run directory under {root}, "
+            f"found {len(runs)}; refusing to reuse historical results"
+        )
+    return runs[0]
+
+
 def _normalize_eval_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     accuracy = _as_number(
         payload.get("accuracy", payload.get("resolved_rate", payload.get("resolved")))
@@ -195,9 +223,14 @@ def aisbench_swe_post_process(
     task_config: Mapping[str, Any],
     output_file_path: str,
     init_entries: Optional[Iterable[str]] = None,
+    *,
+    require_new_direct_run: bool = False,
 ) -> Tuple[Dict[str, Any], str]:
-    del init_entries  # AISBench SWE writes under the case dir / work_dir.
     root = Path(output_file_path)
+    if require_new_direct_run:
+        if init_entries is None:
+            raise ValueError("SWE-bench current-run directory requires init_entries")
+        root = _new_direct_run_dir(root, init_entries)
     mode = swebench_mode(task_config)
     result_file, payload = _find_eval_result(root)
     predictions_file = _find_predictions(root)

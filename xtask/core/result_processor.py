@@ -396,6 +396,23 @@ def _failed_perf_baseline_rules(result, task_config):
     return failed
 
 
+def _swebench_harness_failure(swe_result):
+    """Distinguish per-instance harness errors from valid unresolved patches."""
+    for field in ("harness_exit_code", "error_instances"):
+        value = swe_result.get(field)
+        if value is None:
+            continue
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            return f"Invalid SWE-bench {field}: {value!r}"
+        if count < 0 or (field == "harness_exit_code" and count != 0) or (
+            field == "error_instances" and count > 0
+        ):
+            return f"SWE-bench {field}={count}"
+    return None
+
+
 def verify_result(result, task_config):
     ret = False
     acc_flag = False
@@ -448,9 +465,14 @@ def verify_result(result, task_config):
             logging.error("✗ Test failed: missing SWE-bench result")
             return False
         mode = swebench_mode(task_config)
-        if mode in {"eval", "all"} and swe_result.get("resolved_rate") is None:
-            logging.error("✗ Test failed: SWE-bench resolved_rate is missing")
-            return False
+        if mode in {"eval", "all"}:
+            harness_failure = _swebench_harness_failure(swe_result)
+            if harness_failure:
+                logging.error("✗ Test failed: %s", harness_failure)
+                return False
+            if swe_result.get("resolved_rate") is None:
+                logging.error("✗ Test failed: SWE-bench resolved_rate is missing")
+                return False
         if mode == "infer" and not (
             swe_result.get("predictions_file")
             or swe_result.get("submitted_instances")
@@ -769,6 +791,16 @@ def _classify_failure(result, task_config):
         if benchmark_stderr and benchmark_stderr not in reason:
             reason = f"{reason}: {benchmark_stderr}" if reason else benchmark_stderr
         return FAILURE_BENCHMARK, reason or "Benchmark command failed"
+
+    if result.get("benchmark_success") is True and _contains_metric(task_config, "swebench"):
+        from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
+
+        if is_aisbench_swebench_task(task_config):
+            swe_result = result.get("benchmark_swebench_result")
+            if isinstance(swe_result, Mapping):
+                harness_failure = _swebench_harness_failure(swe_result)
+                if harness_failure:
+                    return FAILURE_BENCHMARK, harness_failure
 
     if (
         result.get("benchmark_success") is True

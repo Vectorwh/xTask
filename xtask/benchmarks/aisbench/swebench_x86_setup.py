@@ -16,13 +16,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence
 
-from xtask.benchmarks.aisbench.swebench import swebench_config, swebench_runner
+from xtask.benchmarks.aisbench.swebench import (
+    swebench_config,
+    swebench_dataset_name,
+    swebench_runner,
+    swebench_setup,
+)
+from xtask.benchmarks.aisbench.swebench_x86_container import runtime_container_config
 from xtask.utils.container_manager import CommandResult
 from xtask.utils.host_executor import HostExecutor, is_local_host
 from xtask.utils.resource_sync import get_dependence_package_path
 
 
-DEFAULT_INSTALL_ROOT = "/export/home/xtask_swe/runtime"
+DEFAULT_INSTALL_ROOT = str(Path.home() / "xtask_swe/runtime")
 DEFAULT_SETUP_TIMEOUT_S = 1800
 SETUP_SCRIPT_NAME = "setup_aisbench_swe_x86.sh"
 MINI_SWE_DIR_NAMES = ("mini-swe-agent", "mini_swe_agent", "minisweagent")
@@ -30,8 +36,7 @@ HARNESS_DIR_NAMES = ("SWE-bench", "swe-bench", "swebench", "SWE_bench")
 
 
 def _setup_config(task_config: Mapping[str, Any]) -> dict:
-    raw = swebench_config(task_config).get("setup") or {}
-    return dict(raw) if isinstance(raw, Mapping) else {}
+    return swebench_setup(task_config)
 
 
 def _nonempty(value: Any) -> str:
@@ -127,6 +132,62 @@ def resolve_aisbench_source(task_config: Mapping[str, Any]) -> Path:
         "AISBench source was not found on the control node. Expected "
         "DEPENDENCE_PACKAGE_PATH/benchmark (the same tree download_ais_bench.sh uses)."
     )
+
+
+def _is_swebench_dataset_dir(path: Path) -> bool:
+    """Return True for a local SWE-bench parquet dataset snapshot."""
+    try:
+        if not path.is_dir():
+            return False
+        return any(path.glob("data/test-*.parquet")) or any(
+            path.glob("test-*.parquet")
+        )
+    except (OSError, PermissionError):
+        return False
+
+
+def default_swebench_dataset_path(task_config: Mapping[str, Any]) -> Optional[Path]:
+    """Resolve the shared local SWE-bench dataset snapshot, if present.
+
+    The default archive layout mirrors the other shared benchmark datasets:
+    ``<DEPENDENCE_PACKAGE_PATH>/datasets/swebench/<dataset_name>/``.  Missing
+    archives intentionally return ``None`` so the existing online Hugging Face
+    fallback remains available.
+    """
+    dataset = swebench_dataset_name(task_config)
+    root = Path(get_dependence_package_path()) / "datasets" / "swebench"
+    path = root / dataset
+    return path if _is_swebench_dataset_dir(path) else None
+
+
+def prepare_default_swebench_dataset(
+    task_config: Mapping[str, Any],
+    executor: HostExecutor,
+    host: str,
+    install_root: str,
+) -> Optional[str]:
+    """Sync the default SWE-bench dataset snapshot to the x86 runner.
+
+    Returns the runner-side path to configure in AISBench, or ``None`` when no
+    local archive exists.  Explicit ``benchmark.swebench.dataset_path`` values
+    are never overridden by this helper.
+    """
+    source = default_swebench_dataset_path(task_config)
+    if source is None:
+        logging.info(
+            "SWE-bench: no local default dataset archive; AISBench may load it online"
+        )
+        return None
+
+    if is_local_host(host):
+        logging.info("SWE-bench: using local default dataset archive: %s", source)
+        return str(source)
+
+    dataset = swebench_dataset_name(task_config)
+    remote = Path(install_root) / "swebench_datasets" / dataset
+    _sync_tree(executor, host, source, remote)
+    logging.info("SWE-bench: default dataset ready on x86 runner: %s", remote)
+    return str(remote)
 
 
 def resolve_optional_source(
@@ -284,8 +345,11 @@ def _install_swe_runtime(
         task_config, "swebench_harness_source", HARNESS_DIR_NAMES, _is_harness_tree
     )
 
+    # The opted-in driver only mounts ~/xtask_swe. Even when the x86 host
+    # shares the original source path, install from the mounted runtime tree.
+    isolated_driver = runtime_container_config(task_config) is not None
     remote_aisbench = Path(install_root) / "benchmark"
-    if is_local_host(host) or _remote_dir_exists(executor, aisbench_source):
+    if not isolated_driver and (is_local_host(host) or _remote_dir_exists(executor, aisbench_source)):
         remote_aisbench = aisbench_source
     else:
         _sync_tree(executor, host, aisbench_source, remote_aisbench)
@@ -293,7 +357,7 @@ def _install_swe_runtime(
     remote_mini = ""
     if mini_source is not None:
         remote_mini_path = Path(install_root) / "mini-swe-agent"
-        if is_local_host(host) or _remote_dir_exists(executor, mini_source):
+        if not isolated_driver and (is_local_host(host) or _remote_dir_exists(executor, mini_source)):
             remote_mini_path = mini_source
         else:
             _sync_tree(executor, host, mini_source, remote_mini_path)
@@ -302,7 +366,7 @@ def _install_swe_runtime(
     remote_harness = ""
     if harness_source is not None:
         remote_harness_path = Path(install_root) / "SWE-bench"
-        if is_local_host(host) or _remote_dir_exists(executor, harness_source):
+        if not isolated_driver and (is_local_host(host) or _remote_dir_exists(executor, harness_source)):
             remote_harness_path = harness_source
         else:
             _sync_tree(executor, host, harness_source, remote_harness_path)

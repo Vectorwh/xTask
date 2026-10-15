@@ -102,15 +102,16 @@ def run_validated_workflow(args, xtask_config):
         )
         return
 
-    run_task_workflow(
+    workflow_success = run_task_workflow(
         args,
         xtask_config,
         openme_client,
         para_strategy=para_strategy,
     )
-    
+
     # 发送京me通报
     #openme_client.SendJUEMsgCard(args=args)
+    return workflow_success
 
 
 def parse_and_validate_arguments():
@@ -130,7 +131,10 @@ def main():
         args, args_result, xtask_config = parse_and_validate_arguments()
         if not args_result.is_valid:
             sys.exit(1)
-        run_validated_workflow(args, xtask_config)
+        workflow_success = run_validated_workflow(args, xtask_config)
+        if workflow_success is False:
+            logging.error("One or more tasks failed; exiting with status 1")
+            sys.exit(1)
     except Exception as error:
         logging.error("Argument validation failed: %s", error)
         traceback.print_exc()

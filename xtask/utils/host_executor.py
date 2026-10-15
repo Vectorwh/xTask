@@ -385,6 +385,20 @@ class SshHostExecutor(HostExecutor):
             logging.error("SCP upload failed: %s", exc)
             return False
 
+    def upload_dir_to_exact_path(self, local_dir: str, remote_path: str) -> bool:
+        """Opt in to uploading directory contents under an arbitrary remote name.
+
+        The ordinary ``upload`` method retains its existing directory behavior
+        for other callers; SWE-bench uses this for its per-run work directory.
+        """
+        local = Path(local_dir)
+        if not local.is_dir():
+            logging.error("Directory upload source does not exist: %s", local)
+            return False
+        return self._upload_dir_via_tar(
+            str(local.resolve()), remote_path, exact_remote_path=True
+        )
+
     def sync_path(
         self,
         local_path: str,
@@ -545,7 +559,9 @@ class SshHostExecutor(HostExecutor):
             except OSError:
                 pass
 
-    def _upload_dir_via_tar(self, local_dir: str, remote_path: str) -> bool:
+    def _upload_dir_via_tar(
+        self, local_dir: str, remote_path: str, *, exact_remote_path: bool = False
+    ) -> bool:
         """Upload a directory via tar to avoid scp nesting / 'unexpected filename: .'."""
         import tempfile
 
@@ -566,11 +582,18 @@ class SshHostExecutor(HostExecutor):
             )
             remote_tar = f"/tmp/xtask_dir_{os.getpid()}_{name}.tar.gz"
             remote_parent = str(Path(remote_path).parent)
-            prep = self.run(
-                f"chmod -R u+w {remote_path} 2>/dev/null || true; "
-                f"rm -rf {remote_path}; mkdir -p {remote_parent}",
-                timeout=120,
-            )
+            if exact_remote_path:
+                prep_command = (
+                    f"rm -rf {shlex.quote(remote_path)} && "
+                    f"mkdir -p {shlex.quote(remote_path)}"
+                )
+            else:
+                # Preserve the pre-existing upload semantics for all other users.
+                prep_command = (
+                    f"chmod -R u+w {remote_path} 2>/dev/null || true; "
+                    f"rm -rf {remote_path}; mkdir -p {remote_parent}"
+                )
+            prep = self.run(prep_command, timeout=120)
             if not prep.success:
                 logging.error(
                     "Remote dir prepare failed on %s: %s",
@@ -580,13 +603,21 @@ class SshHostExecutor(HostExecutor):
                 return False
             if not self.upload(tar_path, remote_tar):
                 return False
-            # Extract so remote_path == parent/name contents.
-            # Tar contains top-level `name/`; extract under remote_parent.
-            extract = self.run(
-                f"tar xzf {remote_tar} -C {remote_parent} && "
-                f"rm -f {remote_tar} && test -d {remote_path} && echo DIR_OK",
-                timeout=300,
-            )
+            if exact_remote_path:
+                # The archive contains local_dir/; strip that prefix when the
+                # SWE-bench run has a differently named remote work directory.
+                extract_command = (
+                    f"tar xzf {shlex.quote(remote_tar)} "
+                    f"-C {shlex.quote(remote_path)} --strip-components=1 && "
+                    f"rm -f {shlex.quote(remote_tar)} && "
+                    f"test -d {shlex.quote(remote_path)} && echo DIR_OK"
+                )
+            else:
+                extract_command = (
+                    f"tar xzf {remote_tar} -C {remote_parent} && "
+                    f"rm -f {remote_tar} && test -d {remote_path} && echo DIR_OK"
+                )
+            extract = self.run(extract_command, timeout=300)
             if not extract.success or "DIR_OK" not in (extract.stdout or ""):
                 logging.error(
                     "Remote dir extract failed on %s: %s",

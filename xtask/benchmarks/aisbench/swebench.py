@@ -7,6 +7,7 @@ the SWE path even if a leftover ``benchmark.swebench`` block is present.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Mapping, Optional
 
 
@@ -29,6 +30,7 @@ ALLOWED_SWEBENCH_DATASETS = frozenset(
     }
 )
 ALLOWED_SWEBENCH_MODES = frozenset({"infer", "eval", "all"})
+_AGENT_CONTAINER_TIMEOUT = re.compile(r"^[1-9][0-9]*[smh]$")
 
 
 def _metrics_include_swebench(task_config: Optional[Mapping[str, Any]]) -> bool:
@@ -91,6 +93,59 @@ def swebench_timeout_s(task_config: Optional[Mapping[str, Any]]) -> int:
 def swebench_runner(task_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     runner = swebench_config(task_config).get("runner") or {}
     return dict(runner) if isinstance(runner, Mapping) else {}
+
+
+def swebench_agent_container_timeout(task_config: Optional[Mapping[str, Any]]) -> str:
+    """Opt-in mini-swe-agent Docker lifetime (GNU sleep syntax)."""
+    raw = swebench_runner(task_config).get("agent_container_timeout")
+    if raw is None or raw == "":
+        return ""
+    if not isinstance(raw, str) or not _AGENT_CONTAINER_TIMEOUT.fullmatch(raw):
+        raise ValueError(
+            "benchmark.swebench.runner.agent_container_timeout must be "
+            "a positive duration such as '4h'"
+        )
+    return raw
+
+
+def swebench_direct_output_enabled(task_config: Optional[Mapping[str, Any]]) -> bool:
+    """Use the case root for new experiments, without changing legacy reuse.
+
+    AISBench's ``--reuse`` searches its work directory for earlier experiments.
+    Keep its existing ``outputs/default`` location in that mode so historical
+    predictions stay available. Also honor an explicitly supplied work dir.
+    """
+    config = swebench_config(task_config)
+    if bool(config.get("reuse", True)):
+        return False
+    extra_args = config.get("extra_args") or ()
+    if not isinstance(extra_args, (list, tuple)):
+        return True  # The script generator validates extra_args separately.
+    return not any(
+        str(arg) in {"-w", "--work-dir"}
+        or str(arg).startswith(("-w=", "--work-dir="))
+        for arg in extra_args
+    )
+
+
+# Keep old setup fields readable, but author new x86 setup options directly in
+# benchmark.swebench.runner alongside host/work_dir/install_dir.
+_RUNNER_SETUP_FIELDS = frozenset({
+    "python", "install_dir", "timeout", "skip", "source_root",
+    "aisbench_source", "mini_swe_agent_source", "swebench_harness_source",
+    "mini_swe_agent_git", "swebench_harness_git", "runtime_container",
+})
+
+
+def swebench_setup(task_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    config = swebench_config(task_config)
+    old = config.get("setup") or {}
+    if not isinstance(old, Mapping):
+        raise ValueError("benchmark.swebench.setup must be a mapping")
+    merged = dict(old)
+    runner = swebench_runner(task_config)
+    merged.update({key: runner[key] for key in _RUNNER_SETUP_FIELDS if key in runner})
+    return merged
 
 
 def swebench_dataset_name(task_config: Optional[Mapping[str, Any]]) -> str:

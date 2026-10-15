@@ -26,7 +26,7 @@ class OpenMeClient:
         "AppId": "lw5xdL5HsIHbXdssEMaV",  # 算法CICD应用ID
         "ERP": "kongshuaikang1",  # 消息发送人
         "TenantId": "CN.JD.GROUP",  # 租户，国内
-        "GroupId": "00000000",  # 发送京me群ID
+        "GroupId": "10231269663",  # 发送京me群ID
         "RobotId": "00_df87bfb3cfd340ec",  # 机器人ID
         "TemplateCardId": "sFJl6O7bjk2DYO4a863nk",  # 卡片ID
         "TemplateCardVersion": "0.0.6",  # 卡片版本

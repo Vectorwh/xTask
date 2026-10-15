@@ -30,4 +30,4 @@ pkg/xllm/service_binary/releases/
 *.rpm
 *.whl
 .joycode
-xllm/
+/xllm/

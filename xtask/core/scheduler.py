@@ -1014,6 +1014,34 @@ def _create_fallback_date_dir(output_file_path: Path, init_entries) -> Optional[
     return None
 
 
+def _chown_via_running_container(container_manager, container_config, host_path) -> bool:
+    """chown a container-created path to the control-host user before download."""
+    try:
+        if container_manager is None or container_config is None:
+            return False
+        if not container_manager.container_is_running(
+            container_config.container_name
+        ):
+            return False
+        from xtask.utils.container_manager import path_mapping_in_container
+
+        container_path = path_mapping_in_container(str(host_path))
+        uid = os.getuid()
+        gid = os.getgid()
+        result = container_manager.exec_in_container(
+            container_config.container_name,
+            f"test ! -e {shlex.quote(container_path)} || "
+            f"chown -R {uid}:{gid} {shlex.quote(container_path)}",
+            timeout=30,
+        )
+        return bool(getattr(result, "success", False))
+    except Exception:
+        logging.debug(
+            "chown through container failed for %s", host_path, exc_info=True
+        )
+        return False
+
+
 def _chmod_via_running_container(container_manager, container_config, host_path) -> bool:
     """chmod a container-created path only while its container is still running.
 
@@ -3399,13 +3427,25 @@ def _run_aisbench_swe_and_process(context):
     from xtask.benchmarks.aisbench.generate_aisbench_swe_script import (
         execute_aisbench_swe_benchmark,
     )
-    from xtask.benchmarks.aisbench.swebench import swebench_timeout_s
+    from xtask.benchmarks.aisbench.swebench import (
+        swebench_direct_output_enabled,
+        swebench_timeout_s,
+    )
 
     state = context.state
     task_config = state["task_config"]
     os.makedirs(context.output_file_path, exist_ok=True)
     init_entries = os.listdir(context.output_file_path)
     state["init_entries"] = init_entries
+    if not _chown_via_running_container(
+        state.get("container_manager"),
+        state.get("container_config"),
+        context.output_file_path,
+    ):
+        logging.warning(
+            "Failed to chown SWE-bench output directory before download: %s",
+            context.output_file_path,
+        )
     logging.info("Executing AISBench SWE-bench on the configured x86 runner")
     benchmark_result = execute_aisbench_swe_benchmark(
         task_config,
@@ -3423,12 +3463,30 @@ def _run_aisbench_swe_and_process(context):
     if benchmark_result.success:
         try:
             swe_result, output_dir = aisbench_swe_post_process(
-                task_config, context.output_file_path, init_entries
+                task_config,
+                context.output_file_path,
+                init_entries,
+                require_new_direct_run=swebench_direct_output_enabled(task_config),
             )
             context.result["benchmark_swebench_result"] = swe_result
             if output_dir:
                 context.result["benchmark_output_path"] = output_dir
                 _record_service_group_archive_path(state, output_dir)
+                # SWE-bench runs AISBench on a separate x86 runner. Archive the
+                # serving logs now, while xLLM is still live; shutdown only
+                # overlays lifecycle artifacts and deliberately skips log/.
+                try:
+                    _archive_service_group_logs(
+                        state.get("service_runtimes") or [],
+                        context.output_file_path,
+                        output_dir,
+                    )
+                except Exception:
+                    logging.warning(
+                        "Failed to archive live xLLM logs for SWE-bench: %s",
+                        output_dir,
+                        exc_info=True,
+                    )
         except Exception as exc:
             context.result["benchmark_swebench_result"] = None
             context.result["message"] = f"SWE-bench result processing failed: {exc}"

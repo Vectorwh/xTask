@@ -367,6 +367,73 @@ xTask 会把主节点上的 AISBench 源码（`DEPENDENCE_PACKAGE_PATH/benchmark
 AISBench、mini-swe-agent 和 SWE-bench harness。不需要事先手装这三样。
 x86 仍需 Docker 可用，`docker ps` 能通过；instance 镜像首次评测时再 pull。
 不要把 ARM NPU 机器上的 binfmt 当作生产路径。
+如果评测完整 SWE-bench 数据集、x86 上大量实例镜像尚未缓存，
+应先在 x86 上预拉取镜像再启动 xLLM，避免 NPU 长时间等待 Docker Hub 下载；
+离线预拉取和镜像源网络诊断见 `docs/aisbench_swe_image_prefetch.md`。
+
+SWE-bench 用例设置 `reuse: false` 时，xTask 给 AISBench 显式指定用例工作目录，
+新结果与普通 AISBench/EvalScope 一样保存在
+`outputs/<case_name>/<YYYYMMDD_HHMMSS>/`，而非默认的
+`outputs/<case_name>/outputs/default/<YYYYMMDD_HHMMSS>/`。
+历史 `outputs/default/` 结果不会迁移或删除；后处理仅使用本次新建的日期目录，
+防止历史结果掩盖当次失败。设置 `reuse: true` 的旧用例继续沿用 AISBench
+原有 `outputs/default/` 路径，以免改变历史预测的复用方式。
+通过 SWE-bench `extra_args` 显式指定 `--work-dir` 的用例也沿用其自定义路径。
+x86 评测结果回传时先下载到用例目录外的临时目录，再合并 AISBench 结果，
+不再整体替换主节点的用例目录：本机 xLLM 正在写入的 `xllm_log/<实例>/log/`
+会保留，并在运行结束时与新产生的 `shutdown_log/` 一起归档到本次日期目录。
+
+如果 x86 的宿主机 Python 不可用，可以显式启用 xTask 管理的评测控制容器，
+而不必预先手动执行 `docker run` 或维护 `python3.11-docker`、`ais_bench-docker` 包装脚本：
+
+```yaml
+benchmark:
+  swebench:
+    runner:
+      host: 11.87.48.253
+      runtime_container:
+        image: xllm:a2-x86-cann9-main-0920  # 镜像必须预先在该 x86 主机上可用
+        python: /usr/local/python3.11.15/bin/python3
+        ais_bench_bin: /usr/local/python3.11.15/bin/ais_bench
+```
+
+这个开关只影响 SWE-bench 的 x86 评测控制环境，不影响 NPU xLLM 容器或其他评测。
+每次用例自动使用 `<case_name>-swebench_rt-<Unix秒级时间戳>` 创建独立容器，
+挂载远端用户的 `~/xtask_swe`、宿主机 Docker CLI 和 `/var/run/docker.sock`，
+并自动生成 Python/AISBench 包装入口；用例完成或运行失败后默认删除**本次创建的容器**及包装入口，
+保留数据集、预测和打分输出目录。已有同名容器不会被接管或删除。
+xTask 不负责安装 Docker 或拉取评测控制镜像。
+默认沿用 x86 宿主机 `/etc/resolv.conf` 中的 DNS；如有特殊需求可在
+`runner.runtime_container.dns` 中指定 IP 地址列表。
+`runner` 也可填写 `python`、`install_dir`、`timeout`、`skip`、`source_root`、
+`aisbench_source`、`mini_swe_agent_source`、`swebench_harness_source` 等准备参数。
+旧 `benchmark.swebench.setup` 写法保留兼容（包括其旧版共享容器行为），新用例统一写在 `runner` 下。
+**挂载 Docker socket 意味着容器内程序可以控制宿主机 Docker，只能在可信的专用 x86 runner 上启用。**
+未配置 `runtime_container` 时，保持原有宿主机 Python 或手写包装入口的行为。
+若 x86 Docker daemon 的 `put_archive` 在挂载容器文件时错误返回 ENOSPC，
+可在该 SWE 用例的 `runner` 中**显式**写 `docker_copy_fallback: true`。
+仅此用例的 AISBench 子进程会先尝试原 Docker API；仅命中挂载 ENOSPC 时改用
+`docker exec -i ... tar -xf -` 重试。该临时降级不修改共享 Docker daemon、
+不影响 VBench 或普通 AISBench；长期仍应修复 x86 的 Docker 环境。
+多实例 SWE-bench 在 x86 无法直连 GitHub 时，可在 `runner.runtime_container.proxy`
+中配置 `http`、`https` 和指向模型服务的 `no_proxy`；代理只传入 AISBench 评测进程，
+不改变依赖安装环境。若该代理偶发中断，可仅在受影响的 SWE-bench 用例设置
+`runner.github_raw_retry: true`：仅对 `raw.githubusercontent.com` 的 GET 网络超时、
+连接失败或临时 HTTP 429/5xx 重试最多三次（1s、2s、4s），不重试证书错误，
+不改变模型 API、普通 AISBench、EvalScope 或其他未启用此开关的 SWE-bench 用例。
+x86 Docker 偶发因 overlay 挂载 ENOSPC 不能启动 mini-swe-agent
+实例时，可为该 SWE 用例设置 `runner.docker_run_retry: true`：只对此类 Docker
+创建失败最多再试两次（2s、4s），其他错误不会自动重试。
+mini-swe-agent 默认在全部实例处理结束后统一清理 Docker 实例；在 x86 daemon
+容易于连续创建时发生 overlay 挂载错误的专用用例，可设置
+`runner.clean_infer_container: true`，仅按当前实例的容器 ID 同步清理已结束的
+mini-swe-agent 容器，再开始下一个实例。上述开关均不影响其他评测分支。
+全量数据集中的复杂实例可能超过 mini-swe-agent 默认的 2 小时 Docker 容器生命周期，
+导致 `Environment stopped before agent finished`。可为这类 SWE 用例显式设置
+`runner.agent_container_timeout: 4h`，仅延长该用例 Agent 实例容器的寿命；
+它不改变整轮 `swebench.timeout`、Agent 的 `step_limit` 或其他类型评测。
+评测结果若有 `error_instances > 0` 或 `harness_exit_code != 0`，即使
+`baseline: null` 也会判为失败；真正的未解决实例仍按解决率统计，正式回归应设置基线。
 
 只有服务已经在跑时，才用 `external_service` 写法，见 `29_external_aisbench_swebench.yaml`，
 语义和 `26_external_aisbench_perf.yaml` 相同。`mode: infer` / `mode: eval` 也可以拆开做，

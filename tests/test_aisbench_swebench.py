@@ -15,15 +15,22 @@ from xtask.benchmarks.aisbench import swebench_x86_setup as swe_setup
 from xtask.benchmarks.aisbench.swebench import (
     is_aisbench_swebench_task,
     is_swebench_eval_only,
+    swebench_agent_container_timeout,
     validate_aisbench_swebench_task,
 )
 from xtask.core import result_processor, scheduler
 from xtask.core.external_service import requires_external_endpoint
 from xtask.core.task_scheduler import TaskExecutionContext
 from xtask.utils.container_manager import CommandResult
+from xtask.utils.host_executor import SshHostExecutor
 
 
 _SETUP_RUNNER = "xtask.benchmarks.aisbench.swebench_x86_setup.setup_aisbench_swe_runner"
+
+
+def _fake_runner_download(_remote_path, local_path):
+    Path(local_path).mkdir(parents=True)
+    return True
 
 
 def _ok_setup(bin_path="/usr/local/bin/ais_bench"):
@@ -127,6 +134,21 @@ class SwebenchGateTests(unittest.TestCase):
 
 
 class SwebenchScriptTests(unittest.TestCase):
+    def test_agent_container_timeout_is_explicit_and_swe_only(self):
+        task = _swe_task(swebench={"reuse": False, "runner": {
+            "host": "127.0.0.1", "agent_container_timeout": "4h",
+        }})
+        self.assertEqual(swebench_agent_container_timeout(task), "4h")
+        with tempfile.TemporaryDirectory() as tmp:
+            swe_generator.generate_aisbench_swe_script(task, tmp)
+            shell = (Path(tmp) / "run_aisbench_swe.sh").read_text()
+            self.assertIn("XTASK_SWEBENCH_AGENT_CONTAINER_TIMEOUT=4h", shell)
+            self.assertTrue((Path(tmp) / ".xtask_swe_copy_fallback/sitecustomize.py").is_file())
+        for bad in ("0h", "4 hours", "1h; echo bad", True):
+            task["benchmark"]["swebench"]["runner"]["agent_container_timeout"] = bad
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "positive duration"):
+                swebench_agent_container_timeout(task)
+
     def test_generated_config_matches_aisbench_example_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             command = swe_generator.generate_aisbench_swe_script(
@@ -139,6 +161,8 @@ class SwebenchScriptTests(unittest.TestCase):
         self.assertIn("run_aisbench_swe.sh", command)
         self.assertIn("SWEBenchDataset", config)
         self.assertIn("SWEBenchInferTask", config)
+        self.assertNotIn("import os", config)
+        self.assertNotIn("os.path.abspath", config)
         self.assertIn("SWEBenchEvalTask", config)
         self.assertIn('name=\'verified_mini\'', config)
         self.assertIn('model=\'Qwen3-8B\'', config)
@@ -147,8 +171,57 @@ class SwebenchScriptTests(unittest.TestCase):
         self.assertNotIn("gsm8k", config)
         self.assertIn("-m all", script)
         self.assertIn("--reuse", script)
+        self.assertNotIn('--work-dir "$PWD"', script)
         self.assertIn("ais_bench", script)
         self.assertNotIn("/workspace/tools/download_ais_bench.sh", script)
+
+    def test_home_placeholders_expand_for_remote_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = _swe_task(
+                swebench={
+                    "dataset_path": "${HOME}/xtask_swe/runtime/datasets/swebench_verified_mini",
+                    "ais_bench_bin": "${HOME}/xtask_swe/runtime/ais_bench-docker",
+                    "setup": {
+                        "python": "${HOME}/xtask_swe/runtime/python3.11-docker",
+                    },
+                    "runner": {
+                        "host": "10.20.30.50",
+                        "work_dir": "${HOME}/xtask_swe/work/swe_case",
+                    },
+                }
+            )
+            fake = mock.Mock()
+            fake.run.side_effect = [
+                CommandResult(
+                    success=True, exit_code=0, stdout="/home/remote-user",
+                    stderr="", execution_time=0.1,
+                ),
+                CommandResult(
+                    success=True, exit_code=0, stdout="ok", stderr="",
+                    execution_time=1.0,
+                ),
+            ]
+            fake.upload.return_value = True
+            fake.download.side_effect = _fake_runner_download
+            with mock.patch.object(
+                swe_generator, "create_host_executor", return_value=fake
+            ), mock.patch.object(
+                swe_generator, "is_local_host", return_value=False
+            ), mock.patch(
+                _SETUP_RUNNER, return_value=_ok_setup()
+            ) as setup:
+                result = swe_generator.execute_aisbench_swe_benchmark(task, tmp)
+
+            self.assertTrue(result.success)
+            self.assertEqual(setup.call_args.args[3], "/home/remote-user/xtask_swe/work/swe_case")
+            self.assertEqual(
+                setup.call_args.kwargs["install_dir"],
+                "/home/remote-user/xtask_swe/runtime",
+            )
+            config = (Path(tmp) / "aisbench_swe_config.py").read_text(encoding="utf-8")
+            self.assertIn("/home/remote-user/xtask_swe/runtime/datasets/swebench_verified_mini", config)
+            script = (Path(tmp) / "run_aisbench_swe.sh").read_text(encoding="utf-8")
+            self.assertIn("/home/remote-user/xtask_swe/runtime/ais_bench-docker", script)
 
     def test_perf_generate_benchmark_command_does_not_call_swe(self):
         with mock.patch.object(
@@ -179,8 +252,107 @@ class SwebenchScriptTests(unittest.TestCase):
                     tmp,
                 )
 
+    def test_new_swe_run_writes_directly_under_case_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "swe_case"
+            task = _swe_task(swebench={"reuse": False})
+            swe_generator.generate_aisbench_swe_script(task, str(root))
+            fake_bin = Path(tmp) / "fake_ais_bench"
+            _write_exec(
+                fake_bin,
+                """#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+args = sys.argv[1:]
+assert args[args.index('--work-dir') + 1] == str(pathlib.Path.cwd())
+run = pathlib.Path(args[args.index('--work-dir') + 1]) / '20261010_120000'
+(run / 'configs').mkdir(parents=True)
+(run / 'configs' / 'current.py').write_text('work_dir="current"')
+(run / 'results' / 'swebench').mkdir(parents=True)
+(run / 'results' / 'swebench' / 'swebench_verified_mini.json').write_text(
+    json.dumps({'accuracy': 1.0, 'resolved_instances': 3, 'total_instances': 3}))
+(run / 'predictions' / 'swebench').mkdir(parents=True)
+(run / 'predictions' / 'swebench' / 'swebench_verified_mini.json').write_text(
+    json.dumps({'django__django-11790': {'instance_id': 'django__django-11790', 'model_patch': 'diff'}}))
+""",
+            )
+            legacy = root / "outputs/default/20990101_010101/results/swebench"
+            legacy.mkdir(parents=True)
+            (legacy / "swebench_verified_mini.json").write_text(
+                json.dumps({"accuracy": 0.0, "resolved_instances": 0}), encoding="utf-8"
+            )
+            initial = [path.name for path in root.iterdir()]
+            env = os.environ.copy()
+            env.update(AIS_BENCH_BIN=str(fake_bin), SWE_WORK_DIR=str(root))
+            completed = subprocess.run(
+                ["bash", str(root / "run_aisbench_swe.sh")],
+                env=env, capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result, output_dir = aisbench_swe_post_process(
+                task, str(root), initial, require_new_direct_run=True
+            )
+            self.assertEqual(output_dir, str(root / "20261010_120000"))
+            self.assertEqual(result["resolved_rate"], 1.0)
+            self.assertIn("20261010_120000", result["predictions_file"])
+            self.assertFalse((root / "outputs/default/20261010_120000").exists())
+
+    def test_explicit_workdir_and_reuse_keep_previous_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for swebench in (
+                {"reuse": True},
+                {"reuse": False, "extra_args": ["--work-dir=/tmp/custom"]},
+            ):
+                task = _swe_task(swebench=swebench)
+                swe_generator.generate_aisbench_swe_script(task, tmp)
+                script = (Path(tmp) / "run_aisbench_swe.sh").read_text(encoding="utf-8")
+                self.assertNotIn('--work-dir "$PWD"', script)
+
 
 class SwebenchExecuteTests(unittest.TestCase):
+    def test_remote_result_merge_preserves_live_xllm_and_archived_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "swe_case"
+            local_log = root / "xllm_log/master-0/log/node_0.log"
+            local_log.parent.mkdir(parents=True)
+            local_log.write_text("current NPU log", encoding="utf-8")
+            old_trial_log = root / "20261009_120000/xllm_log/master-0/log/node_0.log"
+            old_trial_log.parent.mkdir(parents=True)
+            old_trial_log.write_text("old trial log", encoding="utf-8")
+            legacy = root / "outputs/default/20261009_130000/results/swebench/old.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("old result", encoding="utf-8")
+            config = root / "aisbench_swe_config.py"
+            config.write_text("current config", encoding="utf-8")
+
+            with tempfile.TemporaryDirectory() as staging:
+                remote = Path(staging)
+                remote_log = remote / "xllm_log/master-0/log/node_0.log"
+                remote_log.parent.mkdir(parents=True)
+                remote_log.write_text("stale remote log", encoding="utf-8")
+                stale_trial_log = remote / "20261009_120000/xllm_log/master-0/log/node_0.log"
+                stale_trial_log.parent.mkdir(parents=True)
+                stale_trial_log.write_text("stale archived log", encoding="utf-8")
+                new_result = remote / "20261010_120000/results/swebench/swebench_verified_mini.json"
+                new_result.parent.mkdir(parents=True)
+                new_result.write_text('{"accuracy": 1.0}', encoding="utf-8")
+                new_legacy = remote / "outputs/default/20261009_130000/results/swebench/new.json"
+                new_legacy.parent.mkdir(parents=True)
+                new_legacy.write_text("new result", encoding="utf-8")
+                (remote / "aisbench_swe_config.py").write_text("stale config", encoding="utf-8")
+                swe_generator._merge_swebench_runner_outputs(
+                    remote, root, "run_aisbench_swe.sh"
+                )
+
+            self.assertEqual(local_log.read_text(), "current NPU log")
+            self.assertEqual(old_trial_log.read_text(), "old trial log")
+            self.assertEqual(config.read_text(), "current config")
+            self.assertTrue((root / "20261010_120000/results/swebench/swebench_verified_mini.json").exists())
+            self.assertEqual(legacy.read_text(), "old result")
+            self.assertEqual((legacy.parent / "new.json").read_text(), "new result")
+
     def test_local_execute_uses_host_executor_not_container(self):
         with tempfile.TemporaryDirectory() as tmp:
             swe_generator.generate_aisbench_swe_script(_swe_task(), tmp)
@@ -210,6 +382,9 @@ class SwebenchExecuteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             task = _swe_task(swebench={"runner": {"host": "10.20.30.50", "work_dir": "/tmp/swe"}})
             swe_generator.generate_aisbench_swe_script(task, tmp)
+            live_log = Path(tmp) / "xllm_log/master-0/log/node_0.log"
+            live_log.parent.mkdir(parents=True)
+            live_log.write_text("still being written by NPU", encoding="utf-8")
             fake = mock.Mock()
             fake.run.side_effect = [
                 CommandResult(
@@ -222,18 +397,36 @@ class SwebenchExecuteTests(unittest.TestCase):
                 ),
             ]
             fake.upload.return_value = True
-            fake.download.return_value = True
+
+            def download_remote_results(_remote_path, local_path):
+                result_dir = Path(local_path) / "20261010_120000/results/swebench"
+                result_dir.mkdir(parents=True)
+                (result_dir / "swebench_verified_mini.json").write_text(
+                    '{"accuracy": 1.0}', encoding="utf-8"
+                )
+                return True
+
+            fake.download.side_effect = download_remote_results
             with mock.patch.object(
                 swe_generator, "create_host_executor", return_value=fake
             ), mock.patch.object(
                 swe_generator, "is_local_host", return_value=False
             ), mock.patch(
                 _SETUP_RUNNER, return_value=_ok_setup()
-            ) as setup:
+            ) as setup, mock.patch(
+                "xtask.benchmarks.aisbench.swebench_x86_setup.prepare_default_swebench_dataset",
+                return_value=None,
+            ):
                 result = swe_generator.execute_aisbench_swe_benchmark(task, tmp)
+            live_log_content = live_log.read_text(encoding="utf-8")
+            merged_result_exists = (
+                Path(tmp) / "20261010_120000/results/swebench/swebench_verified_mini.json"
+            ).is_file()
         self.assertTrue(result.success)
         fake.upload.assert_called_once()
         fake.download.assert_called_once()
+        self.assertEqual(live_log_content, "still being written by NPU")
+        self.assertTrue(merged_result_exists)
         self.assertEqual(setup.call_args.args[3], "/tmp/swe")
         self.assertEqual(
             setup.call_args.kwargs["install_dir"],
@@ -242,6 +435,111 @@ class SwebenchExecuteTests(unittest.TestCase):
         command = fake.run.call_args.args[0]
         self.assertIn("SWE_WORK_DIR=/tmp/swe", command)
         self.assertIn("AIS_BENCH_BIN=/usr/local/bin/ais_bench", command)
+
+    def test_remote_ssh_upload_uses_swe_only_exact_directory_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = _swe_task(swebench={"runner": {"host": "10.20.30.50", "work_dir": "/tmp/swe"}})
+            fake = mock.create_autospec(SshHostExecutor, instance=True)
+            fake.run.side_effect = [
+                CommandResult(True, 0, "/home/remote-user", "", 0.1),
+                CommandResult(True, 0, "ok", "", 0.1),
+            ]
+            fake.upload_dir_to_exact_path.return_value = True
+            fake.download.side_effect = _fake_runner_download
+            with mock.patch.object(
+                swe_generator, "create_host_executor", return_value=fake
+            ), mock.patch.object(
+                swe_generator, "is_local_host", return_value=False
+            ), mock.patch(
+                _SETUP_RUNNER, return_value=_ok_setup()
+            ), mock.patch(
+                "xtask.benchmarks.aisbench.swebench_x86_setup.prepare_default_swebench_dataset",
+                return_value=None,
+            ):
+                result = swe_generator.execute_aisbench_swe_benchmark(task, tmp)
+
+            self.assertTrue(result.success)
+            fake.upload_dir_to_exact_path.assert_called_once_with(tmp, "/tmp/swe")
+            fake.upload.assert_not_called()
+
+    def test_default_dataset_is_synced_and_injected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = _swe_task(swebench={"runner": {"host": "10.20.30.50"}})
+            fake = mock.Mock()
+            fake.run.side_effect = [
+                CommandResult(
+                    success=True, exit_code=0, stdout="/home/remote-user",
+                    stderr="", execution_time=0.1,
+                ),
+                CommandResult(
+                    success=True, exit_code=0, stdout="ok", stderr="",
+                    execution_time=2.0,
+                ),
+            ]
+            fake.upload.return_value = True
+            fake.download.side_effect = _fake_runner_download
+            with mock.patch.object(
+                swe_generator, "create_host_executor", return_value=fake
+            ), mock.patch.object(
+                swe_generator, "is_local_host", return_value=False
+            ), mock.patch(
+                _SETUP_RUNNER, return_value=_ok_setup()
+            ), mock.patch(
+                "xtask.benchmarks.aisbench.swebench_x86_setup.prepare_default_swebench_dataset",
+                return_value="/home/remote-user/xtask_swe/runtime/swebench_datasets/verified_mini",
+            ) as prepare:
+                result = swe_generator.execute_aisbench_swe_benchmark(task, tmp)
+
+            self.assertTrue(result.success)
+            prepare.assert_called_once()
+            self.assertEqual(
+                prepare.call_args.args[3],
+                "/home/remote-user/xtask_swe/runtime",
+            )
+            config = (Path(tmp) / "aisbench_swe_config.py").read_text(encoding="utf-8")
+            self.assertIn(
+                "/home/remote-user/xtask_swe/runtime/swebench_datasets/verified_mini",
+                config,
+            )
+
+    def test_explicit_dataset_path_is_not_replaced_by_default_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = _swe_task(
+                swebench={
+                    "dataset_path": "/tmp/custom-swebench-dataset",
+                    "runner": {"host": "10.20.30.50"},
+                }
+            )
+            fake = mock.Mock()
+            fake.run.side_effect = [
+                CommandResult(
+                    success=True, exit_code=0, stdout="/home/remote-user",
+                    stderr="", execution_time=0.1,
+                ),
+                CommandResult(
+                    success=True, exit_code=0, stdout="ok", stderr="",
+                    execution_time=2.0,
+                ),
+            ]
+            fake.upload.return_value = True
+            fake.download.side_effect = _fake_runner_download
+            with mock.patch.object(
+                swe_generator, "create_host_executor", return_value=fake
+            ), mock.patch.object(
+                swe_generator, "is_local_host", return_value=False
+            ), mock.patch(
+                _SETUP_RUNNER, return_value=_ok_setup()
+            ), mock.patch(
+                "xtask.benchmarks.aisbench.swebench_x86_setup.prepare_default_swebench_dataset",
+                return_value="/should/not/be/used",
+            ) as prepare:
+                result = swe_generator.execute_aisbench_swe_benchmark(task, tmp)
+
+            self.assertTrue(result.success)
+            prepare.assert_not_called()
+            config = (Path(tmp) / "aisbench_swe_config.py").read_text(encoding="utf-8")
+            self.assertIn("/tmp/custom-swebench-dataset", config)
+            self.assertNotIn("/should/not/be/used", config)
 
     def test_remote_execute_defaults_to_login_home(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -259,26 +557,33 @@ class SwebenchExecuteTests(unittest.TestCase):
                 ),
             ]
             fake.upload.return_value = True
-            fake.download.return_value = True
-            expected_work_dir = "/home/remote-user/xtask_swe/swe_case"
+            fake.download.side_effect = _fake_runner_download
+            expected_prefix = "/home/remote-user/xtask_swe/swe_case_"
             with mock.patch.object(
                 swe_generator, "create_host_executor", return_value=fake
             ), mock.patch.object(
                 swe_generator, "is_local_host", return_value=False
             ), mock.patch(
                 _SETUP_RUNNER, return_value=_ok_setup()
-            ) as setup:
+            ) as setup, mock.patch(
+                "xtask.benchmarks.aisbench.swebench_x86_setup.prepare_default_swebench_dataset",
+                return_value=None,
+            ):
                 result = swe_generator.execute_aisbench_swe_benchmark(task, tmp)
         self.assertTrue(result.success)
-        self.assertEqual(setup.call_args.args[3], expected_work_dir)
+        self.assertTrue(setup.call_args.args[3].startswith(expected_prefix))
         self.assertEqual(
             setup.call_args.kwargs["install_dir"],
             "/home/remote-user/xtask_swe/runtime",
         )
-        fake.upload.assert_called_once_with(tmp, expected_work_dir)
-        fake.download.assert_called_once_with(expected_work_dir, tmp)
+        work_dir = setup.call_args.args[3]
+        fake.upload.assert_called_once_with(tmp, work_dir)
+        fake.download.assert_called_once()
+        self.assertEqual(fake.download.call_args.args[0], work_dir)
+        self.assertNotEqual(fake.download.call_args.args[1], tmp)
+        self.assertFalse(Path(fake.download.call_args.args[1]).exists())
         command = fake.run.call_args.args[0]
-        self.assertIn(f"SWE_WORK_DIR={expected_work_dir}", command)
+        self.assertIn(f"SWE_WORK_DIR={work_dir}", command)
 
     def test_execute_stops_when_x86_setup_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -394,7 +699,7 @@ class SwebenchX86SetupTests(unittest.TestCase):
             task = _swe_task(swebench={"setup": {"source_root": str(root)}})
             self.assertEqual(swe_setup.resolve_aisbench_source(task), ais)
 
-    def test_setup_script_pips_aisbench_and_clones_swe_deps(self):
+    def test_setup_script_pips_aisbench_clones_mini_and_pins_swe(self):
         script = swe_setup.setup_script_path()
         self.assertTrue(script.is_file())
         with tempfile.TemporaryDirectory() as tmp:
@@ -427,6 +732,9 @@ if echo "$*" | grep -q shutil.which; then
   echo /tmp/fake-ais_bench
   exit 0
 fi
+if echo "$*" | grep -q 'import numpy, pyarrow, datasets'; then
+  exit 0
+fi
 if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
   exit 0
 fi
@@ -452,8 +760,13 @@ exit 1
             recorded = log.read_text(encoding="utf-8")
             self.assertIn("pip install -e", recorded)
             self.assertIn("clone", recorded)
+            self.assertIn("swebench==4.1.0", recorded)
+            self.assertIn("datasets==3.6.0", recorded)
+            self.assertIn("numpy==1.26.4", recorded)
+            self.assertIn("pyarrow==19.0.1", recorded)
+            self.assertIn("import numpy, pyarrow, datasets", recorded)
             self.assertTrue((install / "mini-swe-agent" / "src").is_dir())
-            self.assertTrue((install / "SWE-bench" / "src").is_dir())
+            self.assertFalse((install / "SWE-bench").exists())
 
     def test_setup_script_requires_working_docker(self):
         script = swe_setup.setup_script_path()
@@ -479,7 +792,180 @@ exit 1
         self.assertIn("docker ps failed", completed.stderr)
 
 
+class SwebenchDefaultDatasetTests(unittest.TestCase):
+    def test_default_dataset_archive_syncs_to_x86_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / "datasets" / "swebench" / "verified_mini"
+            (dataset / "data").mkdir(parents=True)
+            (dataset / "data" / "test-00000-of-00001.parquet").write_text(
+                "parquet", encoding="utf-8"
+            )
+            fake = mock.Mock()
+            fake.sync_path.return_value = True
+            with mock.patch.object(
+                swe_setup,
+                "get_dependence_package_path",
+                return_value=str(root),
+            ), mock.patch.object(
+                swe_setup, "is_local_host", return_value=False
+            ):
+                result = swe_setup.prepare_default_swebench_dataset(
+                    _swe_task(), fake, "10.20.30.50", "/runtime"
+                )
+
+            self.assertEqual(result, "/runtime/swebench_datasets/verified_mini")
+            fake.sync_path.assert_called_once_with(
+                str(dataset),
+                "/runtime/swebench_datasets/verified_mini",
+                timeout=swe_setup.DEFAULT_SETUP_TIMEOUT_S,
+            )
+
+    def test_missing_default_dataset_falls_back_to_online(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = mock.Mock()
+            with mock.patch.object(
+                swe_setup,
+                "get_dependence_package_path",
+                return_value=tmp,
+            ):
+                result = swe_setup.prepare_default_swebench_dataset(
+                    _swe_task(), fake, "10.20.30.50", "/runtime"
+                )
+            self.assertIsNone(result)
+            fake.sync_path.assert_not_called()
+
+    def test_local_runner_uses_default_archive_without_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / "datasets" / "swebench" / "verified_mini"
+            (dataset / "data").mkdir(parents=True)
+            (dataset / "data" / "test-00000-of-00001.parquet").write_text(
+                "parquet", encoding="utf-8"
+            )
+            fake = mock.Mock()
+            with mock.patch.object(
+                swe_setup,
+                "get_dependence_package_path",
+                return_value=str(root),
+            ), mock.patch.object(
+                swe_setup, "is_local_host", return_value=True
+            ):
+                result = swe_setup.prepare_default_swebench_dataset(
+                    _swe_task(), fake, "127.0.0.1", "/runtime"
+                )
+            self.assertEqual(result, str(dataset))
+            fake.sync_path.assert_not_called()
+
+
 class SwebenchPostprocessTests(unittest.TestCase):
+    @staticmethod
+    def _write_eval(directory: Path, accuracy: float) -> None:
+        target = directory / "results/swebench/swebench_verified_mini.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps({"accuracy": accuracy, "total_instances": 3,
+                        "resolved_instances": round(accuracy * 3)}),
+            encoding="utf-8",
+        )
+
+    def test_new_direct_run_is_selected_over_newer_legacy_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root / "outputs/default/20990101_010101"
+            self._write_eval(legacy, 0.0)
+            earlier_direct = root / "20261009_120000"
+            (earlier_direct / "configs").mkdir(parents=True)
+            self._write_eval(earlier_direct, 0.0)
+            previous = [entry.name for entry in root.iterdir()]
+            current = root / "20261010_120000"
+            (current / "configs").mkdir(parents=True)
+            self._write_eval(current, 1.0)
+            result, output_dir = aisbench_swe_post_process(
+                _swe_task(swebench={"reuse": False}), tmp, previous,
+                require_new_direct_run=True,
+            )
+            self.assertEqual(output_dir, str(current))
+            self.assertEqual(result["resolved_rate"], 1.0)
+            self.assertEqual(result["resolved_instances"], 3)
+
+    def test_missing_current_run_never_passes_using_legacy_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_eval(root / "outputs/default/20261009_120000", 1.0)
+            old_date = root / "20261009_123000"
+            self._write_eval(old_date, 1.0)
+            (old_date / "configs").mkdir()
+            previous = [entry.name for entry in root.iterdir()]
+            with self.assertRaisesRegex(FileNotFoundError, "refusing to reuse historical"):
+                aisbench_swe_post_process(
+                    _swe_task(swebench={"reuse": False}), tmp, previous,
+                    require_new_direct_run=True,
+                )
+
+    def test_infer_only_new_run_does_not_pick_old_eval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_eval(root / "outputs/default/20990101_010101", 1.0)
+            previous = [entry.name for entry in root.iterdir()]
+            current = root / "20261010_120000"
+            (current / "configs").mkdir(parents=True)
+            pred_dir = current / "predictions/swebench"
+            pred_dir.mkdir(parents=True)
+            (pred_dir / "swebench_verified_mini.json").write_text(
+                json.dumps({"django__django-11790": {
+                    "instance_id": "django__django-11790", "model_patch": "diff"
+                }}), encoding="utf-8"
+            )
+            result, output_dir = aisbench_swe_post_process(
+                _swe_task(swebench={"mode": "infer", "reuse": False}), tmp, previous,
+                require_new_direct_run=True,
+            )
+            self.assertEqual(output_dir, str(current))
+            self.assertIsNone(result["result_file"])
+            self.assertEqual(result["submitted_instances"], 1)
+
+    def test_legacy_reuse_result_still_loads_from_outputs_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = Path(tmp) / "outputs/default/20261009_120000"
+            self._write_eval(old, 1.0)
+            result, output_dir = aisbench_swe_post_process(
+                _swe_task(swebench={"reuse": True}), tmp, [],
+            )
+            self.assertEqual(output_dir, str(old))
+            self.assertEqual(result["resolved_rate"], 1.0)
+
+    def test_harness_exit_without_metrics_is_reported_as_a_harness_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "outputs/default/20261009_120000"
+            self._write_eval(old, 1.0)
+            previous = [entry.name for entry in root.iterdir()]
+            current = root / "20261010_120000"
+            (current / "configs").mkdir(parents=True)
+            result_file = current / "results/swebench/swebench_verified_mini.json"
+            result_file.parent.mkdir(parents=True)
+            result_file.write_text(
+                json.dumps({"harness_exit_code": 1, "run_id": "swebench"}),
+                encoding="utf-8",
+            )
+            task = _swe_task(swebench={"reuse": False})
+            result, output_dir = aisbench_swe_post_process(
+                task, tmp, previous, require_new_direct_run=True
+            )
+            self.assertEqual(output_dir, str(current))
+            self.assertEqual(result["result_file"], str(result_file))
+            self.assertEqual(result["harness_exit_code"], 1)
+            self.assertIsNone(result["resolved_rate"])
+            self.assertFalse(result_processor.verify_result(
+                {"benchmark_success": True, "benchmark_swebench_result": result}, task
+            ))
+            category, reason = result_processor._classify_failure(
+                {"benchmark_success": True, "benchmark_swebench_result": result}, task
+            )
+            self.assertEqual(category, result_processor.FAILURE_BENCHMARK)
+            self.assertIn("harness_exit_code=1", reason)
+
     def test_eval_json_is_normalized_to_resolved_rate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -550,6 +1036,34 @@ class SwebenchVerifyTests(unittest.TestCase):
         self.assertTrue(result_processor.verify_result(result, config))
         result["benchmark_swebench_result"]["resolved_rate"] = 0.20
         self.assertFalse(result_processor.verify_result(result, config))
+
+    def test_harness_failure_classification_requires_explicit_swe_route(self):
+        task = _swe_task()
+        task["benchmark"]["benchmark_type"] = "evalscope"
+        result = {
+            "success": False,
+            "benchmark_success": True,
+            "message": "unrelated failure after benchmark",
+            "benchmark_swebench_result": {
+                "resolved_rate": 0.5,
+                "harness_exit_code": 1,
+            },
+        }
+        category, reason = result_processor._classify_failure(result, task)
+        self.assertEqual(category, result_processor.FAILURE_OTHER)
+        self.assertNotIn("harness_exit_code", reason)
+
+    def test_perf_failure_classification_ignores_leftover_swe_report(self):
+        task = _perf_task()
+        result = {
+            "success": False,
+            "benchmark_success": True,
+            "message": "non-SWE postprocessing failed",
+            "benchmark_swebench_result": {"harness_exit_code": 1},
+        }
+        category, reason = result_processor._classify_failure(result, task)
+        self.assertNotEqual(category, result_processor.FAILURE_BENCHMARK)
+        self.assertNotIn("harness_exit_code", reason)
 
     def test_perf_task_ignores_swebench_result_and_block(self):
         config = _perf_task()
@@ -635,15 +1149,45 @@ class SwebenchSchedulerIsolationTests(unittest.TestCase):
             ) as execute, mock.patch(
                 "xtask.benchmarks.aisbench.aisbench_swe_postprocess.aisbench_swe_post_process",
                 return_value=(swe_result, tmp),
-            ), mock.patch.object(
+            ) as post_process, mock.patch.object(
                 scheduler, "_execute_benchmark_with_npu_guard"
             ) as npu_guard:
                 scheduler._run_benchmark_and_process(context)
         execute.assert_called_once()
+        self.assertFalse(post_process.call_args.kwargs["require_new_direct_run"])
         npu_guard.assert_not_called()
         self.assertTrue(context.result["success"])
         self.assertEqual(context.result["benchmark_swebench_result"]["resolved_rate"], 0.4)
         self.assertNotIn("container_config", context.state)
+
+    def test_new_swe_run_requires_current_output_without_touching_perf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = _swe_task(swebench={"reuse": False})
+            context = TaskExecutionContext("task.yaml", tmp, result={})
+            runtimes = [mock.Mock()]
+            context.state.update(
+                service_healthy=True,
+                task_config=task,
+                engine_config={},
+                service_runtimes=runtimes,
+            )
+            fake_result = CommandResult(True, 0, "ok", "", 1.0)
+            with mock.patch(
+                "xtask.benchmarks.aisbench.generate_aisbench_swe_script.execute_aisbench_swe_benchmark",
+                return_value=fake_result,
+            ), mock.patch(
+                "xtask.benchmarks.aisbench.aisbench_swe_postprocess.aisbench_swe_post_process",
+                return_value=({"resolved_rate": 1.0}, tmp),
+            ) as post_process, mock.patch.object(
+                scheduler, "_execute_benchmark_with_npu_guard"
+            ) as npu_guard, mock.patch.object(
+                scheduler, "_archive_service_group_logs"
+            ) as archive_logs:
+                scheduler._run_benchmark_and_process(context)
+            self.assertTrue(post_process.call_args.kwargs["require_new_direct_run"])
+            npu_guard.assert_not_called()
+            archive_logs.assert_called_once_with(runtimes, tmp, tmp)
+            self.assertTrue(context.result["success"])
 
     def test_existing_perf_run_still_requires_container_state(self):
         context = TaskExecutionContext("task.yaml", "/tmp/out", result={})

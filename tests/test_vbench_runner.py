@@ -62,8 +62,13 @@ class VBenchRunnerTests(unittest.TestCase):
             request.assert_called_once()
             payload = request.call_args.args[1]
             self.assertEqual(payload["input"]["prompt"], "A test scene")
+            media_sources = payload["input"]["media_sources"]
+            self.assertEqual(len(media_sources), 1)
+            self.assertEqual(media_sources[0]["type"], "base64")
+            self.assertEqual(media_sources[0]["name"], "image")
+            self.assertEqual(media_sources[0]["modality"], "image")
             self.assertEqual(
-                base64.b64decode(payload["input"]["image"]), b"png-bytes"
+                base64.b64decode(media_sources[0]["base64"]), b"png-bytes"
             )
             self.assertEqual(payload["parameters"]["seed"], 42)
             self.assertEqual((root / "videos" / "00000.mp4").read_bytes(), b"fake-mp4")

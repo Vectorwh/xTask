@@ -1,0 +1,74 @@
+case_name: 31_single_aisbench_swebench_dsv4
+engine_type: xllm
+model_path: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
+served_model_name: DeepSeek-V4-Flash-0731-w8a8
+metrics: swebench
+dataset_name: swebench
+dataset_path: ''
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+hccl_if_port: 43432
+progress_conn_port: 8773
+
+# DeepSeek V4 Flash + AISBench SWE-bench:
+# NPU 侧单机 16 卡启动 DeepSeek V4 Flash，x86 侧运行 mini-swe-agent 与 SWE-bench harness。
+benchmark:
+  benchmark_type: aisbench
+  swebench:
+    case_type: swebench
+    mode: all
+    dataset: verified_mini
+  #  dataset_path: ${HOME}/xtask_swe/runtime/datasets/swebench_verified_mini
+    filter_spec: django__django-11790
+    split: test
+    step_limit: 200
+    batch_size: 1
+    reuse: false
+    timeout: 86400
+    generation_kwargs:
+      temperature: 0.0
+    baseline: null
+    threshold: 0.10
+    runner:
+      host: 11.87.48.253
+      # Only this case: x86 Docker 20.10 archive mount ENOSPC fallback.
+      docker_copy_fallback: true
+      # Per-case driver, created and removed by xTask; no shared container name.
+      runtime_container:
+        image: xllm:a2-x86-cann9-main-0920  # Must exist on the x86 runner.
+        python: /usr/local/python3.11.15/bin/python3
+        ais_bench_bin: /usr/local/python3.11.15/bin/ais_bench
+
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+    local_port: 18004
+    serving_extensiable_param:
+      max_memory_utilization: 0.8
+      max_seqs_per_batch: 16
+      max_tokens_per_batch: 16384
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      max_tokens_per_chunk_for_prefill: 4096
+      enable_schedule_overlap: true
+      enable_graph: true
+      ep_size: 16
+      dp_size: 4
+      speculative_algorithm: DSpark
+      draft_model: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
+      num_speculative_tokens: 5
+      enable_flashcomm1: true
+      flashcomm1_min_prefill_tokens: 1000
+      tool_call_parser: deepseekv4
+      reasoning_parser: deepseek-v4

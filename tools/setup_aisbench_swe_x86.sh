@@ -4,10 +4,12 @@
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-INSTALL_ROOT="${INSTALL_ROOT:-/export/home/xtask_swe/runtime}"
+WORK_ROOT="${WORK_ROOT:-${HOME}/xtask_swe}"
+INSTALL_ROOT="${INSTALL_ROOT:-${WORK_ROOT}/runtime}"
 AISBENCH_DIR="${AISBENCH_DIR:-}"
 MINI_SWE_DIR="${MINI_SWE_DIR:-}"
 SWE_HARNESS_DIR="${SWE_HARNESS_DIR:-}"
+SWE_HARNESS_VERSION="${SWE_HARNESS_VERSION:-4.1.0}"
 MINI_SWE_GIT_URL="${MINI_SWE_GIT_URL:-https://github.com/AISBench/mini-swe-agent.git}"
 SWE_HARNESS_GIT_URL="${SWE_HARNESS_GIT_URL:-https://github.com/SWE-bench/SWE-bench.git}"
 CLONE_IF_MISSING="${CLONE_IF_MISSING:-1}"
@@ -51,7 +53,7 @@ clone_if_needed() {
     mkdir -p "$(dirname "$dest")"
     if ! git clone --depth 1 "$url" "$dest"; then
         echo "Error: git clone failed for $name ($url)." >&2
-        echo "Put a local checkout on the control node and set benchmark.swebench.setup source fields." >&2
+        echo "Put a local checkout on the control node and set benchmark.swebench.runner source fields." >&2
         exit 1
     fi
 }
@@ -94,16 +96,36 @@ else
     echo "mini-swe-agent already importable; skip pip"
 fi
 
-if [ -z "$SWE_HARNESS_DIR" ]; then
-    SWE_HARNESS_DIR="$INSTALL_ROOT/SWE-bench"
-fi
-if ! python_importable "import swebench"; then
-    if ! has_directory_content "$SWE_HARNESS_DIR"; then
-        clone_if_needed "$SWE_HARNESS_DIR" "$SWE_HARNESS_GIT_URL" "SWE-bench harness"
-    fi
+if [ -n "$SWE_HARNESS_DIR" ]; then
     install_editable "$SWE_HARNESS_DIR" "SWE-bench harness"
 else
-    echo "SWE-bench harness already importable; skip pip"
+    # AISBench's SWE-bench evaluator imports clean_images/list_images/should_remove.
+    # These helpers exist in swebench 4.1.0 but were removed in 5.x.
+    # Keep the existing Transformers installation importable. Without its
+    # version bound, swebench's transitive dependencies may upgrade hub to a
+    # version incompatible with the runner's Transformers/LiteLLM.
+    HUB_REQUIREMENT="$("$PYTHON_BIN" -c 'import importlib.metadata as m; print(next((r for r in m.requires("transformers") or [] if r.startswith("huggingface-hub")), "huggingface-hub<2"))' 2>/dev/null || echo 'huggingface-hub<2')"
+    echo "Installing pinned SWE-bench harness ${SWE_HARNESS_VERSION} (${HUB_REQUIREMENT})"
+    if ! "$PYTHON_BIN" -m pip install --force-reinstall \
+        "swebench==${SWE_HARNESS_VERSION}" \
+        "datasets==3.6.0" \
+        "numpy==1.26.4" \
+        "pyarrow==19.0.1" \
+        "pandas==2.3.3" \
+        "attrs==24.2.0" \
+        "$HUB_REQUIREMENT" \
+        "filelock>=3.16.1,<4"; then
+        echo "Error: pip install failed for pinned SWE-bench harness ${SWE_HARNESS_VERSION}." >&2
+        exit 1
+    fi
+fi
+
+# Base images may contain a newer pyarrow compiled against NumPy 2.x. Pip
+# metadata does not always prevent pairing it with our pinned NumPy 1.26.4;
+# fail during setup instead of failing only after AISBench starts inference.
+if ! "$PYTHON_BIN" -c 'import numpy, pyarrow, datasets; from ais_bench.benchmark.tasks import SWEBenchInferTask, SWEBenchEvalTask'; then
+    echo "Error: SWE-bench Python dependencies failed the import smoke test." >&2
+    exit 1
 fi
 
 AIS_BENCH_BIN="$("$PYTHON_BIN" -c "import shutil; print(shutil.which('ais_bench') or '')" || true)"

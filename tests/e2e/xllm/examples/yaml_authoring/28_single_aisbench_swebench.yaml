@@ -20,7 +20,8 @@ benchmark:
     case_type: swebench
     mode: all                 # infer | eval | all；默认 all=推理+打分一次做完
     dataset: verified_mini    # verified_mini / lite / verified / full / multilingual
-    dataset_path: ''          # 空则 AISBench 从 Hugging Face 拉取；可改为本地 parquet
+    dataset_path: ${HOME}/xtask_swe/runtime/datasets/swebench_verified_mini
+    filter_spec: django__django-11790
     split: test
     step_limit: 200
     batch_size: 1
@@ -33,9 +34,11 @@ benchmark:
     runner:
       host: 11.87.48.253      # 必填：x86 机器。Docker 需已装；AISBench/SWE 由 xTask 自动安装
       # user: ext.jiangenbao1  # 省略时用 ~/.xtask.env 里的 XTASK_SSH_USER/PASS
-    ais_bench_bin: /export/home/ext.jiangenbao1/xtask_swe/runtime/ais_bench-docker
-    setup:
-      python: /export/home/ext.jiangenbao1/xtask_swe/runtime/python3.11-docker
+      # Per-case driver, created and removed by xTask; no shared container name.
+      runtime_container:
+        image: xllm:a2-x86-cann9-main-0920  # Must exist on the x86 runner.
+        python: /usr/local/python3.11.15/bin/python3
+        ais_bench_bin: /usr/local/python3.11.15/bin/ais_bench
 
 deployment:
   master_host: 11.87.191.75
@@ -59,3 +62,4 @@ deployment:
       block_size: 128
       enable_graph: true
       enable_graph_mode_decode_no_padding: true
+      tool_call_parser: auto
