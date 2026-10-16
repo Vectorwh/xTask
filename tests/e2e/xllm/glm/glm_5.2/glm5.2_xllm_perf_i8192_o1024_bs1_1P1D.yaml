@@ -71,8 +71,8 @@ deployment:
       ep_size: 16
       draft_model: /export/home/models/GLM-5.2-w8a8-mtponly
       num_speculative_tokens: 3
-      enable_graph: true
-      max_tokens_per_batch: 1024
+      enable_graph: false
+      max_tokens_per_batch: 8192
       expert_parallel_degree: 2
       tool-call-parser: glm47
       reasoning-parser: glm47
