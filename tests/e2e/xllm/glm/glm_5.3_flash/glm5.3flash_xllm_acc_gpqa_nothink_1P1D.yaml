@@ -89,7 +89,7 @@ deployment:
     group_master_host: 11.87.191.121
     serving_extensiable_param:
       max_memory_utilization: 0.8
-      enable_chunked_prefill: false
+      enable_chunked_prefill: true
       enable_schedule_overlap: true
       enable_prefix_cache: false
       backend: llm
