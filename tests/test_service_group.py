@@ -1653,6 +1653,140 @@ class ServiceGroupTests(unittest.TestCase):
         )
         self.assertTrue(merged["serving_extensiable_param"]["enable_shm"])
 
+    def test_merge_instance_startup_environment_replaces_task_level_list(self):
+        task = {"startup_environment": ["export TOP=1"], "port": 8800}
+        inherited = {
+            "name": "worker-0",
+            "host": "10.0.0.2",
+            "device_ids": [0],
+            "local_port": 8800,
+        }
+        replaced = {
+            **inherited,
+            "startup_environment": ["export NODE=1"],
+        }
+        cleared = {**inherited, "startup_environment": []}
+
+        self.assertEqual(
+            merge_instance_task_config(task, inherited, "10.0.0.1", 1)[
+                "startup_environment"
+            ],
+            ["export TOP=1"],
+        )
+        self.assertEqual(
+            merge_instance_task_config(task, replaced, "10.0.0.1", 1)[
+                "startup_environment"
+            ],
+            ["export NODE=1"],
+        )
+        self.assertEqual(
+            merge_instance_task_config(task, cleared, "10.0.0.1", 1)[
+                "startup_environment"
+            ],
+            [],
+        )
+        self.assertEqual(task["startup_environment"], ["export TOP=1"])
+
+    def test_startup_environment_follows_each_node_in_pd_and_service_groups(self):
+        pd_task = {
+            "case_name": "startup-env-pd",
+            "startup_environment": ["export TOP=1"],
+            "deployment": {
+                "mode": "pd_disaggregated",
+                "master_host": "10.0.0.1",
+                "pd_control": {"host": "10.0.0.1", "http_server_port": 38888},
+                "benchmark": {"runner_instance": "prefill-0-node-0"},
+                "pd_instances": [
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "startup_environment": ["export GROUP=1"],
+                        "nodes": [
+                            {"host": "10.0.0.1", "device_ids": [0, 1]},
+                            {
+                                "host": "10.0.0.2",
+                                "device_ids": [0, 1],
+                                "startup_environment": ["export NODE=1"],
+                            },
+                        ],
+                    },
+                    {
+                        "name": "decode-0",
+                        "role": "decode",
+                        "nodes": [
+                            {"host": "10.0.0.4", "device_ids": [0, 1]},
+                            {
+                                "host": "10.0.0.5",
+                                "device_ids": [0, 1],
+                                "startup_environment": [],
+                            },
+                        ],
+                    },
+                ],
+            },
+        }
+        service_task = {
+            "case_name": "startup-env-service",
+            "deployment": {
+                "mode": "service_routed",
+                "master_host": "10.0.0.1",
+                "service_control": {
+                    "host": "10.0.0.1",
+                    "http_server_port": 13888,
+                },
+                "service_instances": [
+                    {
+                        "name": "default-0",
+                        "progress_conn_port": 9590,
+                        "startup_environment": ["export GROUP=1"],
+                        "nodes": [
+                            {
+                                "name": "default-0-node-0",
+                                "host": "10.0.0.1",
+                                "device_ids": [0, 1],
+                                "local_port": 48000,
+                                "hccl_if_port": 43439,
+                            },
+                            {
+                                "name": "default-0-node-1",
+                                "host": "10.0.0.1",
+                                "device_ids": [2, 3],
+                                "local_port": 48010,
+                                "hccl_if_port": 43449,
+                                "startup_environment": ["export NODE=1"],
+                            },
+                        ],
+                    }
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            pd_plans = {
+                plan.instance_name: plan.instance_config.get("startup_environment")
+                for plan in build_service_plans(pd_task, tmp)
+            }
+            service_plans = {
+                plan.instance_name: plan.instance_config.get("startup_environment")
+                for plan in build_service_plans(service_task, tmp)
+            }
+
+        self.assertEqual(
+            pd_plans,
+            {
+                "prefill-0-node-0": ["export GROUP=1"],
+                "prefill-0-node-1": ["export NODE=1"],
+                "decode-0-node-0": ["export TOP=1"],
+                "decode-0-node-1": [],
+            },
+        )
+        self.assertEqual(
+            service_plans,
+            {
+                "default-0-node-0": ["export GROUP=1"],
+                "default-0-node-1": ["export NODE=1"],
+            },
+        )
+
     def test_build_service_plans_without_top_level_duplicates(self):
         task = {
             "case_name": "demo",
@@ -2066,6 +2200,106 @@ class GenerateXllmMultiHostTests(unittest.TestCase):
         self.assertIn("--enable_service_routing=true", script)
         self.assertIn("--etcd_addr=10.0.0.1:13389", script)
         self.assertNotIn("--enable_disagg_pd=true", script)
+
+    def _generate_script(self, config, allow_large_world=False):
+        from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_script
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch(
+                "xtask.utils.container_manager.get_xtask_config_data",
+                return_value={"DOCKER_CONFIG": {"volumes": {}}},
+            ):
+                name, _ = generate_xllm_script(
+                    config,
+                    tmp,
+                    "start_xllm_serv.sh",
+                    allow_large_world=allow_large_world,
+                )
+            with open(os.path.join(tmp, name), encoding="utf-8") as fh:
+                return fh.read()
+
+    def test_omitted_startup_environment_inserts_nothing(self):
+        config = {
+            "host_addr": "11.87.191.75",
+            "device_ids": [0, 1],
+            "world_size": 2,
+            "model_path": "/export/home/models/Qwen3-8B",
+        }
+        absent = self._generate_script(config)
+        empty = self._generate_script({**config, "startup_environment": []})
+
+        single_config = {**config, "device_ids": [3], "world_size": 1}
+        single_absent = self._generate_script(single_config)
+        single_empty = self._generate_script({**single_config, "startup_environment": []})
+
+        self.assertEqual(absent, empty)
+        self.assertEqual(single_absent, single_empty)
+        for script in (absent, single_absent):
+            self.assertNotIn("{STARTUP_ENVIRONMENT}", script)
+            self.assertEqual(script.count("export HCCL_CONNECT_TIMEOUT=7200"), 1)
+        self.assertIn("fi\n\n# 启动服务节点", absent)
+        self.assertIn('chown "$USERID" "$LOG_DIR"\nIFS=', absent)
+        self.assertIn('LOG_DIR="log"\nLOG_FILE="$LOG_DIR/node_0.log"', single_absent)
+
+    def test_startup_environment_is_inserted_after_template_defaults(self):
+        config = {
+            "host_addr": "11.87.191.75",
+            "device_ids": [3],
+            "world_size": 1,
+            "model_path": "/export/home/models/Qwen3-8B",
+            "startup_environment": [
+                "export HCCL_CONNECT_TIMEOUT=1800",
+                "export ASCEND_SLOG_PRINT_TO_STDOUT=1",
+                "echo keep-{MODEL_PATH}",
+            ],
+        }
+        single = self._generate_script(config)
+        multi = self._generate_script(
+            {**config, "device_ids": [0, 1], "world_size": 2}
+        )
+
+        for script in (single, multi):
+            self.assertNotIn("{STARTUP_ENVIRONMENT}", script)
+            self.assertLess(
+                script.index("export HCCL_CONNECT_TIMEOUT=7200"),
+                script.index("export HCCL_CONNECT_TIMEOUT=1800"),
+            )
+            self.assertLess(
+                script.index("rm -rf core.*"),
+                script.index("export ASCEND_SLOG_PRINT_TO_STDOUT=1"),
+            )
+            self.assertIn("echo keep-{MODEL_PATH}", script)
+            self.assertNotIn("echo keep-/export/home/models/Qwen3-8B", script)
+        self.assertLess(
+            single.index("export ASCEND_RT_VISIBLE_DEVICES=3"),
+            single.index("export HCCL_CONNECT_TIMEOUT=1800"),
+        )
+        self.assertLess(
+            single.index("export HCCL_CONNECT_TIMEOUT=1800"),
+            single.index('LOG_FILE="$LOG_DIR/node_0.log"'),
+        )
+        self.assertLess(
+            multi.index("export HCCL_CONNECT_TIMEOUT=1800"),
+            multi.index("IFS=',' read -r -a DEVICE_IDS"),
+        )
+        self.assertLess(
+            multi.index("export HCCL_CONNECT_TIMEOUT=1800"),
+            multi.index("for (( i=0; i<$LOCAL_NNODES; i++ ))"),
+        )
+
+    def test_startup_environment_rejects_non_command_entries(self):
+        from xtask.serv_fmk.xllm_serv.generate_xllm_serv import generate_xllm_script
+
+        config = {
+            "host_addr": "11.87.191.75",
+            "device_ids": [0],
+            "world_size": 1,
+            "model_path": "/models/Qwen3-8B",
+            "startup_environment": [{"export": "FOO=1"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "shell command string"):
+                generate_xllm_script(config, tmp, "start_xllm_serv.sh")
 
 
 if __name__ == "__main__":
