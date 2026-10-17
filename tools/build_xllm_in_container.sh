@@ -7,9 +7,9 @@ set -euo pipefail
 # 代理设置（内网编译需要）
 export http_proxy="http://bamboo-proxy.jd.com:80"
 export https_proxy="http://bamboo-proxy.jd.com:80"
-export no_proxy=".jd.com,.jd.local,.local"
+#export no_proxy=".jd.com,.jd.local,.local"
+export no_proxy=".jd.com,.jd.local,.local,repo.openeuler.org,mirrors.openeuler.org,dl-cdn.openeuler.openatom.cn"
 export NO_PROXY="${no_proxy}"
-#export no_proxy=".jd.com,.jd.local,.local,repo.openeuler.org,mirrors.openeuler.org,dl-cdn.openeuler.openatom.cn"
 
 # 源码包与 binary cache 共用 prepare_xllm.sh 挂载的 /root/.cache/vcpkg
 # （宿主机 /export/home/npu_vcpkg_cache_abi_1）。vcpkg 读 VCPKG_DOWNLOADS，
