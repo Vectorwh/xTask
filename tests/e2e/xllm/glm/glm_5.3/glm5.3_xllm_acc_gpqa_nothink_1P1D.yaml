@@ -1,0 +1,106 @@
+case_name: glm5.3_xllm_acc_gpqa_nothink_1P1D
+engine_type: xllm
+model_path: /mnt/cfs/9n-das-admin/llm_models/GLM-5.3-w8a8
+served_model_name: GLM-5.3-w8a8
+metrics: acc
+dataset_name: gpqa
+dataset_path: ''
+dataset_format: csv
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: vllm_api_general_chat
+    dataset_conf: gpqa_gen_0_shot_cot_chat_prompt
+    num_prompts: 198
+    batch_size: 24
+    output_len: 12288
+    request_rate: 0
+    baseline: 72
+    threshold: 0.05
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: false
+      chat_template_kwargs:
+        enable_thinking: false
+        reasoning_effort: low
+
+deployment:
+  mode: pd_disaggregated
+  sync_workspace: true
+  resource_sync:
+    enabled: true
+    source: /export/home/models/xllm_test_060
+    target: /export/home/models/xllm_test_060
+    max_workers: 4
+    timeout: 3600
+  master_host: 11.87.191.75
+  pd_control:
+    host: 11.87.191.75
+    etcd_client_port: 3389
+    etcd_peer_port: 3390
+    http_server_port: 38888
+    rpc_server_port: 38889
+    startup_attempts: 2
+    startup_wait_seconds: 3
+  benchmark:
+    runner_instance: prefill-0-node-0
+    health_path: /health
+  pd_instances:
+  - name: prefill-0
+    role: prefill
+    group_master_host: 11.87.191.75
+    serving_extensiable_param: &prefill_params
+      max_memory_utilization: 0.87
+      max_seqs_per_batch: 8
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: true
+      enable_shm: true
+      backend: llm
+      max_tokens_per_chunk_for_prefill: 4096
+      block_size: 128
+      cp_size: 2
+      ep_size: 16
+      draft_model: /mnt/cfs/9n-das-admin/llm_models/GLM-5.3-w8a8-mtp
+      num_speculative_tokens: 3
+      enable_graph: false
+      max_tokens_per_batch: 8192
+      expert_parallel_degree: 2
+      tool-call-parser: glm47
+      reasoning-parser: glm47
+    nodes:
+    - name: prefill-0-node-0
+      host: 11.87.191.75
+      device_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      local_port: 48000
+  - name: decode-0
+    role: decode
+    group_master_host: 11.87.191.121
+    serving_extensiable_param:
+      max_memory_utilization: 0.92
+      max_seqs_per_batch: 64
+      enable_chunked_prefill: false
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      block_size: 128
+      backend: llm
+      dp_size: 2
+      ep_size: 16
+      draft_model: /mnt/cfs/9n-das-admin/llm_models/GLM-5.3-w8a8-mtp
+      num_speculative_tokens: 3
+      enable_graph: true
+      max_tokens_per_batch: 512
+      tool-call-parser: glm47
+      reasoning-parser: glm47
+      expert_parallel_degree: 2
+      enable_graph_mode_decode_no_padding: false
+    nodes:
+    - name: decode-0-node-0
+      host: 11.87.191.121
+      device_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      local_port: 48000
