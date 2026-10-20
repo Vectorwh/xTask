@@ -71,7 +71,7 @@ deployment:
       dp_size: 1
       ep_size: 16
       model_impl: python
-      draft_model: /mnt/cfs/9n-das-admin/llm_models/GLM-5.3-Flash-DFlash2
+      draft_model: /export/home/models/GLM-5.3-Flash-DFlash2
       num_speculative_tokens: 7
       speculative_algorithm: DFlash2
       enable_graph: true
@@ -96,7 +96,7 @@ deployment:
       dp_size: 2
       ep_size: 16
       model_impl: python
-      draft_model: /mnt/cfs/9n-das-admin/llm_models/GLM-5.3-Flash-DFlash2
+      draft_model: /export/home/models/GLM-5.3-Flash-DFlash2
       num_speculative_tokens: 7
       speculative_algorithm: DFlash2
       enable_graph: true

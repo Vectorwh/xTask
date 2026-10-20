@@ -5,7 +5,7 @@
     },
     "glm": {
         "owner": [["沈运恒", "shenyunheng3"],["沈效龙", "ext.shenxiaolong5"]],
-        "model_name": ["glm_4.7", "glm_5", "glm_5.2", "glm_5.3_flash"]
+        "model_name": ["glm_4.7", "glm_5", "glm_5.2", "glm_5.3_flash", "glm_5.3"]
     },
     "Qwen3": {
         "owner": [["冯艳", "fengyan.119"],["高鹏举", "ext.gaopengju1"]],

@@ -1,6 +1,6 @@
 case_name: glm5.3_xllm_perf_i2048_o1024_bs32_1P1D
 engine_type: xllm
-model_path: /mnt/cfs/9n-das-admin/llm_models/GLM-5.3-w8a8
+model_path: /export/home/models/GLM-5.3-w8a8
 served_model_name: GLM-5.3-w8a8
 metrics: perf
 dataset_name: sharegpt
@@ -72,7 +72,7 @@ deployment:
       block_size: 128
       cp_size: 2
       ep_size: 16
-      draft_model: /mnt/cfs/9n-das-admin/llm_models/GLM-5.3-w8a8-mtp
+      draft_model: /export/home/models/GLM-5.3-w8a8-mtp
       num_speculative_tokens: 3
       enable_graph: false
       max_tokens_per_batch: 8192
@@ -97,7 +97,7 @@ deployment:
       backend: llm
       dp_size: 2
       ep_size: 16
-      draft_model: /mnt/cfs/9n-das-admin/llm_models/GLM-5.3-w8a8-mtp
+      draft_model: /export/home/models/GLM-5.3-w8a8-mtp
       num_speculative_tokens: 3
       enable_graph: true
       max_tokens_per_batch: 512
