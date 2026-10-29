@@ -62,7 +62,7 @@ class AisbenchResult:
         self.summary = ResultSummary(
             total_requests=int(e2el.n if hasattr(e2el, 'n') else 0),
             failed_requests=int(get_json_metric('Failed Requests')),
-            concurrency=int(get_json_metric('Concurrency', 1)),
+            concurrency=float(get_json_metric('Concurrency', 1)),
             max_concurrency=int(get_json_metric('Max Concurrency', 1)),
             request_throughput=float(get_json_metric('Request Throughput')),
             input_tokens_avg=input_tokens.average,

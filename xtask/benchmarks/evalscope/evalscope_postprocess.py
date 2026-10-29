@@ -47,8 +47,8 @@ class EvalscopeResult:
         self.summary = ResultSummary(
             total_requests=int(e2el.n if hasattr(e2el, 'n') else 0),
             failed_requests=self.metadata.get('Failed requests', 0),
-            concurrency=self.metadata.get('Number of concurrency', 1),  # evalscope 当前无实际并发数统计
-            max_concurrency=self.metadata.get('Number of concurrency', 1),
+            concurrency=float(self.metadata.get('Number of concurrency', 1)),  # evalscope 当前无实际并发数统计
+            max_concurrency=int(self.metadata.get('Number of concurrency', 1)),
             #request_throughput=float(e2el.n / (e2el.average / 1000)) if e2el.average > 0 else 0.0,
             request_throughput=self.metadata.get('Request throughput (req/s)', 0),
             input_tokens_avg=input_tokens.average,

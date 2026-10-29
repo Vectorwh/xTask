@@ -21,7 +21,7 @@ class ResultSummary:
     """结果摘要数据类"""
     total_requests: int
     failed_requests: int
-    concurrency: int
+    concurrency: float
     max_concurrency: int
     request_throughput: float
     input_tokens_avg: float

@@ -48,6 +48,11 @@ def report_benchmark_if_available(result):
             sys.path.insert(0, plugin_root)
         from bench_reporter.integration import report_xtask_result
         task_config = result.get("task_config", {}) if isinstance(result, dict) else {}
+
+        # TODO: get device_type and engine_version from environment
+        task_config.setdefault("device_type", "A3")
+        task_config.setdefault("engine_version", "main")
+
         report_xtask_result(result, task_config)
     except Exception as exc:
         logging.warning("Optional bench-reporter integration failed: %s", exc)
