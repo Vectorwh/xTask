@@ -163,6 +163,166 @@ class AisbenchScriptGenerationTests(unittest.TestCase):
         self.assertNotIn("AISBench数据集路径不存在", script)
         find_config.assert_not_called()
 
+    def test_gedit_acc_defaults_dataset_path_when_missing(self):
+        # gedit（api_type 以 gedit 开头）未指定 dataset_path 时落到
+        # DEPENDENCE_PACKAGE_PATH 下的 GEdit-Bench 默认路径。
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            source_config = root / "gedit_gen_0_shot_llmjudge.py"
+            source_config.write_text(
+                "from example import GEditDataset\n"
+                "gedit_datasets = [\n"
+                "    dict(\n"
+                "        abbr='gedit',\n"
+                "        type=GEditDataset,\n"
+                "        path='ais_bench/datasets/GEdit-Bench',\n"
+                "    )\n"
+                "]\n",
+                encoding="utf-8",
+            )
+            task_config = {
+                "benchmark": {
+                    "benchmark_type": "aisbench",
+                    "acc": {
+                        "api_type": "gedit_image_edit",
+                        "dataset_conf": "gedit_gen_0_shot_llmjudge",
+                    },
+                },
+                "dataset_name": "gedit",
+                "host_addr": "127.0.0.1",
+                "metrics": ["acc"],
+                "model_path": "/models/qwen-image-edit",
+                "port": 19000,
+                "served_model_name": "qwen-image-edit",
+            }
+            with mock.patch.dict(
+                os.environ, {"DEPENDENCE_PACKAGE_PATH": "/xllm_test_060"}
+            ), mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config",
+                return_value=source_config,
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            dataset_config = (
+                output_dir / "aisbench_configs" / "datasets"
+                / "xtask_gedit_gen_0_shot_llmjudge.py"
+            ).read_text(encoding="utf-8")
+
+        default_path = (
+            "/xllm_test_060/benchmark/ais_bench/datasets/GEdit-Bench"
+        )
+        self.assertIn(f"path='{default_path}'", dataset_config)
+
+    def test_gedit_acc_explicit_dataset_path_wins(self):
+        # 显式 dataset_path 始终优先于默认值。
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            source_config = root / "gedit_gen_0_shot_llmjudge.py"
+            source_config.write_text(
+                "from example import GEditDataset\n"
+                "gedit_datasets = [\n"
+                "    dict(\n"
+                "        abbr='gedit',\n"
+                "        type=GEditDataset,\n"
+                "        path='ais_bench/datasets/GEdit-Bench',\n"
+                "    )\n"
+                "]\n",
+                encoding="utf-8",
+            )
+            task_config = {
+                "benchmark": {
+                    "benchmark_type": "aisbench",
+                    "acc": {
+                        "api_type": "gedit_image_edit",
+                        "dataset_conf": "gedit_gen_0_shot_llmjudge",
+                        "dataset_path": "/custom/GEdit-Bench",
+                    },
+                },
+                "dataset_name": "gedit",
+                "host_addr": "127.0.0.1",
+                "metrics": ["acc"],
+                "model_path": "/models/qwen-image-edit",
+                "port": 19000,
+                "served_model_name": "qwen-image-edit",
+            }
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config",
+                return_value=source_config,
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            dataset_config = (
+                output_dir / "aisbench_configs" / "datasets"
+                / "xtask_gedit_gen_0_shot_llmjudge.py"
+            ).read_text(encoding="utf-8")
+
+        self.assertIn("path='/custom/GEdit-Bench'", dataset_config)
+
+    def test_non_gedit_acc_keeps_empty_dataset_path_semantics(self):
+        # 非 gedit 的 aisbench acc 用例：dataset_path 未指定时不注入默认值，
+        # 保持原有必填/相对路径语义不变。
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            source_config = root / "gsm8k_gen.py"
+            source_config.write_text(
+                "from example import GSM8KDataset\n"
+                "gsm8k_datasets = [\n"
+                "    dict(\n"
+                "        abbr='gsm8k',\n"
+                "        type=GSM8KDataset,\n"
+                "        path='ais_bench/datasets/gsm8k',\n"
+                "    )\n"
+                "]\n",
+                encoding="utf-8",
+            )
+            task_config = {
+                "benchmark": {
+                    "benchmark_type": "aisbench",
+                    "acc": {
+                        "api_type": "vllm_api_general_chat",
+                        "dataset_conf": "gsm8k_gen",
+                    },
+                },
+                "dataset_name": "gsm8k",
+                "host_addr": "127.0.0.1",
+                "metrics": ["acc"],
+                "model_path": "/models/deepseek",
+                "port": 8800,
+                "served_model_name": "deepseek",
+            }
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda path: path
+            ), mock.patch.object(
+                generator, "download_dataset", return_value=[]
+            ), mock.patch.object(
+                generator, "find_aisbench_dataset_config",
+                return_value=source_config,
+            ):
+                generator.generate_aisbench_script(task_config, str(output_dir))
+
+            # create_dataset_config_override 没有 dataset_path/infer_mode/
+            # judge_endpoint 时直接返回原名，不生成 xtask_ 覆盖配置。
+            self.assertFalse(
+                (
+                    output_dir / "aisbench_configs" / "datasets"
+                    / "xtask_gsm8k_gen.py"
+                ).exists()
+            )
+
     def test_sharegpt_last_fixed_length_uses_generated_dataset_and_case_config(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

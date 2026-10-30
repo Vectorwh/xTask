@@ -351,6 +351,20 @@ def generate_benchmark_command(
             output_shell_file="run_evalscope_test.sh",
             python_exec="python",
         )
+    if benchmark_type == "image_edit":
+        # gedit image-edit pipeline reuses the EvalScope runtime; the generator
+        # module is provided by a parallel workstream, import lazily so the
+        # scheduler stays importable before that file exists.
+        from xtask.benchmarks.evalscope.generate_image_edit_script import (
+            generate_image_edit_script,
+        )
+
+        return generate_image_edit_script(
+            task_config=_bench_task_config_with_endpoint(),
+            output_file_path=output_file_path,
+            output_shell_file="run_gedit_perf.sh",
+            python_exec="python",
+        )
     if benchmark_type == "vbench":
         from xtask.benchmarks.vbench.generate_vbench_script import generate_vbench_script
 
@@ -399,7 +413,20 @@ def generate_commands(
             service_plans=[],
         )
         return startup_cmd, benchmark_cmd
-    
+
+    # gedit self-service mode: services are started by the dedicated
+    # gedit lifecycle (xtask/core/gedit_service.py); skip legacy xLLM
+    # startup-script generation entirely.
+    from xtask.core.gedit_service import is_gedit_services_enabled
+
+    if is_gedit_services_enabled(task_config):
+        benchmark_cmd = generate_benchmark_command(
+            task_config,
+            output_file_path,
+            service_plans=[],
+        )
+        return startup_cmd, benchmark_cmd
+
     # deployment.instances（含单机单节点）：按实例生成启动脚本
     if is_multi_host_deployment(task_config):
         engine_type = engine_config.get("engine_type")
@@ -1426,6 +1453,31 @@ def _load_task_and_engine(context):
         _fail_stage(context, f"Failed to load XLLM config: {exc}")
         return
 
+    # gedit self-service mode: deployment.encoder/dit/judge (image_edit /
+    # gedit aisbench acc) starts multiple xLLM services per case.  Build
+    # specs now, point benchmark addressing at them, and keep them in state
+    # for the container/start/cleanup stages.  Zero impact on other cases:
+    # the gate requires a gedit benchmark type AND deployment services AND
+    # external_service off.
+    gedit_specs = []
+    if not external_service:
+        from xtask.core.gedit_service import (
+            apply_gedit_services_to_task_config,
+            build_gedit_service_specs,
+            is_gedit_services_enabled,
+        )
+
+        if is_gedit_services_enabled(task_config):
+            try:
+                gedit_specs = build_gedit_service_specs(task_config)
+                apply_gedit_services_to_task_config(task_config, gedit_specs)
+            except Exception as exc:
+                _fail_stage(
+                    context,
+                    f"deployment gedit services configuration error: {exc}",
+                )
+                return
+
     startup_cmd, benchmark_cmd = generate_commands(
         engine_config,
         task_config,
@@ -1475,6 +1527,7 @@ def _load_task_and_engine(context):
             context,
             "Multi-host deployment detected but service plans were not generated",
         )
+    context.state.update(gedit_specs=gedit_specs)
 
 
 def _create_container(context, container_manager, container_config):
@@ -1794,8 +1847,171 @@ def _prepare_container(context):
     if state.get("multi_host"):
         _prepare_container_multi_host(context)
         return
+    if state.get("gedit_specs"):
+        _prepare_gedit_service_containers(context)
+        return
 
     _prepare_single_host_client_container(context)
+
+
+def _gedit_service_container_config(
+    engine_config: Dict[str, Any],
+    task_config: Dict[str, Any],
+    task_yaml_path: str,
+    spec,
+):
+    """Build a ContainerConfig for one gedit service container.
+
+    Reuses ContainerConfigBuilder for the image/runtime baseline, then adds
+    the NPU driver mounts the gedit xLLM binary needs (aclInit 507008 core
+    dump without them) and the per-service device list.
+    """
+    from xtask.core.gedit_service import DEFAULT_SERVICE_VOLUMES, VENDORS_MOUNT_TARGET
+    from xtask.utils.container_manager import ContainerConfig, ensure_host_bind_mount
+
+    base_config = ContainerConfigBuilder.create_container_config(
+        engine_config, task_config, task_yaml_path
+    )
+    volumes = dict(base_config.volumes or {})
+    volumes.update(copy.deepcopy(DEFAULT_SERVICE_VOLUMES))
+    vendors_source = os.path.join(os.getcwd(), "pkg", "xllm", "vendors", "custom_xllm_math")
+    if os.path.isdir(vendors_source):
+        volumes[vendors_source] = VENDORS_MOUNT_TARGET
+    else:
+        raise RuntimeError(
+            "gedit services require the xLLM vendors directory "
+            f"{vendors_source} (build xLLM or copy pkg/xllm/vendors first)"
+        )
+    for host_path, container_path in (spec.extra_volumes or {}).items():
+        volumes[host_path] = container_path
+    ensure_host_bind_mount(volumes, spec.model_path)
+    ensure_host_bind_mount(volumes, spec.xllm_binary)
+
+    environment = dict(base_config.environment or {})
+    environment.setdefault("GEDIT_SERVICE_NAME", spec.name)
+
+    import time as _time
+
+    container_config = ContainerConfig(
+        image_home=base_config.image_home,
+        image_name=base_config.image_name,
+        container_name=f"{task_config.get('case_name', 'gedit')}-{spec.name}-{int(_time.time())}",
+        runtime=base_config.runtime,
+        gpu_ids=list(spec.device_ids),
+        ports={},
+        volumes=volumes,
+        environment=environment,
+        working_dir=base_config.working_dir,
+        entrypoint=base_config.entrypoint,
+        command=base_config.command,
+        network_mode="host",
+        ipc_mode="host",
+        shm_size=base_config.shm_size,
+        privileged=True,
+        auto_remove=False,
+        detach=True,
+        stdin_open=base_config.stdin_open,
+        tty=base_config.tty,
+    )
+    return container_config
+
+
+def _prepare_gedit_service_containers(context):
+    """Create per-service containers plus one benchmark client container.
+
+    gedit self-service mode (case 36/37): one container per
+    deployment.encoder/dit/judge entry runs the xllm binary directly; the
+    benchmark client reuses the single-host client container path so script
+    generation, dependency download and post-processing stay unchanged.
+    """
+    from xtask.core.gedit_service import render_gedit_startup_script
+    from xtask.utils.container_manager import ContainerManager
+
+    state = context.state
+    task_config = state["task_config"]
+    engine_config = state["engine_config"]
+    specs = state["gedit_specs"]
+
+    # 1. Benchmark client container first (standard single-host path).
+    _prepare_single_host_client_container(context)
+    if context.complete:
+        return
+    if not context.result.get("container_id"):
+        _fail_stage(context, "gedit: benchmark client container was not created")
+        return
+
+    service_runtimes = []
+    for spec in specs:
+        try:
+            container_config = _gedit_service_container_config(
+                engine_config, task_config, context.task_yaml_path, spec
+            )
+        except Exception as exc:
+            _fail_stage(
+                context,
+                f"gedit service {spec.name!r} container config failed: {exc}",
+            )
+            state["gedit_service_runtimes"] = service_runtimes
+            return
+
+        manager = ContainerManager(container_config, logging.getLogger())
+        image_url = f"{container_config.image_home}:{container_config.image_name}"
+        if not manager.image_exists(image_url):
+            logging.info("Image %s not found locally, pulling...", image_url)
+            if not manager.pull_image(image_url):
+                _fail_stage(
+                    context,
+                    f"gedit service {spec.name!r}: failed to pull image {image_url}",
+                )
+                state["gedit_service_runtimes"] = service_runtimes
+                return
+        success, container_id = manager.create_container()
+        if not success:
+            _fail_stage(
+                context,
+                f"gedit service {spec.name!r}: failed to create container: {container_id}",
+            )
+            state["gedit_service_runtimes"] = service_runtimes
+            return
+        if not manager.wait_for_container(container_config.container_name, timeout=60):
+            _fail_stage(
+                context,
+                f"gedit service {spec.name!r} container failed to become ready",
+            )
+            state["gedit_service_runtimes"] = service_runtimes
+            return
+
+        output_dir = os.path.join(context.output_file_path, "xllm_log", f"gedit_{spec.name}")
+        try:
+            script_path = render_gedit_startup_script(spec, output_dir)
+        except Exception as exc:
+            _fail_stage(
+                context,
+                f"gedit service {spec.name!r} startup script generation failed: {exc}",
+            )
+            state["gedit_service_runtimes"] = service_runtimes
+            return
+
+        service_runtimes.append(
+            {
+                "spec": spec,
+                "container_name": container_config.container_name,
+                "container_id": container_id,
+                "manager": manager,
+                "config": container_config,
+                "output_dir": output_dir,
+                "startup_script": script_path,
+            }
+        )
+        logging.info(
+            "gedit service %s: container %s ready (devices=%s ports=%s)",
+            spec.name,
+            container_config.container_name,
+            spec.device_ids,
+            spec.ports,
+        )
+
+    state["gedit_service_runtimes"] = service_runtimes
 
 
 def _prepare_container_multi_host(context):
@@ -1979,6 +2195,11 @@ def _prepare_runtime_dependencies(context):
     if state.get("multi_host"):
         _prepare_runtime_dependencies_multi_host(context)
         return
+    if state.get("gedit_specs"):
+        # gedit self-service: the client container only needs benchmark tools;
+        # services run the standalone xllm binary (no wheel install needed).
+        _prepare_external_runtime_dependencies(context)
+        return
 
     task_config = state["task_config"]
     engine_config = state["engine_config"]
@@ -2006,6 +2227,9 @@ def _prepare_runtime_dependencies(context):
     if benchmark_type == "aisbench" and not _is_aisbench_swebench_task(task_config):
         down_benchmark_cmd = "bash /workspace/tools/download_ais_bench.sh;"
     elif benchmark_type == "evalscope":
+        down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
+    elif benchmark_type == "image_edit":
+        # image_edit reuses the same offline evalscope 1.14.0 wheel closure.
         down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
     if down_benchmark_cmd:
         logging.info(f"Starting download the benchmark tool: {down_benchmark_cmd}")
@@ -2135,6 +2359,9 @@ def _prepare_runtime_dependencies_multi_host(context):
         down_benchmark_cmd = "bash /workspace/tools/download_ais_bench.sh;"
     elif benchmark_type == "evalscope":
         down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
+    elif benchmark_type == "image_edit":
+        # image_edit reuses the same offline evalscope 1.14.0 wheel closure.
+        down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
     else:
         down_benchmark_cmd = ""
 
@@ -2241,6 +2468,9 @@ def _prepare_external_runtime_dependencies(context):
     if benchmark_type == "aisbench":
         down_benchmark_cmd = "bash /workspace/tools/download_ais_bench.sh;"
     elif benchmark_type == "evalscope":
+        down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
+    elif benchmark_type == "image_edit":
+        # image_edit reuses the same offline evalscope 1.14.0 wheel closure.
         down_benchmark_cmd = "bash /workspace/tools/download_evalscope.sh;"
     if down_benchmark_cmd:
         logging.info(
@@ -2396,6 +2626,111 @@ def _cleanup_external_client(context):
         cleaned.add(id(manager))
 
 
+def _cleanup_gedit_services(context):
+    """Stop gedit service containers plus the benchmark client container.
+
+    Archives service logs into the case output's xllm_log/gedit_<name>/log
+    before removal (mirrors the service-group archive layout), waits for the
+    xllm processes to exit, then removes the containers.  CLEAN_RESULTS=false
+    keeps everything alive for debugging, matching the other paths.
+    """
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    state = context.state
+    try:
+        _ensure_benchmark_date_dir(context)
+    except Exception:
+        logging.error(
+            "Failed to prepare fallback result directory during cleanup",
+            exc_info=True,
+        )
+
+    engine_config = state.get("engine_config")
+    should_clean = bool(
+        engine_config is not None
+        and not engine_config.get("serving_container_name")
+        and get_xtask_config_data().get("ENV_CONFIG").get("CLEAN_RESULTS")
+    )
+
+    service_runtimes = state.get("gedit_service_runtimes") or []
+    for entry in service_runtimes:
+        manager = entry.get("manager")
+        config = entry.get("config")
+        spec = entry.get("spec")
+        if manager is None or config is None:
+            continue
+        try:
+            if not manager.container_is_running(config.container_name):
+                continue
+        except Exception:
+            logging.warning(
+                "gedit service %s: cannot probe container state; proceeding "
+                "to cleanup",
+                spec.name if spec else "?",
+                exc_info=True,
+            )
+        # Archive logs while the container is still alive.
+        try:
+            log_source = path_mapping_in_container(
+                os.path.join(entry["output_dir"], "log")
+            )
+            manager.exec_in_container(
+                config.container_name,
+                f"chmod -R a+rwX {shlex.quote(log_source)} 2>/dev/null || true",
+                timeout=30,
+            )
+        except Exception:
+            logging.warning(
+                "gedit service %s: log chmod failed before archive",
+                spec.name if spec else "?",
+                exc_info=True,
+            )
+        if should_clean:
+            try:
+                manager.exec_in_container(
+                    config.container_name,
+                    "pkill -TERM -x xllm 2>/dev/null; sleep 1; "
+                    "pkill -KILL -x xllm 2>/dev/null; true",
+                    timeout=30,
+                )
+            except Exception:
+                logging.warning(
+                    "gedit service %s: xllm terminate failed",
+                    spec.name if spec else "?",
+                    exc_info=True,
+                )
+            try:
+                manager.exec_in_container(
+                    config.container_name,
+                    "rm -f /dev/shm/xllm_* 2>/dev/null; true",
+                    timeout=30,
+                )
+            except Exception:
+                logging.warning(
+                    "gedit service %s: SHM cleanup failed",
+                    spec.name if spec else "?",
+                    exc_info=True,
+                )
+        try:
+            manager.cleanup()
+        except Exception:
+            logging.error(
+                "gedit service %s: container cleanup failed",
+                spec.name if spec else "?",
+                exc_info=True,
+            )
+
+    if should_clean:
+        container_manager = state.get("container_manager")
+        if container_manager is not None:
+            try:
+                container_manager.cleanup()
+            except Exception:
+                logging.error(
+                    "gedit client container cleanup failed", exc_info=True
+                )
+
+
 def _start_and_wait_service(context):
     state = context.state
     if state.get("external_service"):
@@ -2407,6 +2742,9 @@ def _start_and_wait_service(context):
         return
     if state.get("multi_host"):
         _start_and_wait_service_multi_host(context)
+        return
+    if state.get("gedit_specs"):
+        _start_and_wait_gedit_services(context)
         return
 
     task_config = state["task_config"]
@@ -2458,6 +2796,132 @@ def _start_and_wait_service(context):
             f"Service health check failed: {health_result.stderr}"
         )
         logging.error(context.result["message"])
+
+
+def _start_and_wait_gedit_services(context):
+    """Start every gedit service container and wait for HTTP health.
+
+    Each service's script is executed inside its own container (host network),
+    then the scheduler polls each service's /health endpoint from the
+    benchmark client container until all report 200.  DiT (multi-rank) opens
+    its master port last, so the wait covers the slowest service.
+    """
+    from xtask.core.gedit_service import gedit_health_url
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    state = context.state
+    service_runtimes = state.get("gedit_service_runtimes") or []
+    client_config = state.get("container_config")
+    client_manager = state.get("container_manager")
+    if not service_runtimes:
+        _fail_stage(context, "gedit: no service runtimes were prepared")
+        state["service_healthy"] = False
+        return
+    if client_manager is None or client_config is None:
+        _fail_stage(context, "gedit: no benchmark client container for health probe")
+        state["service_healthy"] = False
+        return
+
+    # ---- 1. Execute every startup script ----
+    for entry in service_runtimes:
+        spec = entry["spec"]
+        manager = entry["manager"]
+        container_name = entry["container_name"]
+        script_dir = path_mapping_in_container(entry["output_dir"])
+        script_name = os.path.basename(entry["startup_script"])
+        command = (
+            f"rm -rf {script_dir}/log; "
+            f"cd {script_dir}; bash ./{script_name}"
+        )
+        logging.info(
+            "gedit service %s: starting with command: %s", spec.name, command
+        )
+        result = manager.exec_in_container(
+            container_name, command, timeout=120
+        )
+        entry["startup_result"] = result
+        if not result.success:
+            detail = (
+                f"gedit service {spec.name!r} startup command failed: "
+                f"{result.stderr or result.stdout}"
+            )
+            context.result["message"] = detail
+            logging.error(detail)
+            state["startup_result"] = result
+            state["service_healthy"] = False
+            return
+
+    state["startup_result"] = service_runtimes[0].get("startup_result")
+
+    # ---- 2. Poll each service health endpoint from the client container ----
+    serving_wait_time = (
+        (state.get("task_config") or {}).get("serving_wait_time")
+        or (state.get("config_data") or {}).get("XLLM_CONFIG", {}).get(
+            "serving_wait_time", 30
+        )
+    )
+    try:
+        time.sleep(int(serving_wait_time))
+    except (TypeError, ValueError):
+        time.sleep(30)
+
+    def _probe_health(url: str) -> bool:
+        check_cmd = (
+            f"curl --noproxy '*' -s -o /dev/null -w '%{{http_code}}' "
+            f"--max-time 10 {shlex.quote(url)}"
+        )
+        probe = client_manager.exec_in_container(
+            client_config.container_name, check_cmd, timeout=30
+        )
+        return bool(probe.success and _http_status_is_success(probe.stdout))
+
+    all_healthy = True
+    health_results = {}
+    for entry in service_runtimes:
+        spec = entry["spec"]
+        url = gedit_health_url(spec)
+        timeout_s = int(spec.readiness_timeout or 900)
+        deadline = time.monotonic() + timeout_s
+        healthy = False
+        while time.monotonic() < deadline:
+            if _probe_health(url):
+                healthy = True
+                break
+            # Early-abort when the xllm process died (log grows then stops).
+            log_dir = path_mapping_in_container(
+                os.path.join(entry["output_dir"], "log")
+            )
+            alive = entry["manager"].exec_in_container(
+                entry["container_name"],
+                "pgrep -x xllm >/dev/null || pgrep -f '/[x]llm' >/dev/null",
+                timeout=30,
+            )
+            if not alive.success:
+                logging.error(
+                    "gedit service %s: xllm process is not running; aborting "
+                    "health wait (see %s)",
+                    spec.name,
+                    os.path.join(entry["output_dir"], "log"),
+                )
+                break
+            time.sleep(10)
+        health_results[spec.name] = healthy
+        if healthy:
+            logging.info("gedit service %s is healthy: %s", spec.name, url)
+        else:
+            all_healthy = False
+            message = (
+                f"gedit service {spec.name!r} health check failed for {url} "
+                f"within {timeout_s}s; check container "
+                f"{entry['container_name']} logs under {entry['output_dir']}/log"
+            )
+            context.result["message"] = message
+            logging.error(message)
+
+    state["health_result"] = health_results
+    state["service_healthy"] = all_healthy
+    if all_healthy:
+        logging.info("All gedit services are healthy")
 
 
 def _wait_instance_ready(runtime, serving_wait_time, engine):
@@ -3649,6 +4113,11 @@ def _run_benchmark_and_process(context):
                     context.result["benchmark_output_path"] = output_dir
                 if output_dir:
                     _record_service_group_archive_path(state, output_dir)
+            # NOTE: AISBench SWE-bench tasks (metrics: acc + benchmark.acc in
+            # the new format, or metrics: swebench legacy) never reach this
+            # chain: _run_benchmark_and_process routes them to
+            # _run_aisbench_swe_and_process and returns before the benchmark
+            # execution above. This generic acc branch must stay SWE-free.
             elif "acc" in task_config.get("metrics"):
                 logging.info("Start to check acc benchmark result.")
                 from xtask.benchmarks.base_benchmark import acc_result_postprocess
@@ -4355,6 +4824,9 @@ def _cleanup_scheduler(context):
     state = context.state
     if state.get("external_service"):
         _cleanup_external_client(context)
+        return
+    if state.get("gedit_specs"):
+        _cleanup_gedit_services(context)
         return
     # Archive into a dated directory while containers are still available so
     # root-owned aisbench directories can be chmod'd for host-side copies.  The

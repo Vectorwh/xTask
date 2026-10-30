@@ -3,8 +3,8 @@
 写一个用例时，按下面四步拼起来即可：
 
 1. 先写模型和数据集。
-2. 再选一个 benchmark：AISBench、EvalScope 或 VBench。
-3. 再选一种测试：性能 `perf`、精度 `acc`、视频质量 `vbench`，或 SWE-bench `swebench`。
+2. 再选一个 benchmark：AISBench、EvalScope、VBench 或 GEdit 图片编辑（`image_edit` 性能 / AISBench gedit 精度）。
+3. 再选一种测试：性能 `perf`，或精度 `acc`（VBench 视频质量与 AISBench SWE-bench 也写 `acc`，由 `benchmark.benchmark_type` 区分）。
 4. 最后选部署：单机、普通多机、普通实例统一路由，或者 PD 分离；需要搜索时再加搜索段。
 
 ## 1. 可参考示例
@@ -40,6 +40,14 @@
 | 外部已有 Wan2.2 + VBench | `27_external_vbench_wan_i2v.yaml` |
 | 单机起 xLLM + AISBench SWE-bench（x86 Agent/打分） | `28_single_aisbench_swebench.yaml` |
 | 外部已有服务 + AISBench SWE-bench | `29_external_aisbench_swebench.yaml` |
+| 单机 Wan2.2 I2V + VBench mini 子集（107 条采样） | `30_single_vbench_wan_i2v_mini.yaml` |
+| DeepSeek V4 + AISBench SWE-bench（verified_mini 单条 filter） | `31_single_aisbench_swebench_dsv4.yaml` |
+| DeepSeek V4 + AISBench SWE-bench（3 条 Django filter，含代理/重试开关） | `32_single_aisbench_swebench_dsv4_django3.yaml` |
+| DeepSeek V4 + AISBench SWE-bench（verified_mini 全量） | `33_single_aisbench_swebench_dsv4_verified_mini.yaml` |
+| DeepSeek V4 + AISBench SWE-bench（verified_mini 10 条快集） | `35_single_aisbench_swebench_dsv4_verified_mini10.yaml` |
+| 单机 Qwen-Image-Edit gedit 性能（`image_edit` + 自服务 DiT/Encoder） | `36_single_image_edit_gedit_perf.yaml` |
+| 单机 Qwen-Image-Edit gedit 精度（AISBench LLM-judge + 自服务三服务） | `37_single_aisbench_gedit_acc.yaml` |
+| PD 场景 `startup_environment` 启动环境注入示例（字段演示，非新场景） | `28_startup_environment.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
 
@@ -50,7 +58,7 @@ case_name: qwen3_8b_xllm_perf_i1024_o1024_bs1
 engine_type: xllm
 model_path: /export/home/models/Qwen3-8B
 served_model_name: Qwen3-8B
-metrics: perf                 # perf=性能，acc=精度，vbench=视频质量，swebench=SWE-bench
+metrics: perf                 # perf=性能，acc=精度；VBench、SWE-bench 新格式也写 acc，由 benchmark 块区分
 dataset_name: gsm8k
 dataset_path: ''
 dataset_format: json
@@ -69,16 +77,17 @@ deployment: {}
 | `engine_type` | 是 | 要启动哪个推理引擎 | 本文只讲 `xllm`。写成其他值会走其他引擎流程。 |
 | `model_path` | 是 | 模型权重在宿主机上的目录 | 所有参与启动 xLLM 的服务器都要有这个目录。工程不会自动同步整个模型目录；容器内会通过路径映射访问它。 |
 | `served_model_name` | 是 | 请求接口里传给 `model` 的名字 | AISBench 和 EvalScope 都会使用它。它可以与目录名不同，但必须是当前 xLLM 服务接受的模型名。 |
-| `metrics` | 是 | 选择性能、精度、视频质量或 SWE-bench | `perf` 表示性能，`acc` 表示精度，`vbench` 表示视频质量，`swebench` 表示 AISBench SWE-bench。真正决定执行分支的是这个字段，不是 `case_type`。当前用例建议一次只写一种。 |
+| `metrics` | 是 | 选择性能还是精度大类 | `perf` 表示性能，`acc` 表示精度。VBench 视频质量用例与 AISBench SWE-bench 新格式同样写 `acc`，实际执行分支由 `benchmark.benchmark_type`（路由依据）和 `benchmark` 下的配置块共同决定（见第 3、8 节）。`swebench` 只作为旧写法兼容保留。当前用例建议一次只写一种。 |
 | `dataset_name` | 是 | benchmark 使用的数据集或数据生成器名称 | AISBench 性能常用 `gsm8k`、`syn`、`sharegpt`；EvalScope 精度直接把它传给 `--datasets`，性能传给 `--dataset`。 |
-| `dataset_path` | 按数据集需要 | 顶层数据集路径 | AISBench 配置了本地路径时会生成用例级数据集配置，优先使用 `benchmark.perf/acc.dataset_path`，否则使用此处路径；EvalScope 精度更常在 `dataset_args` 中指定。多机资源同步建议填写 `/xllm_test_060/...` 容器路径。 |
+| `dataset_path` | 按数据集需要 | 顶层数据集路径 | AISBench 配置了本地路径时会生成用例级数据集配置，优先使用 `benchmark.perf/acc.dataset_path`，否则使用此处路径；EvalScope 精度更常在 `dataset_args` 中指定。gedit 用例（36/37）不写 `dataset_path` 时使用内置默认数据集路径，见第 3 节 GEdit 小节。多机资源同步建议填写 `/xllm_test_060/...` 容器路径。 |
 | `dataset_format` | 建议 | 数据文件格式说明 | 常写 `json`。它主要作为任务元数据保留，具体解析方式仍由 benchmark 和数据集配置决定。 |
 | `communication_backend` | 多卡建议 | 多卡通信后端 | NPU 多卡通常写 `hccl`。 |
 | `hccl_if_port` | 端口冲突时填写 | HCCL 通信使用的基础端口 | xLLM 启动模板会导出为 `HCCL_IF_BASE_PORT`，默认 43439。它是物理 runtime/node 级配置：同一 host 上的多个 runtime 必须不同，不同 host 可以复用。顶层值只是默认值，可在普通 `instances[]` 或 PD `nodes[]` 中覆盖。 |
 | `progress_conn_port` | 端口冲突时填写 | xLLM 多进程主节点协调端口 | 启动模板用它组成 `MASTER_NODE_ADDR`，默认 9590。它是逻辑实例级配置：普通部署整组共享；统一路由和 PD 分别在各 `service_instances[]`、`pd_instances[]` 配置，同组所有 node 必须一致；多个逻辑组的主节点在同一 host 时必须使用不同值。 |
 | `userid` | 建议 | 结果文件归属用户的历史配置 | 常沿用环境中的 UID，例如 `1048`。部分当前流程直接取实际运行用户 UID，因此不要把它当作容器权限问题的唯一控制项。 |
 | `serving_wait_time` | 建议 | 服务启动命令发出后额外等待多少秒 | 它不是完整的服务启动超时。多机还会做实例 readiness 和统一 endpoint 健康检查。 |
-| `benchmark` | 是 | benchmark 类型及性能/精度/视频质量参数 | 详见第 3、8 节。 |
+| `benchmark_timeout` | 长评测按需 | 单次 benchmark 执行的容器内超时秒数 | 未写时沿用引擎配置默认（当前 7200 秒）。VBench 全量/mini 等长评测用例可显式调大，例如 30 号用例的 `benchmark_timeout: 86400`。 |
+| `benchmark` | 是 | benchmark 类型及性能/精度/视频质量参数 | 详见第 3、4、8 节。 |
 | `deployment` | 是 | xLLM 用哪些服务器、卡和端口启动 | 详见第 4 节。`external_service` 开启时拓扑被忽略，见第 10 节。 |
 | `external_service` | 否 | 是否对接已有服务、不由 xTask 启动 xLLM | 默认关闭。`true` 或带 `endpoint` 的 mapping 进入外部模式；不写或 `false` 保持现有端到端路径。 |
 | `assess_test_param` | 仅搜参 | 哪些字段需要搜索，以及每个字段有哪些候选值 | 只在 `--assess_test_type para_set` 下使用。 |
@@ -104,10 +113,19 @@ deployment: {}
 
 ## 3. Benchmark 部分
 
-`benchmark.benchmark_type` 决定使用哪个测试工具，目前本文覆盖 `aisbench`、`evalscope` 和
-`vbench`。`metrics: perf` 时必须提供 `benchmark.perf`，`metrics: acc` 时必须提供
-`benchmark.acc`，`metrics: vbench` 时必须提供 `benchmark.vbench`，`metrics: swebench`
-时必须提供 `benchmark.swebench`，且 `benchmark_type` 仍为 `aisbench`。
+`benchmark.benchmark_type` 决定使用哪个测试工具，目前本文覆盖 `aisbench`、`evalscope`、
+`vbench` 和 `image_edit`（gedit 图片编辑性能）。`benchmark_type` 是执行路由依据；
+`metrics` 只决定性能/精度大类：
+
+- `metrics: perf` 时提供 `benchmark.perf`（普通 `aisbench`/`evalscope` 性能，以及
+  `benchmark_type: image_edit` 的 gedit 性能都用它）。
+- `metrics: acc` 时提供 `benchmark.acc`——普通精度和 SWE-bench 新格式都用它：
+  `benchmark.acc` 内含 `mode`/`runner` 等 SWE 特征字段时按 AISBench SWE-bench 处理，
+  否则按普通 AISBench 精度（含 gedit）处理。
+- VBench 例外：`metrics: acc`（旧写法 `metrics: vbench` 兼容）但配置块是
+  `benchmark.vbench`，见第 8 节；判定入口是 `xtask/benchmarks/vbench/task_gate.py`。
+- 旧写法 `metrics: swebench` + `benchmark.swebench` 仍兼容保留；
+  顶层 `dataset_name: swebench` 也是有效的旧格式兼容信号。
 
 `benchmark.perf/acc.case_type` 建议分别写成 `performance`、`accuracy`，便于阅读和结果归类；但切换执行流程的仍是顶层 `metrics`。
 
@@ -327,22 +345,30 @@ GPQA Diamond 可以直接复用 AISBench 内置的 `gpqa_gen_0_shot_cot_chat_pro
 
 ### AISBench SWE-bench
 
-SWE-bench 是独立评测类型，不能写成 `metrics: acc` 的 GSM8K 精度。必须同时设置
-`metrics: swebench`、`benchmark.benchmark_type: aisbench` 和 `benchmark.swebench`，
-现有性能/精度 YAML 不会进入这条路径。
+SWE-bench 是独立评测类型，不能写成 `metrics: acc` 的 GSM8K 精度。新写法与普通精度
+格式一致：`metrics: acc`、`benchmark.benchmark_type: aisbench` 和 `benchmark.acc`，
+并在 `benchmark.acc` 中携带 SWE 特征字段（`mode`、`dataset`、`runner` 等）和
+`case_type: accuracy`。旧写法 `metrics: swebench` + `benchmark.swebench` 仍兼容保留。
+判定入口是 `xtask/benchmarks/aisbench/swebench.py` 的 `is_aisbench_swebench_task`：
+要求 `benchmark_type: aisbench` 且 SWE 块有效——新格式看 `benchmark.acc` 的
+`mode`（`infer`/`eval`/`all`）或 `runner` 字段，旧格式看 `benchmark.swebench`（配合
+`metrics: swebench` 或 `dataset_name: swebench`）；普通 GPQA/gedit 精度和性能用例
+不会进入这条路径。
 
 **不需要拆成两份 xTask。** 主路径就是一份 YAML、一次执行：
 
 1. xTask 按 `deployment.instances` 在 NPU 机器启动 xLLM（启动参数写法和 `01_single_aisbench_perf.yaml` 一样）。
 2. 同一轮调度把 AISBench SWE（mini-swe-agent infer + 官方 harness 打分）派到
-   `benchmark.swebench.runner.host` 这台 **x86** 机器。
+   `benchmark.acc.runner.host` 这台 **x86** 机器。
 3. NPU 容器不安装 AISBench，也不跑 SWE 镜像。x86 需要能访问 xLLM 的 HTTP 地址。
 
 ```yaml
-metrics: swebench
+metrics: acc
+dataset_name: swebench
 benchmark:
   benchmark_type: aisbench
-  swebench:
+  acc:
+    case_type: accuracy
     mode: all                 # infer | eval | all；默认一次做完，不必拆两次
     dataset: verified_mini
     step_limit: 200
@@ -388,7 +414,7 @@ x86 评测结果回传时先下载到用例目录外的临时目录，再合并 
 
 ```yaml
 benchmark:
-  swebench:
+  acc:
     runner:
       host: 11.87.48.253
       runtime_container:
@@ -431,13 +457,55 @@ mini-swe-agent 容器，再开始下一个实例。上述开关均不影响其�
 全量数据集中的复杂实例可能超过 mini-swe-agent 默认的 2 小时 Docker 容器生命周期，
 导致 `Environment stopped before agent finished`。可为这类 SWE 用例显式设置
 `runner.agent_container_timeout: 4h`，仅延长该用例 Agent 实例容器的寿命；
-它不改变整轮 `swebench.timeout`、Agent 的 `step_limit` 或其他类型评测。
+它不改变整轮 SWE 超时（`benchmark.acc.timeout`，旧写法 `benchmark.swebench.timeout`）、Agent 的 `step_limit` 或其他类型评测。
 评测结果若有 `error_instances > 0` 或 `harness_exit_code != 0`，即使
 `baseline: null` 也会判为失败；真正的未解决实例仍按解决率统计，正式回归应设置基线。
 
 只有服务已经在跑时，才用 `external_service` 写法，见 `29_external_aisbench_swebench.yaml`，
 语义和 `26_external_aisbench_perf.yaml` 相同。`mode: infer` / `mode: eval` 也可以拆开做，
 那是可选的断点续跑，不是默认要求。
+
+### AISBench GEdit 图片编辑精度（LLM-judge）
+
+GEdit（Qwen-Image-Edit）精度走 AISBench 精度分支，但使用 xTask 内置的两段式图片编辑
+API：`metrics: acc`、`benchmark.benchmark_type: aisbench`、`benchmark.acc`，关键字段是
+`api_type: gedit_image_edit` 和 `dataset_conf: gedit_gen_0_shot_llmjudge`。它的
+`benchmark.acc` 不含 `mode`/`runner` 字段，因此不会进入 SWE-bench 路径；
+`benchmark_type` 仍是 `aisbench`，也不会命中 VBench 判定。
+
+```yaml
+metrics: acc
+dataset_name: gedit
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: gedit_image_edit            # xtask 内置两段式 API（encoder + DiT）
+    dataset_conf: gedit_gen_0_shot_llmjudge
+    num_prompts: 20                       # 调试样例条数；删除后按 GEdit-Bench 全量（1212）
+    batch_size: 1
+    output_len: 512
+    request_rate: 0
+    judge_endpoint: 127.0.0.1:18008       # LLM-judge 端点（host:port）
+    baseline: 3.925                       # SC/PQ 两维综合分（0-10），替换为实测值
+    threshold: 0.20
+    generation_kwargs:
+      temperature: 0.01
+      ignore_eos: false
+```
+
+要点：
+
+- 数据集是 GEdit-Bench（load_from_disk 格式），默认放在
+  `<DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/GEdit-Bench`；YAML 不写
+  `dataset_path`，需要覆盖时才显式指定 `benchmark.acc.dataset_path`（默认值见
+  `xtask/benchmarks/aisbench/generate_aisbench_script.py` 的
+  `default_gedit_acc_dataset_path`）。
+- `judge_endpoint` 留空时，自服务模式由调度器按 `deployment.judge` 注入
+  `127.0.0.1:18008`。
+- 打分是 LLM-as-Judge（SC/PQ 两维，0-10），`baseline` 写两维的算术平均。
+- 两段式协议与自服务部署（encoder/dit/judge 三服务）见第 4 节
+  “GEdit 自服务多服务部署”；完整示例 `37_single_aisbench_gedit_acc.yaml`。
 
 ### EvalScope 性能
 
@@ -532,6 +600,46 @@ EvalScope 精度字段如下：
 | `split` | 选择 `validation`、`test` 等数据切分。 |
 
 路径以 `/xllm_test_060` 开头时，多机资源同步会按需检查和补齐相应关键资源。`generation_config`、`dataset_args` 由当前代码转换成命令行字典字符串；值中含复杂引号时应先用小用例验证生成的 `run_evalscope_test.sh`。
+
+### GEdit 图片编辑性能（benchmark_type: image_edit）
+
+图片编辑性能是独立的 `benchmark_type: image_edit`，不经过 `evalscope`/`aisbench` 的
+普通分支：`xtask/benchmarks/evalscope/generate_image_edit_script.py` 生成脚本，调用
+`xtask/plugins/evalscope/run_gedit_perf.py`（先注册 `gedit_image_gen` API 插件再跑
+evalscope perf）压测 `/v1/image/generation`。指标量纲是 MPx/s（产出兆像素每秒）：
+结果解析里的 `output_tps_avg` 实际是 MPx/s，`baseline` 直接填 MPx/s 数值。
+
+```yaml
+metrics: perf
+dataset_name: gedit
+benchmark:
+  benchmark_type: image_edit
+  perf:
+    case_type: performance
+    num_prompts: 20
+    batch_size: 1
+    request_rate: -1
+    warmup_num: 2
+    seed: 42
+    timeout: 3600               # 单请求超时（秒）：出图较慢，给足余量
+    size: "1328*1328"
+    num_inference_steps: 50
+    guidance_scale: 3.5
+    encoder_url: http://127.0.0.1:18007   # 留空则由调度器按 deployment.encoder 注入
+    baseline: 0.0973            # 量纲 MPx/s
+    threshold: 0.10
+```
+
+- 数据集默认 `<DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/gedit_perf/gedit_perf.jsonl`
+  （由 `tools/convert_gedit_to_perf.py` 从 GEdit-Bench 转换生成，`images` 字段存绝对
+  路径而非 base64）；YAML 不写 `dataset_path`，需要覆盖时才显式指定
+  `benchmark.perf.dataset_path`。
+- `encoder_url` 优先级：`benchmark.perf.encoder_url` > 环境变量 `GEDIT_ENCODER_URL` >
+  `http://127.0.0.1:18007`。
+- `size`/`num_inference_steps`/`guidance_scale` 等经 `--extra-args` 透传为请求体参数；
+  数据集行内有同名字段时以行为为准。
+- 自服务部署（encoder/dit 服务键、端口约定）见第 4 节；完整示例
+  `36_single_image_edit_gedit_perf.yaml`。
 
 ### Benchmark 基线校验规则
 
@@ -906,6 +1014,68 @@ ranktable 以逻辑实例为组分别处理。一个逻辑组内即使多个 nod
 同一物理 host 上所有 runtime 的 `device_ids`、xLLM 监听端口段和 PD transfer 端口都必须互不重叠；`pd_control` 的 etcd、HTTP、RPC 端口也会参与冲突检查。多个 P/D 逻辑组共机的完整写法见 `20_pd_samehost_multi_instance_perf.yaml`。
 
 `startup_policy` 虽然在部分历史 YAML 中出现，但当前调度代码始终并行启动所有实例，它暂时不能真正切换串行/并行策略。新用例不需要依赖这个字段。
+
+### GEdit 自服务多服务部署（deployment.encoder / dit / judge）
+
+gedit（Qwen-Image-Edit）两段式协议需要 Text Encoder、DiT（精度用例还需要 LLM judge）
+等多个独立 xLLM 服务。自服务模式把这些服务键写在 `deployment` 下，与
+`deployment.benchmark` 同级（调度器自动拉起各服务容器，评测结束后自动回收；
+benchmark 默认在 DiT 服务容器内执行）：
+
+```yaml
+deployment:
+  encoder:
+    device_ids: [7]
+    port: 18007                       # Text Encoder 单卡固定端口
+    master_node_addr: 127.0.0.1:29798
+    health_path: /health
+    hccl_if_port: 43438
+    serving_extensiable_param:
+      task: embed
+      enable_return_mm_full_embeddings: 1
+      # ...其余参数见 36/37 号用例
+  dit:
+    device_ids: [0, 1, 2, 3, 4, 5]
+    port: 19000                       # 起始端口；每卡一个进程，按 rank 连续自增
+    master_node_addr: 127.0.0.1:19757
+    health_path: /health
+    hccl_if_port: 43432
+    readiness_timeout: 1800           # DiT 6 卡加载较慢（默认 900s）
+    serving_extensiable_param:
+      backend: dit
+      cfg_size: 2
+      sp_size: 3
+      # ...
+  judge:                              # 仅精度用例（37）需要
+    device_ids: [12]
+    port: 18008
+    master_node_addr: 127.0.0.1:29810
+    model_path: /export/home/models/Qwen2.5-VL-7B-Instruct
+    hccl_if_port: 43500
+    serving_extensiable_param:
+      model_id: Qwen2.5-VL-7B-Instruct
+      # ...
+```
+
+生效条件（`xtask/core/gedit_service.py`，对其他用例零影响）：
+
+- `benchmark_type: image_edit`（36 号性能用例），或 `benchmark_type: aisbench` 且
+  `benchmark.acc.api_type` 以 `gedit` 开头（37 号精度用例）；其他 `benchmark_type`
+  即使出现这些键也不会被消费。
+- `deployment` 至少出现 encoder/dit/judge 中的一个。
+- `external_service` 关闭；外部模式沿用旧的仅探测路径，不自启服务。
+
+端口与挂载约定：
+
+- 端口按“每卡一个 xLLM 进程、端口 = `port` + rank”连续自增：DiT 写 `port: 19000`
+  即占用 19000-19005，无需逐卡列举；encoder 固定 18007，judge 固定 18008。
+- 容器自动挂载 `/etc/hccn.conf`、Ascend driver、add-ons、`npu-smi` 和
+  `pkg/xllm/vendors/custom_xllm_math`（缺一会出现 aclInit 507008 core dump），
+  YAML `volumes` 可在此基础上追加。
+- `hccl_if_port`（`HCCL_IF_BASE_PORT`）经验规则：同一 host 上多个服务的 base 间隔
+  至少 60，避免一个服务的 base 落进另一个服务的 NIC 通道窗口。已验证组合是
+  DiT 43432 / encoder 43438 / judge 43500；judge 曾用 43442 落进 DiT 的窗口，
+  导致 DiT 首次 allreduce 报 aicpu ERR02005 / acl 507018。
 
 ## 5. 搜索写法
 
@@ -1373,14 +1543,23 @@ bash tools/install_crontab.sh --uninstall
 ## 8. VBench Wan2.2 I2V
 
 VBench 是独立的视频生成质量评测类型，不能把它写成 AISBench 的
-`api_type`。VBench 用例应设置 `metrics: vbench` 和
-`benchmark.benchmark_type: vbench`，xTask 会为它创建独立的 runner 容器：
+`api_type`。VBench 用例应设置 `metrics: acc`（与普通精度用例一致，旧写法
+`metrics: vbench` 仍兼容）和 `benchmark.benchmark_type: vbench`，并配上
+`benchmark.vbench` 配置块，xTask 会为它创建独立的 runner 容器：
 
 - xLLM 容器只负责启动 Wan2.2 I2V 推理服务并占用 NPU。
 - VBench runner 只负责读取输入、调用 `/v1/video/generation`、保存 MP4 和执行质量评测。
 - 普通 AISBench、EvalScope、文本/视觉精度和性能用例不会创建这个 runner，也不会走 VBench 分支。
 
-可复制的完整示例是 `tests/e2e/xllm/examples/yaml_authoring/25_single_vbench_wan_i2v.yaml`。
+结果分支判定在 `xtask/benchmarks/vbench/task_gate.py` 的 `is_vbench_task`：要求
+`benchmark.benchmark_type: vbench` 且 `benchmark.vbench` 是映射块；`metrics` 本身
+不参与判定，因此新写法 `metrics: acc` 和旧写法 `metrics: vbench` 都能被识别，
+而普通精度/SWE-bench/性能用例因 `benchmark_type` 不同不会被误判。
+
+可复制的完整示例是 `tests/e2e/xllm/examples/yaml_authoring/25_single_vbench_wan_i2v.yaml`；
+107 条 mini 子集示例是 `30_single_vbench_wan_i2v_mini.yaml`（显式把 `full_info` 指向
+mini JSON，不再设 `generation.limit`，并用顶层 `benchmark_timeout: 86400` 放大
+docker exec 超时）。
 VBench 工具、评测脚本及模型权重必须提前装入 runner 镜像或通过挂载提供；xTask 不会在测试期间
 下载 VBench 数据集和权重。`camera_motion` 等维度还可能使用 Torch Hub 缓存，离线环境也应提前准备。
 未配置 `image_home`/`image_name` 时，runner 默认使用
@@ -1429,7 +1608,7 @@ outputs/<case_name>/
 ### 8.2 VBench 配置字段
 
 ```yaml
-metrics: vbench
+metrics: acc
 benchmark:
   benchmark_type: vbench
   vbench:
@@ -1552,6 +1731,12 @@ external_service:
 
 **VBench / Wan2.2：** 只起 `benchmark.vbench.image_home` / `image_name` 指定的独立 runner，不创建 dummy xLLM 容器。默认请求 `http://<origin>/v1/video/generation`；若 `endpoint` 已带 path，则原样作为视频 API。`mode: evaluate` 不要求活服务、不做健康探测。NPU watchdog 在外部模式关闭。
 
+**GEdit / image_edit：** 外部模式不自启 encoder/dit/judge 自服务容器；图像生成端点由
+`endpoint` 解析结果追加 `/image/generation` 得到（见
+`xtask/benchmarks/evalscope/generate_image_edit_script.py` 的 `_image_edit_endpoint`），
+encoder 地址仍按 `benchmark.perf.encoder_url` / 环境变量 `GEDIT_ENCODER_URL` /
+默认 `http://127.0.0.1:18007` 解析。
+
 搜 `serving_extensiable_param`、卡号、PD 拓扑会被拒绝；只允许搜 benchmark 请求参数（如 `batch_size`）。
 
 完整示例：`26_external_aisbench_perf.yaml`、`27_external_vbench_wan_i2v.yaml`。
@@ -1587,7 +1772,11 @@ python main.py --case_group 11_single_para_set_tpe \
 
 ## 11. 写完后的检查清单
 
-- 先确认 `metrics`、`benchmark_type` 和对应的 `perf/acc` 块一致。
+- 先确认 `metrics`、`benchmark_type` 和对应的配置块一致：`metrics: perf` 配
+  `benchmark.perf`（`benchmark_type: image_edit` 的 gedit 性能同样如此）；普通精度
+  与 SWE-bench 新格式配 `benchmark.acc`；VBench 配 `benchmark.vbench`。执行路由只看
+  `benchmark_type`，`metrics: acc` 下是否走 SWE 分支由 `benchmark.acc` 的
+  `mode`/`runner` 字段决定。
 - 确认模型路径在所有服务节点存在，数据资源路径在 benchmark runner 可见。
 - 单机通常只有一个 instance；普通部署用 `instances`，可跨 host 或在同一 host 拆成多个小 runtime；PD 只用 `pd_instances`。
 - 多机每个 host 的 SSH、容器运行环境、NPU 卡号和端口都可用。

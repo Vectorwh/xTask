@@ -24,6 +24,35 @@ from xtask.datasets.dataset_manger import (
 CONFIG_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
+# gedit 数据集默认根：环境变量优先、config/xTask_config.json 兜底
+# （与 xtask/benchmarks/vbench/defaults.py 同一模式）。
+_GEDIT_DATASET_FALLBACK_ROOT = "/export/home/models/xllm_test_060"
+
+
+def _dependence_package_path() -> str:
+    """Return the configured shared resource root (host path)."""
+    env_value = os.environ.get("DEPENDENCE_PACKAGE_PATH", "").strip()
+    if env_value:
+        return env_value
+    configured = (get_xtask_config_data().get("ENV_CONFIG") or {}).get(
+        "DEPENDENCE_PACKAGE_PATH", ""
+    )
+    text = str(configured or "").strip()
+    return text or _GEDIT_DATASET_FALLBACK_ROOT
+
+
+def default_gedit_acc_dataset_path() -> str:
+    """gedit acc 默认数据集（GEdit-Bench，load_from_disk 格式，host 路径）。
+
+    仅 api_type 以 gedit 开头的 aisbench 用例使用；YAML
+    benchmark.acc.dataset_path 显式指定时始终优先。
+    """
+    return (
+        _dependence_package_path()
+        + "/benchmark/ais_bench/datasets/GEdit-Bench"
+    )
+
+
 def _validate_config_name(value, field_name):
     if not value or not CONFIG_NAME_PATTERN.fullmatch(value):
         raise ValueError(
@@ -44,16 +73,26 @@ def _split_dataset_config_reference(dataset_conf):
 def get_api_type_file(api_type, shell_content):
     _validate_config_name(api_type, "api_type")
     model_config_name = f"xtask_{api_type}"
+    # xtask 内置 api_type 源（如 gedit_image_edit）：优先于 AISBench 部署目录，
+    # 便于随仓库版本化而不污染共享的 DEPENDENCE_PACKAGE_PATH。
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    builtin_source = Path(__file__).resolve().parent / "configs" / "models" / f"{api_type}.py"
     shell_content.append("\n# 2. 创建用例级vllm_api配置")
-    shell_content.append(
-        f'SOURCE_CONFIG_FILE="/xllm_test_060/benchmark/'
-        f'ais_bench/benchmark/configs/models/vllm_api/{api_type}.py"'
-    )
-    shell_content.append('if [ ! -f "$SOURCE_CONFIG_FILE" ]; then')
-    shell_content.append(
-        f'    SOURCE_CONFIG_FILE="$AIS_BENCH_PATH/benchmark/configs/models/vllm_api/{api_type}.py"'
-    )
-    shell_content.append('fi')
+    if builtin_source.is_file():
+        shell_content.append(
+            f'SOURCE_CONFIG_FILE="{path_mapping_in_container(str(builtin_source))}"'
+        )
+    else:
+        shell_content.append(
+            f'SOURCE_CONFIG_FILE="/xllm_test_060/benchmark/'
+            f'ais_bench/benchmark/configs/models/vllm_api/{api_type}.py"'
+        )
+        shell_content.append('if [ ! -f "$SOURCE_CONFIG_FILE" ]; then')
+        shell_content.append(
+            f'    SOURCE_CONFIG_FILE="$AIS_BENCH_PATH/benchmark/configs/models/vllm_api/{api_type}.py"'
+        )
+        shell_content.append('fi')
     shell_content.append(f'CONFIG_FILE="$AIS_BENCH_CONFIG_DIR/models/{model_config_name}.py"')
     shell_content.append('if [ ! -f "$SOURCE_CONFIG_FILE" ]; then')
     shell_content.append('    echo "错误：AISBench模型配置文件不存在 $SOURCE_CONFIG_FILE"')
@@ -209,6 +248,64 @@ class _LastInferencerOverride(ast.NodeTransformer):
         return node
 
 
+class _JudgeEndpointOverride(ast.NodeTransformer):
+    """Point the LLM-judge model in a dataset config at a custom host:port.
+
+    The gedit llmjudge configs build ``dict(judge_model=dict(...))`` with
+    ``dict`` calls (not dict literals), so both ``ast.Call`` nodes whose
+    keywords include ``judge_model`` and ``ast.Dict`` literals holding a
+    ``judge_model`` key are handled. Other host_ip/host_port leaves are left
+    untouched so the model-under-test endpoint keeps its sed replacement.
+    """
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = int(port)
+        self.replacements = 0
+
+    def _override_judge_value(self, judge):
+        """Override host_ip/host_port inside the judge_model value node."""
+        if isinstance(judge, ast.Call):
+            for keyword in judge.keywords:
+                if keyword.arg == "host_ip":
+                    keyword.value = ast.Constant(value=self.host)
+                    self.replacements += 1
+                elif keyword.arg == "host_port":
+                    keyword.value = ast.Constant(value=self.port)
+                    self.replacements += 1
+        elif isinstance(judge, ast.Dict):
+            for index, key in enumerate(judge.keys):
+                if isinstance(key, ast.Constant) and key.value == "host_ip":
+                    judge.values[index] = ast.Constant(value=self.host)
+                    self.replacements += 1
+                elif isinstance(key, ast.Constant) and key.value == "host_port":
+                    judge.values[index] = ast.Constant(value=self.port)
+                    self.replacements += 1
+        return judge
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if not isinstance(node.func, ast.Name) or node.func.id != "dict":
+            return node
+        for keyword in node.keywords:
+            if keyword.arg == "judge_model":
+                keyword.value = self._override_judge_value(keyword.value)
+        return node
+
+    def visit_Dict(self, node):
+        self.generic_visit(node)
+        keys = {
+            key.value: index
+            for index, key in enumerate(node.keys)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if "judge_model" in keys:
+            node.values[keys["judge_model"]] = self._override_judge_value(
+                node.values[keys["judge_model"]]
+            )
+        return node
+
+
 def _add_last_inferencer_import(tree):
     import_node = ast.ImportFrom(
         module="xtask.benchmarks.aisbench.sharegpt_last_inferencer",
@@ -239,10 +336,11 @@ def create_dataset_config_override(
     infer_mode=None,
     use_xtask_last_inferencer=False,
     config_dir_name="aisbench_configs",
+    judge_endpoint=None,
 ):
     """Create an isolated AISBench dataset config for per-case overrides."""
     config_name, config_suffix = _split_dataset_config_reference(dataset_conf)
-    if not dataset_path and not infer_mode:
+    if not dataset_path and not infer_mode and not judge_endpoint:
         return dataset_conf
 
     source_config = find_aisbench_dataset_config(config_name)
@@ -271,6 +369,19 @@ def create_dataset_config_override(
                 "MultiTurnGenInferencer to override"
             )
         _add_last_inferencer_import(tree)
+    if judge_endpoint:
+        host, _, port_str = str(judge_endpoint).rpartition(":")
+        if not host or not port_str.isdigit():
+            raise ValueError(
+                f"judge_endpoint must be host:port, got {judge_endpoint!r}"
+            )
+        judge_transformer = _JudgeEndpointOverride(host, int(port_str))
+        tree = judge_transformer.visit(tree)
+        if judge_transformer.replacements == 0:
+            raise ValueError(
+                f"AISBench dataset config {source_config} has no judge_model "
+                "host_ip/host_port to override"
+            )
 
     custom_name = f"xtask_{config_name}"
     config_dir_name = _validate_config_name(config_dir_name, "config_dir_name")
@@ -300,7 +411,13 @@ def append_dataset_path_check(shell_content, dataset_path):
 
 
 def append_xtask_pythonpath(shell_content):
-    """Make xTask compatibility modules importable in AISBench subprocesses."""
+    """Make xTask compatibility modules importable in AISBench subprocesses.
+
+    注意：调度器运行 tools/download_ais_bench.sh 时会把
+    /xllm_test_060/benchmark rsync 到 /workspace/benchmark 并 pip install -e，
+    因此 AISBench 的修复必须落在 rsync 源头（xllm_test_060 挂载卷），
+    这里只负责注入 xTask 仓库根的 PYTHONPATH。
+    """
     workspace_root = Path(__file__).resolve().parents[3]
     workspace_root_inside = path_mapping_in_container(str(workspace_root))
     quoted_root = shlex.quote(workspace_root_inside)
@@ -420,10 +537,24 @@ def generate_aisbench_script(
         shell_content.extend(download_cmd)
 
     # Step 2: 生成精度测试命令, 如果--metrics配置了acc, 则读取benchmark xxx_acc_config.json配置我呢见中的参数
+    # 注意：AISBench SWE-bench 新格式用例（metrics: acc + benchmark.acc，块内为
+    # mode/runner/dataset 等 SWE 字段，没有 dataset_conf）不会进入本分支——
+    # 调度层在 _run_benchmark_and_process 中已将其路由到 SWE 专用脚本生成器。
+    # VBench 用例同样不受影响：其 metrics 现在也是 acc，但 benchmark_type 为
+    # vbench，调度层在 generate_benchmark_command 中按 benchmark_type 路由到
+    # generate_vbench_script，根本不会进入本 AISBench 生成器。
     if "acc" in task_config.get("metrics") and accuracy_cfg.get("dataset_conf"):
+        api_type = accuracy_cfg.get("api_type", "vllm_api_general_chat")
+        # dataset_path：YAML 显式值优先；gedit 用例（api_type 以 gedit 开头）
+        # 未指定时落到共享 DEPENDENCE_PACKAGE_PATH 下的 GEdit-Bench 默认路径
+        # （host 路径，容器侧经 create_dataset_config_override 内的
+        # path_mapping_in_container 映射）。非 gedit 的 aisbench 用例保持
+        # 原有必填语义（空值由数据集配置自身的相对路径逻辑兜底）。
         dataset_path = accuracy_cfg.get("dataset_path") or task_config.get(
             "dataset_path", ""
         )
+        if not dataset_path and str(api_type or "").startswith("gedit"):
+            dataset_path = default_gedit_acc_dataset_path()
         output_len = accuracy_cfg.get("output_len", 1024)
         request_rate = accuracy_cfg.get("request_rate", 0)
         batch_size = accuracy_cfg.get("batch_size", 32)
@@ -434,10 +565,16 @@ def generate_aisbench_script(
         num_warmups = accuracy_cfg.get("num_warmups", 0)
         repetition_penalty = accuracy_cfg.get("repetition_penalty", 1)
 
-        api_type = accuracy_cfg.get("api_type", "vllm_api_general_chat")
         api_type_file, model_config_name, shell_content = get_api_type_file(api_type, shell_content)
 
+        # gedit 等 xtask 内置 api_type 的模型配置 import xtask 兼容模块
+        # （xtask.benchmarks.aisbench.gedit_image_edit_api 等），AISBench 子进程
+        # 需要 PYTHONPATH 含 xTask 仓库根才能 import 成功。
+        if str(api_type or "").startswith("gedit"):
+            append_xtask_pythonpath(shell_content)
+
         # Step 3: 修改配置文件中的核心参数（使用sed命令）
+        is_gedit_api = str(api_type or "").startswith("gedit")
         shell_content.append("\n# 3. 修改vllm_api配置文件$CONFIG_FILE参数")
         # 替换API地址
         shell_content.append(f'sed -i.bak "s/host_ip\s*=\s*.*,/host_ip=\'{api_address}\',/g" {api_type_file}')
@@ -450,13 +587,18 @@ def generate_aisbench_script(
             f'''sed -i -E "s#^([[:space:]]*)path[[:space:]]*=.*,#\\1path='{model_path_inside}',#" {api_type_file}'''
         )
 
-        shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={temperature},/g" {api_type_file}')
-        shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={request_rate},/g" {api_type_file}')
+        # gedit（图片编辑两段式）配置中的 temperature/top_k/seed 等属于
+        # DiT 请求体参数（generation_kwargs 透传），通用文本 LLM 的 sed
+        # 替换会破坏 encoder_url/size/num_inference_steps 等关键参数，
+        # 因此 gedit 只做地址/端口/模型名/路径替换，其余保持原配置。
+        if not is_gedit_api:
+            shell_content.append(f'sed -i "s/temperature\s*=\s*.*,/temperature={temperature},/g" {api_type_file}')
+            shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={request_rate},/g" {api_type_file}')
 
-        shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={top_k},/g" {api_type_file}')
-        shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={top_p},/g" {api_type_file}')
-        shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={seed},/g" {api_type_file}')
-        shell_content.append(f'sed -i "s/repetition_penalty\s*=\s*.*,/repetition_penalty={repetition_penalty},/g" {api_type_file}')
+            shell_content.append(f'sed -i "s/top_k\s*=\s*.*,/top_k={top_k},/g" {api_type_file}')
+            shell_content.append(f'sed -i "s/top_p\s*=\s*.*,/top_p={top_p},/g" {api_type_file}')
+            shell_content.append(f'sed -i "s/seed\s*=\s*.*,/seed={seed},/g" {api_type_file}')
+            shell_content.append(f'sed -i "s/repetition_penalty\s*=\s*.*,/repetition_penalty={repetition_penalty},/g" {api_type_file}')
 
         shell_content.append("\n# 4. 执行精度测试")
         # metrics_str = ",".join(accuracy_metrics)
@@ -466,6 +608,7 @@ def generate_aisbench_script(
             dataset_path,
             output_file_path,
             config_dir_name=config_dir_name,
+            judge_endpoint=accuracy_cfg.get("judge_endpoint"),
         )
         append_dataset_path_check(shell_content, dataset_path)
         # accuracy_metrics = accuracy_cfg.get("metrics", ["bleu", "rouge"])
@@ -490,8 +633,11 @@ def generate_aisbench_script(
         # shell_content.append(f'sed -i "s/request_rate\s*=\s*.*,/request_rate={acc_concurrency},/g" {api_type_file}')
 
         # 更新aisbench模型配置中generation_kwargs后端参数
+        # gedit 的 generation_kwargs 承载两段式 DiT 参数（size/
+        # num_inference_steps/encoder_url 等），YAML 里的通用文本 LLM
+        # 参数（temperature 等）不得整块覆盖，保持模型配置文件原值。
         generation_kwargs = accuracy_cfg.get('generation_kwargs', {})
-        if generation_kwargs:  # 如果有需要更新的参数
+        if generation_kwargs and not str(api_type or "").startswith("gedit"):  # 如果有需要更新的参数
             update_cmd = update_generation_kwargs(generation_kwargs, api_type_file)
             shell_content.extend(update_cmd)
 

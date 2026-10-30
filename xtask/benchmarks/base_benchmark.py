@@ -55,6 +55,18 @@ def result_postprocess(benchmark_stdout, task_config, output_file_path, init_ent
         from xtask.benchmarks.evalscope.evalscope_postprocess import evalscope_perf_post_process
 
         post_processed_result, benchmark_outputdir  = evalscope_perf_post_process(task_config, output_file_path, init_entries)
+    elif benchmark_type == "image_edit":
+        # image_edit perf shares the EvalScope output layout; prefer the dedicated
+        # postprocess and fall back to the EvalScope one when the parallel
+        # workstream module is not present yet.
+        try:
+            from xtask.benchmarks.evalscope.image_edit_postprocess import image_edit_perf_post_process
+
+            post_processed_result, benchmark_outputdir = image_edit_perf_post_process(task_config, output_file_path, init_entries)
+        except ImportError:
+            from xtask.benchmarks.evalscope.evalscope_postprocess import evalscope_perf_post_process
+
+            post_processed_result, benchmark_outputdir = evalscope_perf_post_process(task_config, output_file_path, init_entries)
     elif benchmark_type == "vbench":
         from xtask.benchmarks.vbench.vbench_postprocess import vbench_result_post_process
 

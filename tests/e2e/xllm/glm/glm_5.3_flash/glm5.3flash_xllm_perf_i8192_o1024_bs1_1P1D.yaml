@@ -4,7 +4,7 @@
 # 前置条件:
 #   - .75/.121 存在主模型与 CFS draft 模型路径。
 #   - pkg/xllm/vendors/ 需包含 hc_pre_transformer 算子包。
-#   - xllm_test_060 需含 sharegpt 数据集和 torch_npu wheel。
+#   - 依赖包目录(DEPENDENCE_PACKAGE_PATH) 需含 sharegpt 数据集和 torch_npu wheel。
 case_name: glm5.3flash_xllm_perf_i8192_o1024_bs1_1P1D
 engine_type: xllm
 model_path: /export/home/models/GLM-5.3-Flash-W8A8
@@ -43,8 +43,6 @@ deployment:
   sync_workspace: true
   resource_sync:
     enabled: true
-    source: /export/home/models/xllm_test_060
-    target: /export/home/models/xllm_test_060
     max_workers: 4
     timeout: 3600
   master_host: 11.87.191.75

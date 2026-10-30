@@ -77,19 +77,34 @@ def generate_evalscope_script(
         generation_config = (f'{str(accuracy_cfg.get("generation_config", ""))}').replace("'", '"')
         dataset_args =  (f'{str(accuracy_cfg.get("dataset_args", ""))}').replace("'", '"')  
 
+        # evalscope 1.14.0 起 --timeout 已弃用（v2.0.0 将移除），改为并入
+        # --generation-config 的 timeout 字段；--api-url 同样标记弃用但仍可用，
+        # 为保持命令行为等价此处保留。若 generation_config 已含 timeout，
+        # 则以 YAML 显式配置优先，不再注入。
+        try:
+            _gen_cfg = json.loads(generation_config) if generation_config.strip() else {}
+        except json.JSONDecodeError:
+            _gen_cfg = {}
+        if isinstance(_gen_cfg, dict) and _gen_cfg.get("timeout") is None:
+            _gen_cfg["timeout"] = timeout
+            generation_config = json.dumps(_gen_cfg, ensure_ascii=False)
+        elif not isinstance(_gen_cfg, dict):
+            logging.warning("generation_config 不是合法 JSON 字典，跳过注入 timeout")
+
         accuracy_cmd = (
             f'evalscope eval --model {model_name} '
             f'--api-url {api_base}{endpoint} '
             f'--api-key {api_key} '
             f'--eval-type openai_api '
             f'--datasets {dataset_name} '
-            f'--timeout {timeout} '
             f'--eval-batch-size {batch_size} '
             # f'--limit {limit} '
             f'--work-dir {output_file_path_incontainer} '
             f'--generation-config \'{generation_config}\' '
             f'--dataset-args \'{dataset_args}\''
         )
+        # 注: --timeout 在 evalscope 1.14.0 已弃用，timeout 值已并入上面的
+        # --generation-config；--api-url 也标记弃用（v2.0.0 移除）但当前仍支持，暂保留。
 
         limit = accuracy_cfg.get("acc_dataset_len")
         if limit is not None:

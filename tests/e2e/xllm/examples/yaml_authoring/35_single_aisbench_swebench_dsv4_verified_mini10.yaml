@@ -2,7 +2,7 @@ case_name: 35_single_aisbench_swebench_dsv4_verified_mini10
 engine_type: xllm
 model_path: /export/home/models/DeepSeek-V4-Flash-0731-w8a8/
 served_model_name: DeepSeek-V4-Flash-0731-w8a8
-metrics: swebench
+metrics: acc
 dataset_name: swebench
 dataset_path: ''
 dataset_format: json
@@ -16,8 +16,8 @@ progress_conn_port: 8773
 # NPU 侧单机 16 卡启动 DeepSeek V4 Flash，x86 侧运行 mini-swe-agent 与 SWE-bench harness。
 benchmark:
   benchmark_type: aisbench
-  swebench:
-    case_type: swebench
+  acc:
+    case_type: accuracy
     mode: all
     dataset: verified_mini
     # Fast 10-instance subset: exclude previously slow 11885/11964/12039/12209.

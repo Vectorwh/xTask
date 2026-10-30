@@ -24,6 +24,7 @@ from xtask.benchmarks.aisbench.swebench import (
     DEFAULT_SWEBENCH_STEP_LIMIT,
     swebench_agent_container_timeout,
     swebench_config,
+    swebench_config_key,
     swebench_dataset_name,
     swebench_direct_output_enabled,
     swebench_mode,
@@ -162,7 +163,12 @@ def _expand_swebench_home_paths(
     benchmark = expanded.setdefault("benchmark", {})
     if not isinstance(benchmark, Mapping):
         return expanded
-    swebench = benchmark.setdefault("swebench", {})
+    # The SWE block may live under benchmark.acc (new format) or
+    # benchmark.swebench (legacy); expand paths in the key that is live.
+    swe_key = swebench_config_key(expanded)
+    if swe_key is None:
+        return expanded
+    swebench = benchmark.setdefault(swe_key, {})
     if not isinstance(swebench, Mapping):
         return expanded
 
@@ -522,7 +528,9 @@ def execute_aisbench_swe_benchmark(
             )
         if wrappers is not None:
             python_wrapper, bench_wrapper = wrappers
-            swe_config = task_config["benchmark"]["swebench"]
+            # Write into the live SWE block (benchmark.acc new format or
+            # benchmark.swebench legacy format).
+            swe_config = task_config["benchmark"][swebench_config_key(task_config)]
             if "runtime_container" in runner:
                 swe_config["runner"]["python"] = python_wrapper
             else:
@@ -547,7 +555,9 @@ def execute_aisbench_swe_benchmark(
                     execution_time=0.0,
                 )
             if default_dataset_path:
-                task_config["benchmark"]["swebench"]["dataset_path"] = default_dataset_path
+                task_config["benchmark"][swebench_config_key(task_config)][
+                    "dataset_path"
+                ] = default_dataset_path
 
         local_script = os.path.join(output_file_path, output_shell_file)
         generate_aisbench_swe_script(

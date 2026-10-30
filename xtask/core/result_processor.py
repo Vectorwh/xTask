@@ -422,7 +422,7 @@ def verify_result(result, task_config):
         logging.error("✗ Test failed: benchmark command did not complete successfully")
         return False
 
-    if "vbench" in task_config.get("metrics", []):
+    if _is_vbench_case(task_config):
         vbench_result = result.get("benchmark_vbench_result")
         if not isinstance(vbench_result, Mapping):
             logging.error("✗ Test failed: missing VBench result")
@@ -588,8 +588,56 @@ def _contains_metric(task_config, metric_name):
     return metric_name in metrics
 
 
+def _is_vbench_case(task_config):
+    """VBench gate: task gate first (new format), legacy metric as fallback.
+
+    New-format VBench YAML carries ``metrics: acc`` with the config in
+    ``benchmark.vbench`` (``benchmark_type: vbench``), so the metrics list no
+    longer identifies these cases; the legacy ``metrics: vbench`` style is
+    still honoured.
+    """
+    from xtask.benchmarks.vbench.task_gate import is_vbench_task
+
+    return is_vbench_task(task_config) or _contains_metric(task_config, "vbench")
+
+
+def _vbench_baseline_pair(benchmark):
+    """Extract ``(baseline, threshold)`` from a ``benchmark.vbench`` block."""
+    vbench = (benchmark.get("vbench") or {}) if isinstance(benchmark, Mapping) else {}
+    evaluation = vbench.get("evaluation") or {}
+    baseline = evaluation.get("baseline", vbench.get("baseline"))
+    if baseline in (None, ""):
+        return None
+    return baseline, evaluation.get("threshold", vbench.get("threshold", 0.1))
+
+
 def _configured_baseline(task_config):
+    # A SWE-bench task may ship metrics: acc with the SWE config in
+    # benchmark.acc (new format) or metrics: swebench with benchmark.swebench
+    # (legacy). Decide before the generic acc/perf loop, otherwise the acc
+    # branch would read benchmark_acc_result, which SWE runs never produce.
+    from xtask.benchmarks.aisbench.swebench import (
+        is_aisbench_swebench_task,
+        swebench_config,
+    )
+
+    if is_aisbench_swebench_task(task_config):
+        swebench = swebench_config(task_config)
+        baseline = swebench.get("baseline")
+        if baseline not in (None, ""):
+            return "swebench", baseline, swebench.get("threshold", 0.1)
+        return None
     benchmark = task_config.get("benchmark") or {}
+    # A VBench task (benchmark_type: vbench) owns benchmark.vbench regardless
+    # of metrics (new format uses metrics: acc, legacy uses metrics: vbench).
+    # Decide before the generic acc/perf loop: a new-format VBench YAML would
+    # otherwise hit the acc branch with an empty benchmark.acc block and lose
+    # its baseline.
+    if _is_vbench_case(task_config):
+        pair = _vbench_baseline_pair(benchmark)
+        if pair is not None:
+            return ("vbench",) + pair
+        return None
     for metric_name in ("acc", "perf"):
         if not _contains_metric(task_config, metric_name):
             continue
@@ -600,24 +648,14 @@ def _configured_baseline(task_config):
         if baseline:
             return metric_name, baseline, metric_config.get("threshold")
     # A vbench block may be present as metadata in a non-VBench task.  Only
-    # an explicit VBench metric is allowed to select its baseline.
+    # an explicit legacy VBench metric is allowed to select its baseline
+    # here (VBench tasks were already handled above). SWE-bench tasks (both
+    # YAML formats) were also handled above.
     if not _contains_metric(task_config, "vbench"):
-        if not _contains_metric(task_config, "swebench"):
-            return None
-        from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
-
-        if not is_aisbench_swebench_task(task_config):
-            return None
-        swebench = (benchmark.get("swebench") or {}) if isinstance(benchmark, Mapping) else {}
-        baseline = swebench.get("baseline")
-        if baseline not in (None, ""):
-            return "swebench", baseline, swebench.get("threshold", 0.1)
         return None
-    vbench = (benchmark.get("vbench") or {}) if isinstance(benchmark, Mapping) else {}
-    evaluation = vbench.get("evaluation") or {}
-    baseline = evaluation.get("baseline", vbench.get("baseline"))
-    if baseline not in (None, ""):
-        return "vbench", baseline, evaluation.get("threshold", vbench.get("threshold", 0.1))
+    pair = _vbench_baseline_pair(benchmark)
+    if pair is not None:
+        return ("vbench",) + pair
     return None
 
 
@@ -759,6 +797,8 @@ def _baseline_result_failed(result, task_config):
 
 
 def _classify_failure(result, task_config):
+    from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
+
     if result.get("success"):
         return "", ""
 
@@ -792,9 +832,12 @@ def _classify_failure(result, task_config):
             reason = f"{reason}: {benchmark_stderr}" if reason else benchmark_stderr
         return FAILURE_BENCHMARK, reason or "Benchmark command failed"
 
-    if result.get("benchmark_success") is True and _contains_metric(task_config, "swebench"):
-        from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
-
+    if result.get("benchmark_success") is True and (
+        _contains_metric(task_config, "swebench")
+        or is_aisbench_swebench_task(task_config)
+    ):
+        # New-format SWE YAML carries metrics: acc, so the explicit task gate
+        # must run before any _contains_metric fallback (legacy format).
         if is_aisbench_swebench_task(task_config):
             swe_result = result.get("benchmark_swebench_result")
             if isinstance(swe_result, Mapping):
@@ -809,7 +852,7 @@ def _classify_failure(result, task_config):
         return FAILURE_BASELINE, _baseline_failure_reason(result, task_config)
 
     if result.get("benchmark_success") is True:
-        if _contains_metric(task_config, "vbench"):
+        if _is_vbench_case(task_config):
             raw_vbench_result = result.get("benchmark_vbench_result")
             vbench_result = raw_vbench_result if isinstance(raw_vbench_result, Mapping) else {}
             try:
@@ -825,7 +868,11 @@ def _classify_failure(result, task_config):
                     and vbench_result.get("total_score") is None
                 )
             )
-        elif _contains_metric(task_config, "swebench"):
+        elif is_aisbench_swebench_task(task_config) or _contains_metric(
+            task_config, "swebench"
+        ):
+            # New-format SWE YAML carries metrics: acc; the task gate must win
+            # over the _contains_metric fallback used by the legacy format.
             from xtask.benchmarks.aisbench.swebench import swebench_mode
 
             raw_swe_result = result.get("benchmark_swebench_result")
@@ -982,7 +1029,11 @@ def _build_result_row(result, task_config, task_path=None, args=None):
     model_name = resolve_model_name(task_path, task_config)
     success = bool(result.get("success"))
     failure_category, failure_reason = _classify_failure(result, task_config)
-    is_accuracy = _contains_metric(task_config, "acc")
+    # New-format VBench YAML carries metrics: acc, but its Excel columns come
+    # from _result_payload (benchmark_type: vbench), not the accuracy column.
+    is_accuracy = _contains_metric(task_config, "acc") and not _is_vbench_case(
+        task_config
+    )
     benchmark = task_config.get("benchmark") or {}
     execution_host = _resolve_execution_host(task_config, args)
     finished_at = datetime.now(tz=CHINA_STANDARD_TIME).isoformat(timespec="seconds")

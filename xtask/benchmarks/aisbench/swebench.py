@@ -1,8 +1,17 @@
 """Isolated helpers for AISBench SWE-bench tasks.
 
 This module is the only gate used by the scheduler and result processor.
-Existing ``metrics: perf`` / ``metrics: acc`` AISBench YAML must not enter
-the SWE path even if a leftover ``benchmark.swebench`` block is present.
+
+Two YAML shapes are recognised:
+
+- New format (aligned with plain accuracy cases): ``metrics: acc`` plus a
+  SWE-bench-shaped ``benchmark.acc`` block (``mode``/``runner`` fields).
+- Legacy format: ``metrics: swebench`` plus a ``benchmark.swebench`` block.
+
+Existing ``metrics: perf`` AISBench YAML must not enter the SWE path even if
+a leftover ``benchmark.swebench`` block is present, and plain accuracy cases
+(gpqa/gedit: ``benchmark.acc`` with ``dataset_conf``/``api_type`` but no
+``mode``/``runner``) must stay out as well.
 """
 
 from __future__ import annotations
@@ -12,6 +21,8 @@ from typing import Any, Dict, Mapping, Optional
 
 
 SWEBENCH_METRIC = "swebench"
+SWEBENCH_DATASET_NAME = "swebench"
+LEGACY_SWEBENCH_CONFIG_KEY = "swebench"
 DEFAULT_SWEBENCH_TIMEOUT_S = 86400
 DEFAULT_SWEBENCH_DATASET = "verified_mini"
 DEFAULT_SWEBENCH_MODE = "all"
@@ -44,24 +55,64 @@ def _metrics_include_swebench(task_config: Optional[Mapping[str, Any]]) -> bool:
     return False
 
 
-def swebench_config(task_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+def _has_swebench_features(config: Any) -> bool:
+    """True when an aisbench metric block carries SWE-bench runner traits.
+
+    Plain accuracy blocks (gpqa: ``dataset_conf``/``api_type``/``num_prompts``;
+    gedit: ``api_type``/``generation_kwargs``/``judge_endpoint``) carry neither
+    ``mode`` nor ``runner`` and stay out of the SWE path.
+    """
+    if not isinstance(config, Mapping):
+        return False
+    mode = str(config.get("mode") or "").strip().lower()
+    if mode in ALLOWED_SWEBENCH_MODES:
+        return True
+    return isinstance(config.get("runner"), Mapping)
+
+
+def swebench_config_key(task_config: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Return the benchmark key holding the SWE config: 'acc' or 'swebench'.
+
+    ``benchmark.acc`` wins when it carries SWE-bench traits (new format). The
+    legacy ``benchmark.swebench`` key is only honoured for explicit legacy
+    YAML (``metrics: swebench`` or root ``dataset_name: swebench``) so perf
+    YAML with a leftover ``benchmark.swebench`` block stays out.
+    """
     if not isinstance(task_config, Mapping):
-        return {}
+        return None
     benchmark = task_config.get("benchmark") or {}
     if not isinstance(benchmark, Mapping):
+        return None
+    if _has_swebench_features(benchmark.get("acc")):
+        return "acc"
+    legacy = benchmark.get(LEGACY_SWEBENCH_CONFIG_KEY)
+    if isinstance(legacy, Mapping) and (
+        _metrics_include_swebench(task_config)
+        or str(task_config.get("dataset_name") or "").strip().lower()
+        == SWEBENCH_DATASET_NAME
+    ):
+        return LEGACY_SWEBENCH_CONFIG_KEY
+    return None
+
+
+def swebench_config(task_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Read the effective SWE block: ``benchmark.acc`` (new) or ``benchmark.swebench``."""
+    key = swebench_config_key(task_config)
+    if key is None:
         return {}
-    config = benchmark.get("swebench") or {}
+    benchmark = (task_config or {}).get("benchmark") or {}
+    config = benchmark.get(key) or {}
     return dict(config) if isinstance(config, Mapping) else {}
 
 
 def is_aisbench_swebench_task(task_config: Optional[Mapping[str, Any]]) -> bool:
     """Return True only for explicit AISBench SWE-bench YAML.
 
-    All three must hold: ``metrics: swebench``, ``benchmark_type: aisbench``,
-    and a mapping ``benchmark.swebench``. Perf/acc/vbench cases stay out.
+    Both formats require ``benchmark.benchmark_type: aisbench`` plus a
+    SWE-bench config block: the new ``benchmark.acc`` (with ``mode``/``runner``;
+    ``metrics`` is ``acc``) or the legacy ``benchmark.swebench``. Perf/acc/
+    vbench cases stay out.
     """
-    if not _metrics_include_swebench(task_config):
-        return False
     if not isinstance(task_config, Mapping):
         return False
     benchmark = task_config.get("benchmark") or {}
@@ -69,7 +120,8 @@ def is_aisbench_swebench_task(task_config: Optional[Mapping[str, Any]]) -> bool:
         return False
     if str(benchmark.get("benchmark_type", "")).lower() != "aisbench":
         return False
-    return isinstance(benchmark.get("swebench"), Mapping)
+    return bool(swebench_config(task_config))
+
 
 
 def swebench_mode(task_config: Optional[Mapping[str, Any]]) -> str:
@@ -161,8 +213,9 @@ def swebench_dataset_name(task_config: Optional[Mapping[str, Any]]) -> str:
 def validate_aisbench_swebench_task(task_config: Mapping[str, Any]) -> None:
     if not is_aisbench_swebench_task(task_config):
         raise ValueError(
-            "AISBench SWE-bench requires metrics: swebench, "
-            "benchmark.benchmark_type: aisbench, and benchmark.swebench"
+            "AISBench SWE-bench requires benchmark.benchmark_type: aisbench and "
+            "a SWE-bench block at benchmark.acc (new format, with mode/runner) "
+            "or benchmark.swebench (legacy format, with metrics: swebench)"
         )
     config = swebench_config(task_config)
     mode = str(config.get("mode") or DEFAULT_SWEBENCH_MODE).lower()

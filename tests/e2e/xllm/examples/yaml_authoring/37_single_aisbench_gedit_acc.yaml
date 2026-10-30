@@ -1,0 +1,128 @@
+# Qwen-Image-Edit 图片编辑精度测试（AISBench gedit，LMM-as-Judge 打分）。
+#
+# 前置条件（运行前逐项检查）：
+# 1. GEdit-Bench 数据集（datasets load_from_disk 格式）需提前放置；
+#    未显式指定 benchmark.acc.dataset_path 时默认
+#    <DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/GEdit-Bench
+#    （显式写 benchmark.acc.dataset_path 可覆盖）。
+# 2. dataset_conf: gedit_gen_0_shot_llmjudge 由
+#    xtask/benchmarks/aisbench/generate_aisbench_script.py 的
+#    find_aisbench_dataset_config 按文件名 rglob 查找，配置已存在于
+#    AISBench 部署目录 configs/datasets/gedit/，无需新增映射。
+# 3. 被测模型 api_type: gedit_image_edit（xtask 内置
+#    xtask/benchmarks/aisbench/configs/models/gedit_image_edit.py + 包装类
+#    xtask/benchmarks/aisbench/gedit_image_edit_api.py）：走两段式协议
+#    （先 Text Encoder /v1/embeddings 拿 pos/neg embedding，再 DiT
+#    /v1/image/generation 出图），encoder 地址经环境变量
+#    GEDIT_ENCODER_URL（默认 http://127.0.0.1:18007）。
+# 4. LMM judge：gedit 配置内置 VLLMCustomAPIChat（OpenAI 兼容多模态文本
+#    模型，需能读图）。judge 端点由 acc.judge_endpoint 指定（生成器会把
+#    judge_model 的 host_ip/host_port AST 替换为该端点）。
+# 5. 自服务模式（deployment.dit/encoder/judge，与 deployment.benchmark
+#    等同级）：调度器自动拉起 DiT（6 卡，起始端口 19000）+ Text Encoder
+#    （单卡 18007）+ LLM judge（Qwen2.5-VL-7B-Instruct 单卡 18008，NPU12）
+#    三个服务容器，全链路评测后自动收容器。judge 启动参数沿用
+#    tmp/gedit_svc/run_judge.sh 已验证的单卡 TP=1 配置（TP=2 双进程会在
+#    warmup SIGSEGV，单卡权重+KV 约 50GB/64GB 放得下）。
+#    容器挂载（hccn.conf/driver/add-ons/npu-smi/vendors）由
+#    xtask/core/gedit_service.py 自动注入。
+# 6. baseline 为 SC/PQ 两维 LLM 打分的综合分（0-10），正式回归前替换实测值。
+case_name: 37_single_aisbench_gedit_acc
+engine_type: xllm
+model_path: /export/home/models/Qwen-Image-Edit-2509
+served_model_name: Qwen-Image-Edit-2509
+metrics: acc
+dataset_name: gedit
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 30
+
+deployment:
+  dit:
+    device_ids: [0, 1, 2, 3, 4, 5]
+    # 每卡一个 xLLM 进程；端口按 rank 从 19000 连续自增（19000-19005），
+    # 与 encoder 的 18007 互不冲突，无需逐卡列举。
+    port: 19000
+    master_node_addr: 127.0.0.1:19757
+    health_path: /health
+    hccl_if_port: 43432
+    # DiT 6 卡加载较慢，给足就绪时间（默认 900s）
+    readiness_timeout: 1800
+    serving_extensiable_param:
+      model_id: Qwen-Image-Edit-2509
+      backend: dit
+      dit_cache_policy: None
+      dit_cache_warmup_steps: 0
+      cfg_size: 2
+      sp_size: 3
+      enable_prefix_cache: false
+      enable_chunked_prefill: false
+      enable_schedule_overlap: false
+      enable_shm: true
+      use_contiguous_input_buffer: false
+      max_memory_utilization: 0.6
+  encoder:
+    device_ids: [7]
+    port: 18007
+    master_node_addr: 127.0.0.1:29798
+    health_path: /health
+    # 启动环境与手工脚本一致（hccl_if_port 独立避开 DiT 的 43432）
+    hccl_if_port: 43438
+    serving_extensiable_param:
+      max_memory_utilization: 0.86
+      max_tokens_per_batch: 40000
+      max_seqs_per_batch: 256
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      enable_schedule_overlap: false
+      enable_shm: true
+      enable_return_mm_full_embeddings: 1
+      task: embed
+  judge:
+    # LLM judge：Qwen2.5-VL-7B-Instruct 单卡（TP=1）@ NPU12 / 18008。
+    # judge 为文本生成型模型，与 encoder 共享默认启动环境即可。
+    device_ids: [12]
+    port: 18008
+    master_node_addr: 127.0.0.1:29810
+    health_path: /health
+    model_path: /export/home/models/Qwen2.5-VL-7B-Instruct
+    # HCCL 基础端口必须避开 DiT 43432/encoder 43438 的端口段：
+    # 43442 会落进 DiT HCCL 端口区间（sp=3 多 rank 需要连续端口），
+    # 曾导致 DiT 首次 allreduce 时 aicpu 异常（ERR02005/acl 507018）；
+    # 沿用已验证手工容器的 43500。
+    hccl_if_port: 43500
+    serving_extensiable_param:
+      model_id: Qwen2.5-VL-7B-Instruct
+      max_memory_utilization: 0.90
+      max_seqs_per_batch: 16
+      max_body_size: 536870912
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      enable_schedule_overlap: false
+
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: gedit_image_edit
+    dataset_conf: gedit_gen_0_shot_llmjudge
+    # 数据集默认 <DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/
+    # GEdit-Bench（load_from_disk 格式）；显式写 benchmark.acc.dataset_path
+    # 可覆盖。
+    # 调试样例只评测前 20 条（GEdit-Bench 全量 1212）；删除该字段即可全量评测。
+    num_prompts: 20
+    batch_size: 1
+    output_len: 512
+    request_rate: 0
+    # LLM-judge 端点（OpenAI 兼容多模态；AST 替换进 gedit judge 配置）。
+    # 留空则由调度器按 deployment.judge 注入 127.0.0.1:18008。
+    judge_endpoint: 127.0.0.1:18008
+    # gedit 为 LLM judge 打分（0-10）；baseline 为 SC/PQ 两维综合分（算术平均）。
+    # 实测（20261027_113707，20 条采样）：SC=0.70，PQ=7.15，综合分 3.925。
+    baseline: 3.925
+    threshold: 0.20
+    generation_kwargs:
+      temperature: 0.01
+      ignore_eos: false

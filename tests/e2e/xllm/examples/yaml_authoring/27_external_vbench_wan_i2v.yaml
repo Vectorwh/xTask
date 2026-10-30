@@ -2,7 +2,7 @@ case_name: 27_external_vbench_wan_i2v
 engine_type: xllm
 external_service: true
 served_model_name: wan2_2
-metrics: vbench
+metrics: acc
 dataset_name: vbench_i2v
 dataset_format: json
 userid: 1048

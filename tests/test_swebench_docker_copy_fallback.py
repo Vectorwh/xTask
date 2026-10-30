@@ -227,8 +227,8 @@ class CopyFallbackTests(unittest.TestCase):
 
     def test_script_shim_is_only_generated_for_opted_in_swe(self):
         cfg = {
-            "case_name": "swe_case", "metrics": "swebench", "served_model_name": "model",
-            "benchmark": {"benchmark_type": "aisbench", "swebench": {
+            "case_name": "swe_case", "metrics": "acc", "served_model_name": "model",
+            "benchmark": {"benchmark_type": "aisbench", "acc": {
                 "runner": {"host": "10.1.2.3", "docker_copy_fallback": True},
             }},
         }
@@ -240,31 +240,31 @@ class CopyFallbackTests(unittest.TestCase):
             self.assertIn("XTASK_SWEBENCH_DOCKER_COPY_FALLBACK=1", shell)
             self.assertNotIn("XTASK_SWEBENCH_DOCKER_RUN_RETRY=1", shell)
             self.assertIn("PYTHONDONTWRITEBYTECODE=1", shell)
-            cfg["benchmark"]["swebench"]["runner"]["docker_run_retry"] = True
+            cfg["benchmark"]["acc"]["runner"]["docker_run_retry"] = True
             generate_aisbench_swe_script(cfg, tmp)
             self.assertIn("XTASK_SWEBENCH_DOCKER_RUN_RETRY=1", Path(tmp, "run_aisbench_swe.sh").read_text())
-            cfg["benchmark"]["swebench"]["runner"]["clean_infer_container"] = True
+            cfg["benchmark"]["acc"]["runner"]["clean_infer_container"] = True
             generate_aisbench_swe_script(cfg, tmp)
             self.assertIn("XTASK_SWEBENCH_CLEAN_INFER_CONTAINER=1", Path(tmp, "run_aisbench_swe.sh").read_text())
-            cfg["benchmark"]["swebench"]["runner"].pop("clean_infer_container")
-            cfg["benchmark"]["swebench"]["runner"].pop("docker_run_retry")
-            cfg["benchmark"]["swebench"]["runner"]["github_raw_retry"] = True
+            cfg["benchmark"]["acc"]["runner"].pop("clean_infer_container")
+            cfg["benchmark"]["acc"]["runner"].pop("docker_run_retry")
+            cfg["benchmark"]["acc"]["runner"]["github_raw_retry"] = True
             generate_aisbench_swe_script(cfg, tmp)
             self.assertIn("XTASK_SWEBENCH_GITHUB_RAW_RETRY=1", Path(tmp, "run_aisbench_swe.sh").read_text())
             subprocess.run(["bash", "-n", str(Path(tmp, "run_aisbench_swe.sh"))], check=True)
-            cfg["benchmark"]["swebench"]["runner"].pop("docker_copy_fallback")
+            cfg["benchmark"]["acc"]["runner"].pop("docker_copy_fallback")
             with tempfile.TemporaryDirectory() as only_network:
                 generate_aisbench_swe_script(cfg, only_network)
                 self.assertTrue(Path(only_network, ".xtask_swe_copy_fallback/sitecustomize.py").is_file())
-            cfg["benchmark"]["swebench"]["runner"].pop("github_raw_retry")
+            cfg["benchmark"]["acc"]["runner"].pop("github_raw_retry")
             with tempfile.TemporaryDirectory() as other:
                 generate_aisbench_swe_script(cfg, other)
                 self.assertFalse(Path(other, ".xtask_swe_copy_fallback").exists())
-            cfg["benchmark"]["swebench"]["runner"]["github_raw_retry"] = "true"
+            cfg["benchmark"]["acc"]["runner"]["github_raw_retry"] = "true"
             with self.assertRaisesRegex(ValueError, "must be a boolean"):
                 generate_aisbench_swe_script(cfg, tmp)
-            cfg["benchmark"]["swebench"]["runner"].pop("github_raw_retry")
-            cfg["benchmark"]["swebench"]["runner"]["docker_copy_fallback"] = "true"
+            cfg["benchmark"]["acc"]["runner"].pop("github_raw_retry")
+            cfg["benchmark"]["acc"]["runner"]["docker_copy_fallback"] = "true"
             with self.assertRaisesRegex(ValueError, "must be a boolean"):
                 generate_aisbench_swe_script(cfg, tmp)
 

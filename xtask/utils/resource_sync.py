@@ -20,7 +20,8 @@ from xtask.utils.config_parser import get_xtask_config_data
 DEFAULT_RESOURCE_ROOT = "/export/home/models/xllm_test_060"
 CONTAINER_RESOURCE_ROOT = "/xllm_test_060"
 NUMACTL_RPM = "numactl-2.0.16-9.vo2203sp4.aarch64.rpm"
-EVALSCOPE_WHEEL = "evalscope-1.5.0-py3-none-any.whl"
+EVALSCOPE_OFFLINE_DIR = "evalscope_offline"
+EVALSCOPE_MAIN_WHEEL = "evalscope-1.14.0-py3-none-any.whl"
 TORCH_NPU_WHEEL = "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl"
 
 
@@ -116,9 +117,12 @@ def _aisbench_component() -> ResourceComponent:
 
 def _evalscope_component() -> ResourceComponent:
     return ResourceComponent(
-        "evalscope-wheel",
-        EVALSCOPE_WHEEL,
-        (EVALSCOPE_WHEEL,),
+        "evalscope-offline",
+        EVALSCOPE_OFFLINE_DIR,
+        (
+            EVALSCOPE_OFFLINE_DIR,
+            f"{EVALSCOPE_OFFLINE_DIR}/{EVALSCOPE_MAIN_WHEEL}",
+        ),
     )
 
 
@@ -249,6 +253,9 @@ def build_host_requirements(
                 _path_component(root, "benchmark/ais_bench/datasets/textvqa"),
             )
     elif benchmark_type == "evalscope":
+        _append_component(runner_components, _evalscope_component())
+    elif benchmark_type == "image_edit":
+        # image_edit installs from the same evalscope_offline wheel closure.
         _append_component(runner_components, _evalscope_component())
 
     for relative_path in _referenced_resource_paths(task_config, root):

@@ -14,8 +14,9 @@ export NO_PROXY="${no_proxy}"
 # 源码包与 binary cache 共用 prepare_xllm.sh 挂载的 /root/.cache/vcpkg
 # （宿主机 /export/home/npu_vcpkg_cache_abi_1）。vcpkg 读 VCPKG_DOWNLOADS，
 # 跨次 docker run 复用 distfile，不必每次再下 x264 等 tarball。
+# 目录初始化延后到真正使用缓存的地方（prefetch/编译段），避免脚本前置段
+# 在非 root 环境（如单测截取前缀跑）因 /root 不可写而提前退出。
 export VCPKG_DOWNLOADS="${VCPKG_DOWNLOADS:-/root/.cache/vcpkg/downloads}"
-mkdir -p "${VCPKG_DOWNLOADS}"
 
 # 工作根目录：由外层 prepare_xllm.sh 通过 -e WORK_ROOT 传入（/export/home 已挂载，路径一致）
 if [[ -z "${WORK_ROOT:-}" ]]; then
@@ -84,8 +85,16 @@ cd "${XLLM_DIR}"
 # 用通配符一次性覆盖主仓库与所有（含嵌套）子模块目录，避免逐个枚举遗漏。
 git config --global --add safe.directory '*'
 
+# vcpkg distfile 缓存目录初始化（容器 root 环境下 /root/.cache 可写）。
+# 非 root 环境（单测截取前缀跑）缓存不可写时跳过并告警，编译仍走 vcpkg 源内缓存回退。
+if ! mkdir -p "${VCPKG_DOWNLOADS}" 2>/dev/null && [[ ! -d "${VCPKG_DOWNLOADS}" ]]; then
+  echo "WARN: vcpkg distfile cache not writable: ${VCPKG_DOWNLOADS}; downloads will not be cached." >&2
+fi
+
 # vcpkg 默认拉 github.com/.../archive/...tar.gz，经 bamboo 代理常 503，容器内直连 GitHub 亦不可用。
 # codeload.github.com 经代理可下；预置 distfile 后 vcpkg 会跳过下载。
+# 单测截取脚本前缀在非 root 环境跑：缓存不可写时跳过 prefetch（打 WARN），
+# 不影响编译主流程——vcpkg 找不到缓存时自行回退到源内 downloads。
 prefetch_vcpkg_distfile_via_codeload() {
   local org_repo="$1" git_ref="$2" distfile_name="$3"
   local downloads_dir="${VCPKG_DOWNLOADS:-/vcpkg-src/downloads}"
@@ -94,7 +103,10 @@ prefetch_vcpkg_distfile_via_codeload() {
     echo "[vcpkg-prefetch] already present: ${distfile_name}"
     return 0
   fi
-  mkdir -p "${downloads_dir}"
+  if ! mkdir -p "${downloads_dir}" 2>/dev/null; then
+    echo "WARN: vcpkg distfile cache not writable: ${downloads_dir}; skip prefetch ${distfile_name}." >&2
+    return 0
+  fi
   local url="https://codeload.github.com/${org_repo}/tar.gz/${git_ref}"
   echo "[vcpkg-prefetch] ${distfile_name} <- ${url}"
   curl --fail -L --connect-timeout 60 --max-time 900 \

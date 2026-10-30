@@ -46,8 +46,6 @@ deployment:
   sync_workspace: true
   resource_sync:
     enabled: true
-    source: /export/home/models/xllm_test_060
-    target: /export/home/models/xllm_test_060
     max_workers: 4
     timeout: 3600
   pd_control:
