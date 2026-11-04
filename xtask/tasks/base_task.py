@@ -115,6 +115,8 @@ class TaskConfig:
         acc_dataset_len=0
     ))
     
+    asr: Dict[str, Any] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'TaskConfig':
         """从字典创建配置"""
@@ -124,12 +126,13 @@ class TaskConfig:
         # 提取基础配置
         config_data = {}
         for field_name in cls.__dataclass_fields__:
-            if field_name not in ['perf', 'acc']:
+            if field_name not in ['perf', 'acc', 'asr']:
                 config_data[field_name] = data.get(field_name)
         
         # 处理benchmark部分
         benchmark_data = data.get('benchmark', {})
         config_data['benchmark_type'] = benchmark_data.get('benchmark_type', "vllm_ascend_bencmark")
+        config_data['asr'] = benchmark_data.get('asr', {})
         
         # 创建配置实例
         config = cls(**config_data)
@@ -282,6 +285,9 @@ class TaskConfig:
             'acc': data.pop('acc')
         }
         
+        asr = data.pop('asr', {})
+        if benchmark_data['benchmark_type'] == 'asr':
+            benchmark_data['asr'] = asr
         # 添加剩余的基础配置
         result.update(data)
         result['benchmark'] = benchmark_data

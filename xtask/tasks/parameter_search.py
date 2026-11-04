@@ -59,6 +59,19 @@ class SearchCandidate:
     combination_key: str
 
 
+def search_config_for_task(task_config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Use an ASR-native objective; keep LLM search configuration unchanged."""
+    from xtask.benchmarks.asr.config import is_asr_task
+
+    configured = task_config.get("assess_search")
+    if configured is not None and not isinstance(configured, dict):
+        raise TypeError("assess_search must be a mapping")
+    raw = copy.deepcopy(configured or {})
+    if is_asr_task(task_config) and not raw.get("objective"):
+        raw["objective"] = {"metric": "audio_throughput", "direction": "maximize"}
+    return normalize_assess_search_config(raw)
+
+
 def normalize_assess_search_config(raw_config: Any) -> Dict[str, Any]:
     """Validate ``assess_search`` while preserving exhaustive compatibility."""
     if raw_config is None:
@@ -204,7 +217,7 @@ def load_search_case(case_name: str) -> SearchCase:
     if not parameter_space:
         raise ValueError(f"case {case_name} has no assess_test_param values")
     topologies = normalize_assess_topologies(base_config, parameter_space)
-    search_config = normalize_assess_search_config(base_config.get("assess_search"))
+    search_config = search_config_for_task(base_config)
     return SearchCase(
         case_name=case_name,
         base_config=base_config,
@@ -568,9 +581,20 @@ def run_tpe_parameter_search(args, openme_client, run_trial, output_root=None):
 def build_search_observation(
     result: Dict[str, Any], search_config: Dict[str, Any]
 ) -> Dict[str, Any]:
-    perf_result = result.get("benchmark_perf_result")
-    summary = getattr(perf_result, "summary", None)
-    if summary is None:
+    from xtask.benchmarks.asr.config import is_asr_task
+    from xtask.benchmarks.asr.reporting import search_metrics
+
+    if is_asr_task(result.get("task_config") or {}):
+        metrics = search_metrics(result)
+        if result.get("success") is not True:
+            return {"status": "failed", "metrics": metrics, "feasible": False,
+                    "objective_value": None, "score": None,
+                    "error": result.get("message") or "ASR trial failed completeness/quality/archive gates"}
+    else:
+        perf_result = result.get("benchmark_perf_result")
+        summary = getattr(perf_result, "summary", None)
+        metrics = _numeric_summary(summary) if summary is not None else {}
+    if not metrics:
         return {
             "status": "failed",
             "metrics": {},
@@ -580,7 +604,6 @@ def build_search_observation(
             "error": result.get("message", "missing benchmark performance summary"),
         }
 
-    metrics = _numeric_summary(summary)
     objective = search_config["objective"]
     objective_value = metrics.get(objective["metric"])
     if objective_value is None:

@@ -1,0 +1,61 @@
+# Real-service example: run all 1162 samples against the supplied ASR endpoint.
+# Validated 2026-11-03: 1162/1162, 0 failures, legacy error 4.034%, P99 400.76ms.
+# Evidence: docs/asr_real_service_validation_20261103.md; not a cold-cache baseline.
+# The model server is external; xTask never starts/kills/reconfigures it.
+# Supplied PDF reports Ascend NPU TP2+CTC+Suffix. SSH is unavailable, so the
+# hardware, server revision and TP topology are NOT independently verified.
+case_name: 40_external_joyai_asr_legacy_acc_perf
+engine_type: xllm
+external_service:
+  enabled: true
+  endpoint: http://11.87.191.101:8018
+  health_path: /health
+served_model_name: JoyaiASR
+metrics: acc,perf
+dataset_name: ta3_test0925_quiet
+dataset_format: jsonl
+userid: 1003
+benchmark:
+  benchmark_type: asr
+  asr:
+    backend: legacy_infer
+    # Archives default to <xTask>/asr_doc/{infer,data}.zip.
+    dataset_name: ta3_test0925_quiet
+    expected_samples: 1162
+    limit: 0
+    api: audio
+    concurrency: [2]
+    repeats: 1
+    use_context: true
+    stream: true
+    timeout: 300
+    max_audio_seconds: 30
+    scoring_profile: joyai_legacy
+    cache_condition: service_lifetime
+    warmup:
+      synthetic_requests: 3
+      api: audio
+      exclude_first: 0
+    generation:
+      temperature: 0
+      repetition_penalty: 1.05
+      language: zh
+    # Quality guard only; 5% is a provisional ceiling, not a measured new
+    # baseline. External/network performance is recorded without a gate.
+    gates:
+      - metric: error_rate_pct
+        compare: lte
+        baseline: 5.0
+      - metric: failed_requests
+        compare: lte
+        baseline: 0
+    provenance:
+      deployment_source: asr_doc/JoyaiASR模型xllm性能复现文档.pdf
+      reported_hardware: Ascend NPU
+      reported_tp_size: 2
+      reported_ctc: true
+      reported_speculative_algorithm: Suffix
+      deployment_independently_verified: false
+      server_commit: unknown
+      measurement_location: client 11.87.191.75 -> server 11.87.191.101
+      cache_note: External service already running; not a cold-cache measurement.

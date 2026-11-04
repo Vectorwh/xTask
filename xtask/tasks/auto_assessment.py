@@ -30,6 +30,57 @@ def _insert_tasks_after_current(keys_to_process, current_task_key, new_tasks):
     keys_to_process[insert_at:insert_at] = new_keys
 
 
+def _process_asr_assessment(
+    args, result, config_para, thresholds, tasks, keys, xtask_config,
+    current_task_key, output_path,
+):
+    from xtask.benchmarks.asr.reporting import auto_assess_settings, search_metrics
+
+    try:
+        settings = auto_assess_settings(result["task_config"])
+    except ValueError as exc:
+        thresholds["stop_reason"] = "invalid_asr_auto_assess_config"
+        logging.error("%s", exc)
+        return "break"
+    if result.get("success") is not True:
+        thresholds["stop_reason"] = "asr_trial_failed"
+        return "break"
+    actual = search_metrics(result).get(settings["metric"])
+    if actual is None:
+        thresholds["stop_reason"] = "missing_asr_latency_metric"
+        return "break"
+    if not config_para:
+        thresholds.update(lower=settings["low"], upper=settings["high"])
+    current = settings["concurrency"]
+    thresholds["curr"] = current
+    if actual <= settings["max"]:
+        thresholds["lower"] = current
+    else:
+        thresholds["upper"] = current
+    if thresholds["upper"] - thresholds["lower"] <= 1:
+        thresholds["stop_reason"] = "asr_interval_converged"
+        return "break"
+    next_batch = (thresholds["lower"] + thresholds["upper"]) // 2
+    thresholds["curr"] = next_batch
+    config_para["batch_size"] = next_batch
+    if current_task_key and output_path:
+        new_tasks = {}
+        generated = gen_group_autoassess_task(
+            _auto_assess_base_case(result, current_task_key),
+            str(Path(output_path).parent), new_tasks, config_para,
+        )
+        if not generated:
+            new_tasks = {}
+    else:
+        new_tasks = get_tasks(args, xtask_config, config_para)
+    if not new_tasks:
+        thresholds["stop_reason"] = "task_generation_failed"
+        return "break"
+    tasks.update(new_tasks)
+    _insert_tasks_after_current(keys, current_task_key, new_tasks)
+    return None
+
+
 def process_auto_assessment(
     args,
     result,
@@ -59,6 +110,13 @@ def process_auto_assessment(
         )
         auto_assess_threshold["stop_reason"] = "scheduler_error"
         return "break"
+
+    from xtask.benchmarks.asr.config import is_asr_task
+    if is_asr_task(result.get("task_config") or {}):
+        return _process_asr_assessment(
+            args, result, config_para, auto_assess_threshold, tasks, keys_to_process,
+            xtask_config, current_task_key, output_path,
+        )
 
     perf_config = result["task_config"].get("benchmark", {}).get("perf")
     if not perf_config:

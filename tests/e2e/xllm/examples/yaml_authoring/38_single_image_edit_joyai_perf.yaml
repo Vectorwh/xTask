@@ -1,0 +1,139 @@
+# JoyAI-Image-Edit-Plus 图片编辑性能测试（benchmark_type: image_edit）。
+#
+# 结构对齐 36 号（Qwen-Image-Edit-2509 perf）用例，模型族协议差异：
+#   - 两段式 skip tokens：JoyAI 取 34（xllm pipeline_joyimage_edit_plus.h
+#     kPromptEmbeddingStartIndex = 34；Qwen 为 64），插件按 served_model_name
+#     含 joyai-image-edit / joyimageeditplus 等图片编辑族专有标记自动检测
+#     （xtask/plugins/evalscope/gedit_api.py）；
+#   - DiT 参考图走 input.media_sources 多图（Qwen 走 input.image 单图）；
+#   - 出图分辨率：数据集行不带 size 时按 DEFAULT_GEN_PARAMS 缺省
+#     1328*1328 传 parameters.size（实测不给 size 走 bucket 会退化
+#     512*512，见 gedit_image_edit_api.py 注释）。
+#
+# DiT 并行约束与 36 号不同：JoyAI MMDiT 32 头（Qwen 24 头），sp_size 必须
+# 整除 32（transformer_joyimage_edit_plus.h CHECK_EQ(num_heads_ % sp_size,
+# 0)），且 world = cfg*tp*sp*dp（dit_mapping.cpp validate）。
+# 32 头不能被 3 整除 -> 36 号的 6 卡 sp3*cfg2 不适用；本用例取
+# NPU 0-3 四卡 sp2*cfg2（32 % 2 == 0，4 = 2 * 1 * 2 * 1）。
+#   - Encoder: 单卡 NPU7、端口 18007、task=embed、独立 master 29798
+#   - DiT: 4 卡 NPU0-3、sp2*cfg2、master 19757、起始端口 19000
+#     （按 rank 连续自增 → 19000-19003，与 encoder 18007 互不冲突）。
+# HCCL 端口：DiT 43432 / Encoder 43438（与 36 号一致，间隔 ≥60）。
+#
+# 指标语义（gedit 插件重定义 token 槽位，与 36 号相同）：
+#   - Avg Input Tokens  = 平均输入图片张数
+#   - Avg Output Tokens = 平均每次请求产出兆像素（MPx）
+#   - Output Throughput (tok/s) = MPx/s（产出兆像素每秒）
+#
+# 生成参数：JoyAI-Image-Edit-Plus 官方推荐 num_inference_steps 30 /
+# guidance_scale 4.0（README Recommended Parameters），但 gedit_perf.jsonl
+# 每行都带 num_inference_steps=50 / guidance_scale=3.5，插件取数据集行优先，
+# 故实测与 baseline 对应的有效参数是 50 步 / guidance 3.5。
+# baseline: 0.0350（三次实测均值）；threshold 按 36 号惯例给 0.10（相对容差）。
+case_name: 38_single_image_edit_joyai_perf
+engine_type: xllm
+model_path: /export/home/models/JoyAI-Image-Edit-Plus
+served_model_name: JoyAI-Image-Edit-Plus
+metrics: perf
+dataset_name: gedit
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 30
+
+deployment:
+  encoder:
+    device_ids: [7]
+    port: 18007
+    master_node_addr: 127.0.0.1:29798
+    health_path: /health
+    # 启动环境与手工脚本一致（hccl_if_port 独立避开 DiT 的 43432）
+    hccl_if_port: 43438
+    serving_extensiable_param:
+      max_memory_utilization: 0.86
+      max_tokens_per_batch: 40000
+      max_seqs_per_batch: 256
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      enable_schedule_overlap: false
+      enable_shm: true
+      enable_return_mm_full_embeddings: 1
+      task: embed
+      # Qwen3-VL ATB 实现（qwen3_vl_atb）在 embed 模式 eager warmup 时
+      # TBE 子进程崩溃（kv cache 初始化后主进程消失）；TORCH 实现
+      #（models/vlm/qwen3_vl.h + models/llm/qwen3.h）forward 输出
+      # hidden_states + pre-norm residual，与 JoyAI skip-34 协议对齐。
+      npu_kernel_backend: TORCH
+  dit:
+    # JoyAI MMDiT 32 头：sp_size 须整除 32，6 卡 sp3*cfg2（36 号）不适用
+    # （32 % 3 != 0）；取 4 卡 sp2*cfg2（world = 2*2*1*1 = 4）。
+    device_ids: [0, 1, 2, 3]
+    # DiT 解耦视图目录：symlink 全部组件 + model_index.json 中 text_encoder
+    # 分量置 null（dit_model_loader.cpp:602 "Skipping null component"）。
+    # DiT 不加载 17G 进程内 text_encoder：解耦模式（prompt_embed
+    # tensor_sources, pipeline:328-339）不执行进程内编码路径，跳过加载
+    # 不影响 forward；has_component(:105) 为假时也不再强制 TORCH backend。
+    # 与 39 号保持同一部署形态（该形态已实机验证 perf/acc 双通过）。
+    model_path: /export/home/models/JoyAI-Image-Edit-Plus-dit
+    # 每卡一个 xLLM 进程；端口按 rank 从 19000 连续自增（19000-19003），
+    # 与 encoder 的 18007 互不冲突，无需逐卡列举。
+    port: 19000
+    master_node_addr: 127.0.0.1:19757
+    health_path: /health
+    hccl_if_port: 43432
+    # DiT 4 卡加载较慢，给足就绪时间（默认 900s）
+    readiness_timeout: 1800
+    serving_extensiable_param:
+      model_id: JoyAI-Image-Edit-Plus
+      backend: dit
+      dit_cache_policy: None
+      dit_cache_warmup_steps: 0
+      cfg_size: 2
+      sp_size: 2
+      # npu_kernel_backend=TORCH：text_encoder 分量已置 null（解耦视图
+      # 目录），构造期 CHECK(:108) 不触发；主干 attention 为
+      # npu_fusion_attention 原生算子，TORCH 仅影响 kernel dispatch，
+      # 与首次实跑（原目录 + TORCH）保持一致。
+      npu_kernel_backend: TORCH
+      # 通信组拓扑与首次成功跑一致（text_encoder_tp 组照常创建，
+      # dit_collective_communicator.cpp:95 无条件建组，与是否加载权重无关）。
+      text_encoder_tp_size: 4
+      enable_prefix_cache: false
+      enable_chunked_prefill: false
+      enable_schedule_overlap: false
+      enable_shm: true
+      use_contiguous_input_buffer: false
+      max_memory_utilization: 0.6
+
+benchmark:
+  benchmark_type: image_edit
+  perf:
+    case_type: performance
+    # 数据集 jsonl（由 tools/convert_gedit_to_perf.py 生成）。
+    # 默认路径 <DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/
+    # gedit_perf/gedit_perf.jsonl；显式写 benchmark.perf.dataset_path 可覆盖。
+    num_prompts: 20
+    batch_size: 1
+    request_rate: -1
+    warmup_num: 2
+    seed: 42
+    # 单请求超时（秒）：出图较慢，给足余量
+    timeout: 3600
+    # 以下为请求体级参数，经 --extra-args 透传；数据集行内有同名字段时以行为准
+    size: "1328*1328"
+    # JoyAI 官方推荐 30 步 / guidance 4.0，仅作缺省占位：gedit_perf.jsonl
+    # 每行都带 num_inference_steps=50 / guidance_scale=3.5（及
+    # size=1328*1328），插件取数据集行优先，实际生效值为
+    # steps=50 / guidance=3.5——下方 baseline 即对应这组实际参数。
+    num_inference_steps: 30
+    guidance_scale: 4.0
+    # 两段式协议的 Text Encoder 地址（DiT 端点自动取 deployment.dit）。
+    # 留空则由调度器按 deployment.encoder 注入 http://127.0.0.1:18007。
+    encoder_url: http://127.0.0.1:18007
+    # 量纲为 MPx/s；三次实机运行（20261102-03，20 条 gedit_perf 1328*1328
+    # 50 步 guidance3.5，NPU0-3 sp2*cfg2 + NPU7；run3 用 -dit 解耦目录）
+    # 实测 0.0353 / 0.0349 / 0.0348，最大波动 1.4%，回填均值。
+    # threshold 按 36 号惯例（相对容差 0.10）。
+    baseline: 0.0350
+    threshold: 0.10

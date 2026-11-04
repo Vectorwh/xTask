@@ -365,6 +365,10 @@ def generate_benchmark_command(
             output_shell_file="run_gedit_perf.sh",
             python_exec="python",
         )
+    if benchmark_type == "asr":
+        from xtask.benchmarks.asr.generate_asr_script import generate_asr_script
+
+        return generate_asr_script(_bench_task_config_with_endpoint(), output_file_path)
     if benchmark_type == "vbench":
         from xtask.benchmarks.vbench.generate_vbench_script import generate_vbench_script
 
@@ -522,6 +526,8 @@ def find_benchmark_rst_directory(directory_path=".", init_entries=list()):
     return date_dirs
 
 def _should_run_perf_warmup(task_config):
+    if _is_asr_task(task_config):
+        return False  # ASR has explicit synthetic warmup and exclusion rules.
     benchmark = task_config.get("benchmark") or {}
     perf_cfg = benchmark.get("perf") or {}
     if not perf_cfg.get("warmup_paras"):
@@ -1373,6 +1379,135 @@ def _ensure_benchmark_date_dir(context) -> None:
     )
 
 
+def _sync_asr_trial_inputs(runtime, output_file_path: str) -> bool:
+    """Refresh only executable inputs, never remove previous dated trials."""
+    root = Path(output_file_path)
+    executor = runtime.container_manager.executor
+    ready = executor.run(f"mkdir -p {shlex.quote(str(root))}", timeout=30)
+    if not ready.success:
+        return False
+    for source in (root / "run_asr_test.sh", root / "asr_inputs"):
+        if not source.exists() or not executor.upload(str(source), str(source)):
+            return False
+    return True
+
+
+def _download_asr_runner_results(context, runtime) -> None:
+    """Download only this invocation's new date directories, not the case root.
+
+    Replacing the entire case root through HostExecutor.download would delete
+    locally generated startup and shutdown evidence from other service nodes.
+    """
+    from xtask.benchmarks.asr.artifacts import DATE_DIR
+    from xtask.utils.container_manager import path_mapping_in_container
+
+    root = Path(context.output_file_path).resolve()
+    inside = path_mapping_in_container(str(root))
+    code = (
+        "import json,pathlib; p=pathlib.Path(" + repr(inside) + "); "
+        "print(json.dumps(sorted(x.name for x in p.iterdir() if x.is_dir())))"
+    )
+    manager, config = runtime.container_manager, runtime.container_config
+    listed = manager.exec_in_container(config.container_name, "python3 -c " + shlex.quote(code), timeout=30)
+    if not listed.success:
+        raise RuntimeError(f"Unable to list ASR results on {runtime.plan.host}")
+    names = json.loads(listed.stdout)
+    if not isinstance(names, list):
+        raise ValueError("Remote ASR result listing must be a list")
+    previous = set(context.state.get("init_entries") or [])
+    for name in names:
+        if not isinstance(name, str) or not DATE_DIR.fullmatch(name) or name in previous:
+            continue
+        path = root / name
+        if not _chown_via_running_container(manager, config, path):
+            raise PermissionError(f"Cannot restore ASR archive ownership on {runtime.plan.host}: {name}")
+        if not manager.executor.download(str(path), str(path)):
+            raise RuntimeError(f"Failed to download ASR date archive {name} from {runtime.plan.host}")
+
+
+def _archive_asr_execution(context) -> None:
+    """Complete this ASR date archive before container removal and at finalize."""
+    state, result = context.state, context.result
+    task_config = result.get("task_config") or state.get("task_config") or {}
+    if not _is_asr_task(task_config):
+        return
+    from xtask.benchmarks.asr.artifacts import archive_execution, asr_result_post_process
+    from xtask.utils import get_host_ip
+
+    root = Path(context.output_file_path).resolve()
+    directory = Path(result["benchmark_output_path"]).resolve() if result.get("benchmark_output_path") else None
+    if directory is None:
+        directory = _find_new_benchmark_date_dir(root, set(state.get("init_entries") or []))
+    if directory is None:
+        directory = _create_fallback_date_dir(root, set(state.get("init_entries") or []))
+    if directory is None:
+        raise RuntimeError("Unable to allocate ASR date archive")
+    if directory.parent != root:
+        raise ValueError("ASR date archive must be a direct child of its case output")
+    result["benchmark_output_path"] = str(directory)
+    # Container outputs may be root-owned; restore only this run's ownership.
+    if not os.access(directory, os.W_OK):
+        for manager, config in _iter_running_container_handles(context):
+            if _chown_via_running_container(manager, config, directory) and os.access(directory, os.W_OK):
+                break
+    if not os.access(directory, os.W_OK):
+        raise PermissionError(f"ASR date archive is not writable: {directory}")
+
+    if result.get("benchmark_asr_result") is not None:
+        from xtask.benchmarks.asr.config import result_issues
+        issues = result_issues(result["benchmark_asr_result"], task_config)
+        if issues and result.get("success") is True:
+            result["success"] = False
+            result["asr_gate_issues"] = issues
+            result["message"] = "; ".join(issue["reason"] for issue in issues)
+
+    # Results live on the control/client host, not on the external model server.
+    if not result.get("artifact_host"):
+        result["artifact_host"] = os.getenv("LOCAL_HOST_IP") or get_host_ip()
+    result["artifact_path"] = str(directory)
+    endpoint = ((task_config.get("benchmark") or {}).get("asr") or {}).get("server_addr")
+    if not endpoint and state.get("external_service"):
+        from xtask.core.external_service import resolve_external_location
+        endpoint = resolve_external_location(task_config).url
+    result["service_endpoint"] = endpoint or f"http://{task_config.get('host_addr', '127.0.0.1')}:{task_config.get('port', 8018)}"
+
+    # A timeout/SIGKILL may leave only partial requests. Preserve evidence and
+    # recover a failed summary, never synthesize a successful score.
+    if result.get("benchmark_asr_result") is None:
+        payload, _ = asr_result_post_process(task_config, str(root), [
+            item.name for item in root.iterdir() if item.name != directory.name
+        ])
+        result["benchmark_asr_result"] = payload
+        if payload.get("success") is False:
+            result["success"] = False
+
+    captured = state.setdefault("asr_log_archives", set())
+    if str(directory) not in captured:
+        runtimes = state.get("service_runtimes") or []
+        if runtimes:
+            _archive_service_group_logs(runtimes, str(root), str(directory))
+            _record_service_group_archive_path(state, str(directory))
+        elif not state.get("external_service"):
+            _copy_fallback_entry(root / "log", directory / "xllm_log")
+            _copy_fallback_entry(root / "start_xllm_serv.sh", directory / "start_xllm_serv.sh")
+        captured.add(str(directory))
+    archive_execution(
+        directory, root, task_config, result,
+        source_yaml=getattr(context, "task_yaml_path", ""),
+    )
+
+
+def _try_archive_asr_execution(context) -> None:
+    """Report archive failures without losing the original benchmark evidence."""
+    try:
+        _archive_asr_execution(context)
+    except Exception as exc:
+        context.result["archive_error"] = str(exc)
+        context.result["success"] = False
+        context.result["message"] = f"ASR execution archive failed: {exc}"
+        logging.error(context.result["message"], exc_info=True)
+
+
 def _initial_result() -> Dict[str, Any]:
     return {
         "success": False,
@@ -1442,6 +1577,12 @@ def _load_task_and_engine(context):
     source_task_config = copy.deepcopy(task_config)
     context.result["task_config"] = task_config
     context.result["output_file_path"] = context.output_file_path
+    if _is_asr_task(task_config):
+        # Input staging/config errors can occur before ordinary state setup.
+        # Cleanup still needs enough identity to create a failed date archive.
+        os.makedirs(context.output_file_path, exist_ok=True)
+        context.state.update(task_config=task_config, external_service=external_service,
+                             init_entries=os.listdir(context.output_file_path))
     engine = TaskConfig.extract_framework(task_config)
     logging.info(f"Detected engine type: {engine}")
 
@@ -1538,6 +1679,12 @@ def _create_container(context, container_manager, container_config):
         return False
     context.result["container_id"] = container_id
     return True
+
+
+def _is_asr_task(task_config):
+    from xtask.benchmarks.asr.config import is_asr_task
+
+    return is_asr_task(task_config)
 
 
 def _is_vbench_task(task_config):
@@ -2041,16 +2188,16 @@ def _prepare_container_multi_host(context):
     if deployment.get("sync_workspace", True):
         try:
             # VBench output can contain hundreds of MP4 files and model
-            # caches.  Only its dedicated runner needs this case directory;
-            # xLLM service workers need the normal workspace, not the cache.
+            # caches. ASR similarly stages large runner-only audio archives.
+            # Service workers need the normal workspace, not these datasets.
             extra_paths = []
-            if not _is_vbench_task(task_config):
+            if not (_is_vbench_task(task_config) or _is_asr_task(task_config)):
                 extra_paths = [context.output_file_path]
             sync_workspace_to_hosts(
                 [plan.host for plan in plans],
                 extra_paths=extra_paths,
             )
-            if _is_vbench_task(task_config):
+            if _is_vbench_task(task_config) or _is_asr_task(task_config):
                 runner_plan = next(
                     (plan for plan in plans if plan.is_benchmark_runner),
                     plans[0] if plans else None,
@@ -2598,6 +2745,8 @@ def _probe_external_service(context) -> bool:
 def _cleanup_external_client(context):
     """Remove only the client/VBench runner. Never stop the live service."""
     state = context.state
+    if _is_asr_task(state.get("task_config") or {}):
+        _try_archive_asr_execution(context)
     try:
         _ensure_benchmark_date_dir(context)
     except Exception:
@@ -4057,8 +4206,19 @@ def _run_benchmark_and_process(context):
         )
 
         remote_runner = state.get("session_remote_benchmark_runner")
+        if remote_runner is None and _is_asr_task(task_config) and state.get("multi_host"):
+            from xtask.core.service_group import get_benchmark_runtime
+            candidate = get_benchmark_runtime(state.get("service_runtimes") or [])
+            if candidate is not None and not candidate.plan.is_local:
+                remote_runner = candidate
         if remote_runner is not None:
-            if not _download_remote_runtime_path(
+            if _is_asr_task(task_config):
+                try:
+                    _download_asr_runner_results(context, remote_runner)
+                except Exception as exc:
+                    context.result["archive_error"] = f"ASR result transfer failed: {exc}"
+                    logging.error(context.result["archive_error"], exc_info=True)
+            elif not _download_remote_runtime_path(
                 remote_runner,
                 context.output_file_path, context.output_file_path
             ):
@@ -4091,9 +4251,27 @@ def _run_benchmark_and_process(context):
                         f"Failed to download VBench output from {vbench_runner.plan.host}"
                     )
 
+        if _is_asr_task(task_config):
+            from xtask.benchmarks.asr.artifacts import asr_result_post_process
+
+            try:
+                date_dir = _find_new_benchmark_date_dir(Path(context.output_file_path), set(init_entries))
+                if date_dir is not None and not os.access(date_dir, os.W_OK):
+                    _chown_via_running_container(benchmark_container_manager, benchmark_container_config, date_dir)
+                context.result["benchmark_asr_result"], output_dir = asr_result_post_process(
+                    task_config, context.output_file_path, init_entries
+                )
+                context.result["benchmark_output_path"] = output_dir
+                _record_service_group_archive_path(state, output_dir)
+            except Exception as exc:
+                context.result["message"] = f"ASR result processing failed: {exc}"
+                logging.error(context.result["message"], exc_info=True)
+
         if benchmark_result.success:
             logging.info("perf benchmark completed successfully.")
-            if _is_vbench_task(task_config):
+            if _is_asr_task(task_config):
+                pass  # ASR quality and performance were processed together above.
+            elif _is_vbench_task(task_config):
                 from xtask.benchmarks.vbench.vbench_postprocess import (
                     vbench_result_post_process,
                 )
@@ -4144,7 +4322,7 @@ def _run_benchmark_and_process(context):
                     task_config.get("metrics"),
                 )
 
-            if "perf" in task_config.get("metrics"):
+            if "perf" in task_config.get("metrics") and not _is_asr_task(task_config):
                 from xtask.benchmarks.base_benchmark import result_postprocess
 
                 context.result["benchmark_perf_result"], output_dir = (
@@ -4197,7 +4375,7 @@ def _run_benchmark_and_process(context):
     else:
         if benchmark_result is None and not context.result.get("message"):
             context.result["message"] = "Benchmark command was not generated"
-        elif benchmark_result is not None and benchmark_result.success:
+        elif benchmark_result is not None and benchmark_result.success and not context.result.get("message"):
             context.result["message"] = "Benchmark result verification failed"
         logging.error("verify result failed.")
 
@@ -4206,16 +4384,32 @@ def _finalize_result(context):
     task_config = context.result.get("task_config") or context.state.get(
         "task_config"
     )
+    if _is_asr_task(task_config or {}):
+        _try_archive_asr_execution(context)
     try:
         _ensure_benchmark_date_dir(context)
     except Exception:
         logging.error("Failed to prepare fallback result directory", exc_info=True)
-    write_result(
-        context.result,
-        task_config,
-        task_path=context.task_yaml_path,
-        args=context.args,
-    )
+    try:
+        written = write_result(
+            context.result,
+            task_config,
+            task_path=context.task_yaml_path,
+            args=context.args,
+        )
+    except Exception as exc:
+        if not _is_asr_task(task_config or {}):
+            raise
+        written = False
+        context.result["archive_error"] = f"ASR workbook generation failed: {exc}"
+        logging.error(context.result["archive_error"], exc_info=True)
+    if _is_asr_task(task_config or {}):
+        context.result["report_generated"] = written is True
+        if written is not True:
+            context.result["archive_error"] = context.result.get("archive_error") or "ASR workbook generation failed"
+            context.result["success"] = False
+            context.result["message"] = context.result["archive_error"]
+        _try_archive_asr_execution(context)
 
 
 def _freeze_service_group_logs(runtimes):
@@ -4828,6 +5022,8 @@ def _cleanup_scheduler(context):
     if state.get("gedit_specs"):
         _cleanup_gedit_services(context)
         return
+    if _is_asr_task(state.get("task_config") or {}):
+        _try_archive_asr_execution(context)
     # Archive into a dated directory while containers are still available so
     # root-owned aisbench directories can be chmod'd for host-side copies.  The
     # finalize-stage call is kept as a no-op safety net when this already ran.
@@ -5079,9 +5275,11 @@ def _reset_session_trial(
 
         runner = get_benchmark_runtime(state.get("service_runtimes") or [])
         if runner is not None and not runner.plan.is_local:
-            if not runner.container_manager.executor.upload(
-                output_file_path, output_file_path
-            ):
+            if _is_asr_task(task_config):
+                transferred = _sync_asr_trial_inputs(runner, output_file_path)
+            else:
+                transferred = runner.container_manager.executor.upload(output_file_path, output_file_path)
+            if not transferred:
                 raise RuntimeError(
                     f"Failed to sync benchmark trial to {runner.plan.host}"
                 )

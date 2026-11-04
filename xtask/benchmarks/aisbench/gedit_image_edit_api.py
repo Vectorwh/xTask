@@ -1,13 +1,26 @@
-"""AISBench 模型包装：Qwen-Image-Edit 两段式 /v1/image/generation。
+"""AISBench 模型包装：Qwen-Image-Edit / JoyAI-Image-Edit 两段式 /v1/image/generation。
 
 gedit（GEdit-Bench）精度评测需要能出图的模型包装（LMMGenInferencer 期望
 output.content 里是 PIL.Image）。AISBench 自带的 API 包装都是 chat 类
-（/v1/chat/completions），Qwen-Image-Edit-2509 解耦部署形态是：
+（/v1/chat/completions），Qwen-Image-Edit-2509 / JoyAI-Image-Edit-Plus
+解耦部署形态是：
 
     阶段 1  Text Encoder  POST <GEDIT_ENCODER_URL>/v1/embeddings
-            （图片 resize 1024x1024，bfloat16 解码，skip 64 token）
+            （图片 resize 1024x1024，bfloat16 解码，skip 64/34 token）
     阶段 2  DiT           POST <url>/v1/image/generation
-            （带 prompt_embed / negative_prompt_embed / image）
+            （带 prompt_embed / negative_prompt_embed /
+             image(Qwen 单图) / media_sources(JoyAI 多图)）
+
+模型族协议（与 evalscope 侧 xtask/plugins/evalscope/gedit_api.py 对称）：
+    qwen（缺省，零影响）：skip 64、Qwen2.5-VL system prompt、
+        input.image 单图、size 固定分辨率；
+    joyai：skip 34（xllm pipeline_joyimage_edit_plus.h
+        kPromptEmbeddingStartIndex=34）、Qwen3-VL system prompt、
+        input.media_sources 多图（1-5 张，DiT 侧 bucket resize）。
+    检测依据：model（served_model_name）或 path 含 joyai-image-edit/
+    joyimageeditplus 等图片编辑族专有标记，或 path 下 model_index.json 的
+    _class_name 为 JoyImageEditPlusPipeline；generation_kwargs 可显式传
+    model_family 覆盖。
 
 本模块提供 ``GEditImageEditAPI``（BaseAPIModel 子类，is_chat_api=False）：
     - get_request_body：从 PromptList 抽出 text 指令与 image_url 图片，
@@ -17,7 +30,7 @@ output.content 里是 PIL.Image）。AISBench 自带的 API 包装都是 chat �
       Image 对象存成 png 并返回相对路径，judge 数据集按该路径回读）。
 
 与 evalscope perf 侧的 ``xtask/plugins/evalscope/gedit_api.py`` 共享同一
-两段式协议常量（SYSTEM_PROMPT / 负向 prompt / skip tokens），但独立实现
+两段式协议常量（system prompt / 负向 prompt / skip tokens），但独立实现
 以适配 AISBench 的 Output/aiohttp 体系。
 
 encoder 地址读取顺序：模型配置 generation_kwargs.encoder_url >
@@ -39,6 +52,7 @@ _load_from_predictions）以 predictions/<model_abbr>/ 为 base 拼接该
 
 import base64
 import io
+import json
 import os
 import shutil
 import urllib
@@ -51,15 +65,42 @@ from ais_bench.benchmark.models.output import Output
 
 PromptType = Union[PromptList, str]
 
-SYSTEM_PROMPT = (
+# ---------------------------------------------------------------------------
+# 模型族协议（与 xtask/plugins/evalscope/gedit_api.py 对称的分支）
+# ---------------------------------------------------------------------------
+# qwen（缺省，零影响）：skip 64（xllm pipeline_qwenimage_edit_plus.h
+#   prompt_template_encode_start_idx_ = 64）、Qwen2.5-VL system prompt、
+#   DiT 参考图走 input.image 单图。
+# joyai：skip 34（xllm pipeline_joyimage_edit_plus.h
+#   kPromptEmbeddingStartIndex = 34）、Qwen3-VL system prompt、DiT 参考
+#   图走 input.media_sources 多图（1-5 张逐图 bucket resize）。
+#
+# 标记仅取图片编辑族专有串（lower 后子串匹配，不做分隔符归一化）：裸
+# 'joyai' 会误命中 joyai-asr-xxx 等其它 JoyAI 系列模型，故收窄。
+JOYAI_MODEL_MARKERS = (
+    'joyai-image-edit',
+    'joyaiimageedit',
+    'joyimageedit',
+    'joyimageeditplus',
+)
+
+QWEN_SYSTEM_PROMPT = (
     'Describe the key features of the input image (color, size, texture, objects, background), '
     'then explain how the user\'s text instruction should be applied or modify the image. '
     'Generate a new image that meets the user\'s requirement '
     'while maintaining consistency with the original input where appropriate.'
 )
+JOYAI_SYSTEM_PROMPT = (
+    ' \nDescribe the image by detailing the color, shape, size, texture, '
+    'quantity, text, spatial relationships of the objects and background:'
+)
+
+# 兼容旧引用（Qwen 缺省常量，行为零变化）
+SYSTEM_PROMPT = QWEN_SYSTEM_PROMPT
 NEGATIVE_PROMPT = ' '
 ENCODER_IMAGE_SIZE = 1024
 SKIP_TOKENS = 64
+JOYAI_SKIP_TOKENS = 34
 DEFAULT_ENCODER_URL = 'http://127.0.0.1:18007'
 ENCODER_URL_ENV = 'GEDIT_ENCODER_URL'
 
@@ -73,6 +114,36 @@ DEFAULT_GEN_PARAMS = {
     'seed': 42,
     'max_sequence_length': 2048,
 }
+
+
+def _read_model_index_class(model_path):
+    """读取 model_path 下 model_index.json 的 _class_name（失败返回 None）。"""
+    if not model_path:
+        return None
+    try:
+        with open(os.path.join(str(model_path), 'model_index.json'), 'r', encoding='utf-8') as f:
+            index = json.load(f)
+        return str(index.get('_class_name') or '')
+    except (OSError, ValueError):
+        return None
+
+
+def detect_model_family(model_name_or_path):
+    """按模型名/路径推断协议族：``joyai`` 或 ``qwen``（缺省，零影响）。
+
+    依据（任一命中即 joyai）：字符串含 joyai-image-edit /
+    joyimageeditplus 等图片编辑族专有标记（大小写不敏感），或同目录
+    model_index.json 的 _class_name 为 JoyImageEditPlusPipeline。
+    其余一律返回 qwen，保持既有行为。
+    """
+    text = str(model_name_or_path or '')
+    lowered = text.lower()
+    if any(marker in lowered for marker in JOYAI_MODEL_MARKERS):
+        return 'joyai'
+    class_name = _read_model_index_class(text)
+    if class_name and class_name.lower() == 'joyimageeditpluspipeline':
+        return 'joyai'
+    return 'qwen'
 
 
 @MODELS.register_module()
@@ -141,9 +212,28 @@ class GEditImageEditAPI(BaseAPIModel):
                 'seed',
                 'max_sequence_length',
                 'encoder_url',
+                'model_family',
             ):
                 if key in generation_kwargs:
                     self._gen_params[key] = generation_kwargs[key]
+        # 模型族：generation_kwargs.model_family 显式指定 > 按 model/path
+        # 自动检测（joyai-image-edit/joyimageeditplus 标记或 model_index.json）>
+        # 缺省 qwen（既有 Qwen 用例行为零变化）。
+        explicit_family = self._gen_params.get('model_family')
+        if isinstance(explicit_family, str) and explicit_family.strip().lower() in ('joyai', 'qwen'):
+            self._model_family = explicit_family.strip().lower()
+        elif detect_model_family(self.model) == 'joyai' or detect_model_family(path) == 'joyai':
+            # served_model_name 与 path 任一命中即 joyai（detect 永远非空，
+            # 不能用 or 短路——那会让 path 检测被跳过）。
+            self._model_family = 'joyai'
+        else:
+            self._model_family = 'qwen'
+        if self._model_family == 'joyai':
+            self._skip_tokens = JOYAI_SKIP_TOKENS
+            self._system_prompt = JOYAI_SYSTEM_PROMPT
+        else:
+            self._skip_tokens = SKIP_TOKENS
+            self._system_prompt = QWEN_SYSTEM_PROMPT
         self._encoder_url = (
             os.environ.get(ENCODER_URL_ENV)
             or self._gen_params.get('encoder_url')
@@ -182,7 +272,7 @@ class GEditImageEditAPI(BaseAPIModel):
             'input': '',
             'encoding_format': 'float',
             'messages': [
-                {'role': 'system', 'content': [{'type': 'text', 'text': SYSTEM_PROMPT}]},
+                {'role': 'system', 'content': [{'type': 'text', 'text': self._system_prompt}]},
                 {'role': 'user', 'content': content_items},
             ],
         }
@@ -223,8 +313,8 @@ class GEditImageEditAPI(BaseAPIModel):
             self.logger.error(f'GEdit encoder bf16 size {f32.size} != shape {shape}')
             return None
         embed = f32.reshape(shape)
-        if SKIP_TOKENS > 0 and embed.shape[0] > SKIP_TOKENS:
-            embed = embed[SKIP_TOKENS:]
+        if self._skip_tokens > 0 and embed.shape[0] > self._skip_tokens:
+            embed = embed[self._skip_tokens:]
         return embed.flatten().tolist(), list(embed.shape)
 
     @staticmethod
@@ -352,19 +442,40 @@ class GEditImageEditAPI(BaseAPIModel):
         # ---- 阶段 2：DiT 请求体 ----
         parameters = {
             key: value for key, value in self._gen_params.items()
-            if key != 'encoder_url'
+            if key not in ('encoder_url', 'model_family')
         }
+        # JoyAI 也传 parameters.size（缺省 1328*1328）：实测（20261103）不传
+        # size 走 bucket 会退化为 512*512 出图，SC/PQ 崩塌（2.45/6.95 ->
+        # 0.85/5.05）；显式 size 下 DiT 稳定输出全分辨率。JoyAI 与 Qwen
+        # 在此行为一致，无需按模型族区分。
+        input_section = {
+            'prompt': prompt_text,
+            'negative_prompt': NEGATIVE_PROMPT,
+            'prompt_embed': self._make_tensor(pos_flat, pos_shape, 'prompt_embeds'),
+            'negative_prompt_embed': self._make_tensor(
+                neg_flat, neg_shape, 'negative_prompt_embeds'
+            ),
+        }
+        if images_b64:
+            if self._model_family == 'joyai':
+                # JoyAI DiT：input.media_sources 多图（xllm
+                # JoyImageEditPlusPipeline 逐图 bucket resize，1-5 张），
+                # name/modality 必填（DiTSourceDecoder 校验）。
+                input_section['media_sources'] = [
+                    {
+                        'type': 'base64',
+                        'name': f'input_{idx}',
+                        'base64': b64,
+                        'modality': 'image',
+                    }
+                    for idx, b64 in enumerate(images_b64)
+                ]
+            else:
+                # Qwen DiT（既有行为）：input.image 单图
+                input_section['image'] = images_b64[0]
         request_body = {
             'model': self.model,
-            'input': {
-                'prompt': prompt_text,
-                'negative_prompt': NEGATIVE_PROMPT,
-                'prompt_embed': self._make_tensor(pos_flat, pos_shape, 'prompt_embeds'),
-                'negative_prompt_embed': self._make_tensor(
-                    neg_flat, neg_shape, 'negative_prompt_embeds'
-                ),
-                'image': images_b64[0],
-            },
+            'input': input_section,
             'parameters': parameters,
         }
         return request_body

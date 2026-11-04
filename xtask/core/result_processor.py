@@ -418,6 +418,19 @@ def verify_result(result, task_config):
     acc_flag = False
     logging.debug("entry function: %s"% inspect.currentframe().f_code.co_name)
 
+    from xtask.benchmarks.asr.config import is_asr_task, result_issues
+
+    if is_asr_task(task_config):
+        issues = result_issues(result.get("benchmark_asr_result"), task_config)
+        if result.get("archive_error"):
+            issues.append({"category": "processing", "reason": str(result["archive_error"])})
+        if result.get("benchmark_success") is False and not issues:
+            issues.append({"category": "execution", "reason": "ASR benchmark command failed"})
+        result["asr_gate_issues"] = issues
+        if issues:
+            logging.error("ASR verification failed: %s", "; ".join(issue["reason"] for issue in issues))
+        return not issues
+
     if result.get("benchmark_success") is False:
         logging.error("✗ Test failed: benchmark command did not complete successfully")
         return False
@@ -511,10 +524,11 @@ def verify_result(result, task_config):
         except ValueError as exc:
             logging.error("✗ Test failed: invalid perf baseline config: %s", exc)
             return False
+        quality_passed = "acc" not in task_config.get("metrics") or acc_flag
         if not rules:
-            return True
+            return quality_passed
         if _evaluate_perf_baseline_rules(perf_result.summary, rules):
-            return True
+            return quality_passed
     else:
         return acc_flag
 
@@ -566,6 +580,7 @@ def _relative_output_path(result):
 
 
 def _result_location(result, execution_host):
+    execution_host = result.get("artifact_host") or execution_host
     relative_path = _relative_output_path(result).strip("/")
     if execution_host and relative_path:
         return f"{execution_host}/{relative_path}"
@@ -720,6 +735,14 @@ def _baseline_failure_reason(result, task_config):
 
 
 def _baseline_difference(result, task_config):
+    from xtask.benchmarks.asr.config import is_asr_task, result_issues
+
+    if is_asr_task(task_config):
+        return "; ".join(
+            issue["reason"]
+            for issue in result_issues(result.get("benchmark_asr_result"), task_config)
+            if issue["category"] == "baseline"
+        )
     configured = _configured_baseline(task_config)
     if configured is None:
         return ""
@@ -825,6 +848,23 @@ def _classify_failure(result, task_config):
             else message
         )
         return FAILURE_XLLM, reason or "xLLM process or service health check failed"
+    from xtask.benchmarks.asr.config import is_asr_task, result_issues
+
+    if is_asr_task(task_config):
+        if result.get("archive_error"):
+            return FAILURE_PROCESSING, str(result["archive_error"])
+        issues = result.get("asr_gate_issues") or result_issues(result.get("benchmark_asr_result"), task_config)
+        category = next(
+            (name for name in ("execution", "processing", "baseline")
+             if any(issue["category"] == name for issue in issues)),
+            "processing",
+        )
+        labels = {
+            "execution": FAILURE_BENCHMARK,
+            "processing": FAILURE_PROCESSING,
+            "baseline": FAILURE_BASELINE,
+        }
+        return labels[category], "; ".join(issue["reason"] for issue in issues) or message
 
     if result.get("benchmark_success") is False:
         reason = message
@@ -906,6 +946,33 @@ def _result_payload(result, task_config=None):
     benchmark_type = str(
         (task_config.get("benchmark") or {}).get("benchmark_type", "")
     ).lower()
+    if benchmark_type == "asr":
+        payload = result.get("benchmark_asr_result") or {}
+        fields = {
+            "backend": payload.get("backend"),
+            "scoring_profile": payload.get("scoring_profile"),
+            "config_file": payload.get("config_file"),
+            "result_file": payload.get("result_file"),
+        }
+        from xtask.benchmarks.asr.reporting import summarize_runs
+        fields["summary_by_concurrency"] = {
+            label: {key: value for key, value in group.items() if key != "run_ids"}
+            for label, group in summarize_runs(payload.get("runs")).items()
+        }
+        # Keep request texts/audio and large lists in artifacts, not Excel cells.
+        score_fields = {"N", "C", "S", "D", "I", "error_count", "error_rate_pct", "unit"}
+        for run in payload.get("runs", []):
+            label = str(run.get("run_id", "run"))
+            fields[label] = {
+                "complete": run.get("complete"),
+                "failed_requests": run.get("failed_requests"),
+                "score": {
+                    key: value for key, value in (run.get("score") or {}).items()
+                    if key in score_fields
+                },
+                "metrics": run.get("metrics", {}),
+            }
+        return fields
     if benchmark_type == "vbench" and isinstance(vbench_result, Mapping):
         # Keep the workbook bounded.  VBench's per-video evaluation payload
         # and latency list belong in the archived JSON files, not in one Excel
@@ -1031,8 +1098,10 @@ def _build_result_row(result, task_config, task_path=None, args=None):
     failure_category, failure_reason = _classify_failure(result, task_config)
     # New-format VBench YAML carries metrics: acc, but its Excel columns come
     # from _result_payload (benchmark_type: vbench), not the accuracy column.
-    is_accuracy = _contains_metric(task_config, "acc") and not _is_vbench_case(
-        task_config
+    from xtask.benchmarks.asr.config import is_asr_task
+
+    is_accuracy = _contains_metric(task_config, "acc") and not (
+        _is_vbench_case(task_config) or is_asr_task(task_config)
     )
     benchmark = task_config.get("benchmark") or {}
     execution_host = _resolve_execution_host(task_config, args)
