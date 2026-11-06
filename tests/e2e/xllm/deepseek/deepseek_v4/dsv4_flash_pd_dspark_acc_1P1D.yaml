@@ -12,6 +12,7 @@ userid: 1048
 serving_wait_time: 10
 hccl_if_port: 43432
 progress_conn_port: 8773
+benchmark_timeout: 10800
 
 benchmark:
   benchmark_type: aisbench
