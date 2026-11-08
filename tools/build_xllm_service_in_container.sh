@@ -29,7 +29,7 @@ restore_host_ownership() {
 }
 trap restore_host_ownership EXIT
 
-if [[ ! -f "${SERVICE_SOURCE_DIR}/CMakeLists.txt" || ! -f "${SERVICE_SOURCE_DIR}/prepare.sh" ]]; then
+if [[ ! -f "${SERVICE_SOURCE_DIR}/CMakeLists.txt" ]]; then
   echo "ERROR: xLLM-Service source is incomplete: ${SERVICE_SOURCE_DIR}" >&2
   exit 1
 fi
@@ -39,7 +39,11 @@ git config --global --add safe.directory '*' 2>/dev/null || true
 
 # prepare.sh only applies the repository's required cpprest patch. Applying it
 # repeatedly is not safe, so treat an already-applied patch as a valid state.
-if ! bash prepare.sh; then
+# Newer service versions (for example coding.jd.com main) already carry the
+# static-link cpprest default and ship no prepare.sh at all, so it is optional.
+if [[ ! -f "${SERVICE_SOURCE_DIR}/prepare.sh" ]]; then
+  echo "xLLM-Service has no prepare.sh; skipping the cpprest patch step."
+elif ! bash prepare.sh; then
   PATCH_FILE="${SERVICE_SOURCE_DIR}/third_party/custom_cache/cpprestsdk.patch"
   if [[ ! -f "${PATCH_FILE}" ]] || ! git -C "${SERVICE_SOURCE_DIR}/third_party/cpprestsdk" apply --reverse --check "../custom_cache/cpprestsdk.patch"; then
     echo "ERROR: xLLM-Service prepare.sh failed." >&2
@@ -49,14 +53,6 @@ if ! bash prepare.sh; then
 fi
 
 mkdir -p "${BUILD_DIR}"
-CMAKE_COMPAT_FILE="${BUILD_DIR}/xtask_service_compat.cmake"
-printf 'set(CMAKE_CXX_STANDARD "%s")\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\n' \
-  "${CXX_STANDARD}" > "${CMAKE_COMPAT_FILE}"
-cmake -S "${SERVICE_SOURCE_DIR}" -B "${BUILD_DIR}" \
-  -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
-  -DCMAKE_PROJECT_xllm_service_INCLUDE="${CMAKE_COMPAT_FILE}" \
-  -DBUILD_TESTING=ON \
-  -DWERROR=OFF
 
 # xLLM-Service's Ascend branch still adds legacy vcpkg paths such as
 # /vcpkg-src/packages/boost-locale_arm64-linux. The current image uses
@@ -64,25 +60,63 @@ cmake -S "${SERVICE_SOURCE_DIR}" -B "${BUILD_DIR}" \
 # Provide ephemeral compatibility links inside this disposable container so
 # those include/link directories exist without modifying the Service source or
 # the host's vcpkg cache.
-if [[ -n "${VCPKG_ROOT:-}" && -d "${VCPKG_ROOT}" ]]; then
-  case "$(uname -m)" in
-    aarch64) VCPKG_TRIPLET="${VCPKG_TARGET_TRIPLET:-arm64-linux}" ;;
-    x86_64) VCPKG_TRIPLET="${VCPKG_TARGET_TRIPLET:-x64-linux}" ;;
-    *) VCPKG_TRIPLET="${VCPKG_TARGET_TRIPLET:-}" ;;
-  esac
-  VCPKG_INSTALL_ROOT="${BUILD_DIR}/vcpkg_installed/${VCPKG_TRIPLET}"
-  if [[ -n "${VCPKG_TRIPLET}" && -d "${VCPKG_INSTALL_ROOT}/include" ]]; then
-    mkdir -p "${VCPKG_ROOT}/packages"
-    for package_name in boost-locale boost-interprocess zlib; do
-      package_link="${VCPKG_ROOT}/packages/${package_name}_${VCPKG_TRIPLET}"
-      if [[ ! -e "${package_link}" && ! -L "${package_link}" ]]; then
-        ln -s "${VCPKG_INSTALL_ROOT}" "${package_link}"
-      fi
-    done
-  fi
-fi
+#
+# USE_ASCEND defaults to ON in the Service CMakeLists and CPPREST builds with
+# -Werror=missing-include-dirs, so a missing link fails the build outright
+# rather than degrading to a warning. The links are created before configure
+# because a warm build tree already has vcpkg_installed; a fresh tree only
+# produces it during configure, so the same helper runs again afterwards.
+case "$(uname -m)" in
+  aarch64) VCPKG_TRIPLET="${VCPKG_TARGET_TRIPLET:-arm64-linux}" ;;
+  x86_64) VCPKG_TRIPLET="${VCPKG_TARGET_TRIPLET:-x64-linux}" ;;
+  *) VCPKG_TRIPLET="${VCPKG_TARGET_TRIPLET:-}" ;;
+esac
+VCPKG_INSTALL_ROOT="${BUILD_DIR}/vcpkg_installed/${VCPKG_TRIPLET}"
 
-cmake --build "${BUILD_DIR}" --target xllm_master_serving --parallel "${BUILD_JOBS}"
+ensure_vcpkg_compat_links() {
+  if [[ -z "${VCPKG_ROOT:-}" || ! -d "${VCPKG_ROOT}" || -z "${VCPKG_TRIPLET}" ]]; then
+    return 0
+  fi
+  mkdir -p "${VCPKG_ROOT}/packages"
+  for package_name in boost-locale boost-interprocess zlib; do
+    package_link="${VCPKG_ROOT}/packages/${package_name}_${VCPKG_TRIPLET}"
+    # -e misses a dangling link, so -L has to be checked as well.
+    if [[ ! -e "${package_link}" && ! -L "${package_link}" ]]; then
+      ln -s "${VCPKG_INSTALL_ROOT}" "${package_link}"
+    fi
+  done
+}
+
+ensure_vcpkg_compat_links
+
+# Newer Service versions (coding.jd.com main) build through setup.py, which
+# checks every direct submodule against the indexed gitlink before invoking
+# CMake and prefers Ninja over a stale Makefile cache. It compiles all targets,
+# not just the service binary, and it always builds Release: CMakeLists hard
+# codes CMAKE_CXX_STANDARD 20 and defaults CMAKE_BUILD_TYPE to Release, so the
+# previous -DWERROR=OFF and CXX_STANDARD injection are gone (WERROR no longer
+# exists upstream; cpprestsdk supplies its own -Werror). Older GitHub-based
+# versions have no setup.py and keep the explicit CMake path, which is also the
+# fallback whenever a non-default build type is requested.
+if [[ -f "${SERVICE_SOURCE_DIR}/setup.py" && "${BUILD_TYPE}" == "Release" ]]; then
+  echo "[service-build] python3 setup.py build (jobs=${BUILD_JOBS})"
+  python3 setup.py build --jobs "${BUILD_JOBS}" --build-dir "${BUILD_DIR}"
+  ensure_vcpkg_compat_links
+else
+  if [[ -f "${SERVICE_SOURCE_DIR}/setup.py" ]]; then
+    echo "[service-build] build_type=${BUILD_TYPE} requested; using explicit CMake instead of setup.py."
+  fi
+  CMAKE_COMPAT_FILE="${BUILD_DIR}/xtask_service_compat.cmake"
+  printf 'set(CMAKE_CXX_STANDARD "%s")\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\n' \
+    "${CXX_STANDARD}" > "${CMAKE_COMPAT_FILE}"
+  cmake -S "${SERVICE_SOURCE_DIR}" -B "${BUILD_DIR}" \
+    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+    -DCMAKE_PROJECT_xllm_service_INCLUDE="${CMAKE_COMPAT_FILE}" \
+    -DBUILD_TESTING=ON \
+    -DWERROR=OFF
+  ensure_vcpkg_compat_links
+  cmake --build "${BUILD_DIR}" --target xllm_master_serving --parallel "${BUILD_JOBS}"
+fi
 
 SERVICE_BINARY="${BUILD_DIR}/xllm_service/xllm_master_serving"
 if [[ ! -x "${SERVICE_BINARY}" ]]; then

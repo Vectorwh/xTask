@@ -204,7 +204,7 @@ retry "xLLM-Service submodule update" git -C "${SERVICE_SOURCE_DIR}" submodule u
 retry "xLLM-Service xllm nested submodule update" \
   git -C "${SERVICE_SOURCE_DIR}" submodule update --init --recursive third_party/xllm
 
-if [[ ! -f "${SERVICE_SOURCE_DIR}/CMakeLists.txt" || ! -f "${SERVICE_SOURCE_DIR}/prepare.sh" ]]; then
+if [[ ! -f "${SERVICE_SOURCE_DIR}/CMakeLists.txt" ]]; then
   echo "ERROR: xLLM-Service source is incomplete: ${SERVICE_SOURCE_DIR}" >&2
   exit 1
 fi
