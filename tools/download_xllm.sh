@@ -5,6 +5,7 @@ set -e
 XLLM_PKG_DIR="/workspace/pkg/xllm"
 XLLM_VENDORS_DIR="/workspace/pkg/xllm/vendors"
 XLLM_RUNTIME_LIB_DIR="$XLLM_PKG_DIR/runtime_libs"
+XLLM_THIRD_WHL_DIR="$XLLM_PKG_DIR/third_whl"
 XLLM_SERVICE_BINARY_DIR="$XLLM_PKG_DIR/service_binary"
 XLLM_SERVICE_CURRENT_DIR="$XLLM_SERVICE_BINARY_DIR/current"
 XLLM_INSTALL_SERVICE="${XLLM_INSTALL_SERVICE:-1}"
@@ -81,6 +82,32 @@ ensure_xllm_pack() {
         exit 1
     fi
     XLLM_PACK_READY=1
+}
+
+install_optional_third_party_wheels() {
+    local -a third_wheels=()
+    local wheel
+    shopt -s nullglob
+    for wheel in "$XLLM_THIRD_WHL_DIR"/*.whl; do
+        [ -f "$wheel" ] || continue
+        third_wheels+=("$wheel")
+    done
+    shopt -u nullglob
+
+    if [ "${#third_wheels[@]}" -eq 0 ]; then
+        echo "未检测到 $XLLM_THIRD_WHL_DIR 下的三方 wheel，跳过可选三方包安装。"
+        return 0
+    fi
+
+    echo "安装三方 wheel（${#third_wheels[@]} 个）:"
+    printf '  %s\n' "${third_wheels[@]}"
+    # 用 xLLM 同一解释器一次安装全部本地 wheel，不依赖文件名顺序。
+    # 不自动下载依赖或升级镜像中的 torch/torch_npu；冲突或安装失败明确报错。
+    if ! "$XLLM_PYTHON" -m pip install --force-reinstall --no-deps --no-index "${third_wheels[@]}"; then
+        echo "错误: $XLLM_THIRD_WHL_DIR 下的三方 wheel 安装失败。" >&2
+        return 1
+    fi
+    echo "三方 wheel 安装完成（${#third_wheels[@]} 个）: $XLLM_THIRD_WHL_DIR"
 }
 
 install_xllm_runtime_libraries() {
@@ -162,6 +189,9 @@ if ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/dev/null 2>&1 && [ -d "$XLLM_VENDORS_DIR" 
 
     # 安装 xLLM wheel。
     "$XLLM_PYTHON" -m pip install "$XLLM_PKG_DIR"/xllm_npu*.whl --force-reinstall
+
+    # 目录不存在或没有 wheel 时仅跳过，不影响原有 xLLM/service 安装。
+    install_optional_third_party_wheels
 
     # 优先使用 wheel 安装的 console script。部分旧 wheel 将 xllm 二进制放在
     # site-packages 内，因此保留原来的包目录搜索方式作为兼容回退。
