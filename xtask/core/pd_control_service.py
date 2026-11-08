@@ -238,23 +238,42 @@ class XllmControlService:
                 requires_control_plane_anchor=True,
             )
         else:
-            result = self._exec(
-                "xllm_master_serving --help 2>&1 | grep -q -- '--service_deployment_role'",
+            # Probe each capability independently. The binary is gflags-based and
+            # prints single-dash flags ("-service_deployment_role"), while the
+            # older probe only accepted double-dash, so a capable binary could be
+            # classified as legacy and then start as the default ROUTER without
+            # ever electing a master. Matching on the bare flag name accepts both
+            # dash styles.
+            deployment_role_result = self._exec(
+                "xllm_master_serving --help 2>&1 | grep -q 'service_deployment_role'",
                 timeout=15,
             )
-            refactor_binary = result.success
+            # /readyz is an HTTP route compiled into the binary, not a gflags
+            # option, so --help never mentions it. Probe the embedded route
+            # string instead. The route answers {"status":"ready"} on
+            # COORDINATOR and ROUTER alike, so its presence is a property of the
+            # build rather than of the role.
+            readyz_result = self._exec(
+                "grep -aq 'readyz' \"$(command -v xllm_master_serving)\"",
+                timeout=15,
+            )
             capabilities = XllmServiceBinaryCapabilities(
-                supports_deployment_role=refactor_binary,
-                supports_readyz=refactor_binary,
-                requires_control_plane_anchor=refactor_binary,
+                supports_deployment_role=deployment_role_result.success,
+                supports_readyz=readyz_result.success,
+                # Without the role flag xTask cannot force COORDINATOR, so the
+                # binary may run as ROUTER and never publish the master key; only
+                # then must a missing anchor block startup.
+                requires_control_plane_anchor=deployment_role_result.success,
             )
 
         self._binary_capabilities = capabilities
         logging.info(
-            "xLLM service binary profile=%s capabilities: deployment_role=%s readyz=%s",
+            "xLLM service binary profile=%s capabilities: deployment_role=%s "
+            "readyz=%s anchor=%s",
             profile,
             capabilities.supports_deployment_role,
             capabilities.supports_readyz,
+            capabilities.requires_control_plane_anchor,
         )
         return capabilities
 
