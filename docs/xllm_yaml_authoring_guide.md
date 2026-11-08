@@ -1173,6 +1173,24 @@ bash tools/prepare_xllm.sh > outputs/xllm_compile.log 2>&1
 
 编译成功后，xLLM wheel、Ascend `vendors/` 和运行时动态库会自动归档到
 `pkg/xllm/`，后续用例通过 `download_xllm.sh` 自动加载，不需要手工复制。
+
+如果本轮编译生成了独立的 `flash_linear_attention_npu*.whl`，还会将其归档到
+通用三方包目录 `pkg/xllm/third_whl/`。后续其他三方 wheel 也可以放在该目录，
+无需修改运行环境安装脚本或按包名配置白名单。
+
+运行容器初始化时，`download_xllm.sh` 在安装 xLLM 后使用同一个 Python，
+一次离线安装 `third_whl/` 直属目录中的全部 `*.whl` 文件
+（`--force-reinstall --no-deps --no-index`），不自动下载依赖或升级镜像中的
+torch、torch_npu 等依赖。目录不存在或没有 wheel 时自动跳过，原流程不变。
+FLA wheel 自带 Python 模块和 OPP，无需手工合并进 xLLM wheel。
+
+旧版本没有 FLA 子模块、跳过 FLA 编译或未生成 FLA wheel 时，只跳过 FLA
+归档。编译前仅清理源码 `dist/` 下的历史 FLA wheel；本轮成功后若没有新 FLA
+wheel，会仅清掉 `third_whl/` 中旧的 `flash_linear_attention_npu*.whl`，保留
+其他三方 wheel，后续运行时仍会安装这些包。编译失败时保留上一轮已归档包。
+FLA 编译目录若存在多个版本/芯片的 wheel，归档步骤仍明确报错；通用归档目录
+支持多个三方 wheel，安装时全部交给 pip，版本冲突或安装失败会报错退出。
+
 脚本还会在启动 Docker 编译前打印本次实际使用的仓库、分支和完整 commit：
 
 ```text

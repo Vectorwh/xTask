@@ -27,6 +27,47 @@ XLLM_DIR="${WORK_ROOT}/xllm"
 XLLM_PKG_DIR="${WORK_ROOT}/pkg/xllm"
 XLLM_DIST_DIR="${XLLM_DIR}/dist"
 RUNTIME_LIB_DIR="${XLLM_PKG_DIR}/runtime_libs"
+FLA_NPU_DIST_DIR="${XLLM_DIR}/third_party/xllm_ops/third_party/flash-linear-attention-npu/dist"
+XLLM_THIRD_WHL_DIR="${XLLM_PKG_DIR}/third_whl"
+
+archive_optional_fla_npu_wheel() {
+  local -a fla_wheels=()
+  local wheel_name staged_wheel archived_wheel
+  shopt -s nullglob
+  fla_wheels=("${FLA_NPU_DIST_DIR}"/flash_linear_attention_npu*.whl)
+  shopt -u nullglob
+
+  if [[ ${#fla_wheels[@]} -eq 0 ]]; then
+    # 仅清理旧 FLA wheel，保留 third_whl/ 中其他三方包。
+    rm -f "${XLLM_THIRD_WHL_DIR}"/flash_linear_attention_npu*.whl
+    echo "[fla-npu archive] No FLA wheel produced; skip optional archive."
+    return 0
+  fi
+  if [[ ${#fla_wheels[@]} -ne 1 ]]; then
+    echo "ERROR: expected at most one FLA wheel in '${FLA_NPU_DIST_DIR}', found ${#fla_wheels[@]}." >&2
+    return 1
+  fi
+
+  mkdir -p "${XLLM_THIRD_WHL_DIR}"
+  wheel_name="$(basename "${fla_wheels[0]}")"
+  staged_wheel="$(mktemp "${XLLM_THIRD_WHL_DIR}/.fla-wheel.XXXXXX")"
+  if ! cp -f "${fla_wheels[0]}" "${staged_wheel}" || ! chmod 0644 "${staged_wheel}"; then
+    rm -f "${staged_wheel}"
+    echo "ERROR: failed to stage FLA wheel: ${fla_wheels[0]}" >&2
+    return 1
+  fi
+  if ! mv -f "${staged_wheel}" "${XLLM_THIRD_WHL_DIR}/${wheel_name}"; then
+    rm -f "${staged_wheel}"
+    echo "ERROR: failed to archive FLA wheel: ${wheel_name}" >&2
+    return 1
+  fi
+  for archived_wheel in "${XLLM_THIRD_WHL_DIR}"/flash_linear_attention_npu*.whl; do
+    if [[ "${archived_wheel}" != "${XLLM_THIRD_WHL_DIR}/${wheel_name}" ]]; then
+      rm -f "${archived_wheel}"
+    fi
+  done
+  echo "[fla-npu archive] Archived FLA wheel: ${XLLM_THIRD_WHL_DIR}/${wheel_name}"
+}
 
 # root 容器中的 git submodule sync/config 会替换宿主机 .git 内的文件。
 # 成功和失败退出都归还这些元数据，避免下一轮普通用户无法继续增量更新。
@@ -112,6 +153,8 @@ pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple
 # 只清理源码目录中的历史 wheel。pkg/xllm 中的上一份可用产物会保留到新
 # wheel 成功生成并完成暂存，避免构建失败时丢失可用包。
 rm -f "${XLLM_DIST_DIR}"/xllm_npu*.whl
+# 只归档本轮新生成的 FLA wheel；缺少子模块或跳过 FLA 编译均不影响原流程。
+rm -f "${FLA_NPU_DIST_DIR}"/flash_linear_attention_npu*.whl
 python setup.py bdist_wheel --device npu
 
 # 本轮构建必须且只能生成一个 xLLM wheel，避免通配符把多个版本归档。
@@ -134,6 +177,9 @@ cp -f "${XLLM_WHEELS[0]}" "${XLLM_WHEEL_TMP}"
 rm -f "${XLLM_PKG_DIR}"/xllm_npu*.whl
 mv -f "${XLLM_WHEEL_TMP}" "${XLLM_PKG_DIR}/${XLLM_WHEEL_NAME}"
 echo "Archived xLLM wheel: ${XLLM_PKG_DIR}/${XLLM_WHEEL_NAME}"
+
+# 独立 FLA wheel 放入通用三方包目录，随 pkg/ 同步到 runtime。
+archive_optional_fla_npu_wheel
 
 # 收集编译环境中 xLLM 启动所需、但尚未打入 wheel 的动态库。
 # libxxhash.so.0 通常是版本化文件的软链接，解引用后归档，避免测试容器拿到断链。
