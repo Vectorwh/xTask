@@ -52,6 +52,7 @@
 | 外部 JoyaiASR + 原始客户端，完整数据单轮精度/性能 | `40_external_joyai_asr_legacy_acc_perf.yaml` |
 | 外部 JoyaiASR 两轮重复评测，验证日期归档和报表 | `41_external_joyai_asr_legacy_repeats.yaml` |
 | 普通 Qwen3.6-35B-A3B AISBench perf 回归抽测 | `42_single_qwen36_35b_a3b_perf_regression.yaml` |
+| 外部已有服务 + AISBench GPQA 精度，endpoint 用**域名**（验证走 AISBench `url` 字段） | `43_external_aisbench_gpqa_acc_domain.yaml` |
 | PD 场景 `startup_environment` 启动环境注入示例（字段演示，非新场景） | `28_startup_environment.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
@@ -2061,8 +2062,11 @@ external_service:
   enabled: true
   endpoint: https://gateway.example/inference/svc-x
   health_path: /v1/models      # 空字符串表示跳过探测
-  api_key: EMPTY               # EvalScope / ASR 客户端使用
+  api_key: EMPTY               # EvalScope / ASR 客户端使用；AISBench 路径暂不透传
 ```
+
+> AISBench 路径用域名 / https / 带子路径的 endpoint 见下文「AISBench / EvalScope」一段；
+> 其中 `api_key` 目前未写入 AISBench 模型配置，网关要求鉴权时需另行处理。
 
 | 字段 | 说明 |
 | --- | --- |
@@ -2071,7 +2075,12 @@ external_service:
 | `health_path` | 拼在 **origin**（不含 API path）后探测。默认 `/health`；HTTP 2xx 即通过。空 = 跳过。 |
 | `deployment.instances` / `pd_control` 等 | 开启后忽略并打 warning，不会去那些 host 起服务容器。 |
 
-**AISBench / EvalScope：** 仍起一台 engine 镜像作为 client，并下载对应 bench 工具；不执行 `download_xllm.sh`。AISBench 使用 `host_ip`/`host_port`，网关 URL 里的 path 不会写入 AISBench 配置。EvalScope 使用 origin + path 作为 `--api-url` 前缀。
+**AISBench / EvalScope：** 仍起一台 engine 镜像作为 client，并下载对应 bench 工具；不执行 `download_xllm.sh`。EvalScope 使用 origin + path 作为 `--api-url` 前缀。AISBench 分两种写法：
+
+- endpoint 是**纯 IP + http + 无子路径**（如 `http://11.87.191.75:8800`）时，沿用 `host_ip`/`host_port`，网关 path 不写入配置，脚本与旧版本逐字节一致。
+- endpoint 是**域名、https 或带子路径**（如 `http://glm53-flash-test.jd.local:8800`、`https://gw.jd.local/inference/svc`）时，改写 AISBench 模型配置的 `url` 字段，`host_ip` 保持模板默认 `localhost`。原因是 AISBench 只用 `ipaddress.ip_address()` 校验 `host_ip`、仅额外放行 `localhost`，域名会在 build model 阶段以 `UTILS-CFG-002` 失败；而 `url` 非空时 AISBench 会忽略 `host_ip`/`host_port`，域名、https、子路径都可表达。该模式要求 `served_model_name` 非空（否则 AISBench 会去探测 `v1/models`）。
+
+注意 `url` 模式下的已知限制：https 仅解决 scheme 拼接，内网私有 CA 仍需在 client 容器注入 `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`；若 https 网关必须经代理，AISBench 推理路径的 aiohttp session 未开 `trust_env`，需要另行处理。
 
 **ASR / legacy_infer：** 只起客户端容器，不安装/启动 xLLM，不加载服务端模型权重
 或 tokenizer；使用归档中的原客户端和评分器。`api: audio` 请求

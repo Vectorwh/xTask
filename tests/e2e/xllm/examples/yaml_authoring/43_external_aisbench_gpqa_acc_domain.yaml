@@ -1,0 +1,53 @@
+# 外部已有服务 + AISBench GPQA 精度测试，endpoint 使用**域名**。
+#
+# 来源：glm5.3_xllm_acc_gpqa_nothink_1P1D.yaml（GLM-5.3 PD 分离部署）的
+# benchmark 段原样保留，仅把 deployment 换成 external_service 端点。
+#
+# 本用例重点验证 external_service 端点解析：
+# - endpoint 是域名（非 IP 字面量）时，AISBench 的 host_ip 字段无法表达它
+#   （AISBench 只用 ipaddress.ip_address() 校验 host_ip，额外仅放行 localhost），
+#   历史行为会在 build model 阶段以 UTILS-CFG-002 失败。
+# - 现在 xTask 会把这类端点写入 AISBench 模型配置的 url 字段，
+#   host_ip 保持模板默认 localhost，由 AISBench 忽略 host_ip/host_port。
+# - 端口显式写成 :8800，保证生成的 url 与原来 host_ip 模式的访问地址一致。
+#
+# 运行前检查：
+# 1. 被测服务已在 endpoint 处提供 OpenAI 兼容接口，且 /health 返回 2xx；
+#    health_path 写空字符串 '' 可跳过探测。
+# 2. GPQA 数据文件需提前放在 AISBench 默认目录：
+#    /export/home/models/xllm_test_060/benchmark/ais_bench/datasets/gpqa/gpqa_diamond.csv
+# 3. served_model_name 必须非空（url 模式下为空会触发 AISBench 去探测 v1/models）。
+# 4. baseline 沿用原用例的 72（量纲为百分数）；正式回归前请替换为实测值。
+
+case_name: 43_external_aisbench_gpqa_acc_domain
+engine_type: xllm
+external_service:
+  enabled: true
+  endpoint: http://glm53-flash-test.jd.local:8800
+  health_path: /health
+model_path: /export/home/models/GLM-5.3-w8a8
+served_model_name: GLM-5.3-w8a8
+metrics: acc
+dataset_name: gpqa
+dataset_path: ''
+dataset_format: csv
+userid: 1048
+
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: vllm_api_general_chat
+    dataset_conf: gpqa_gen_0_shot_cot_chat_prompt
+    num_prompts: 198
+    batch_size: 24
+    output_len: 12288
+    request_rate: 0
+    baseline: 72
+    threshold: 0.05
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: false
+      chat_template_kwargs:
+        enable_thinking: false
+        reasoning_effort: low

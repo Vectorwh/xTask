@@ -70,6 +70,64 @@ def _split_dataset_config_reference(dataset_conf):
     return config_name, config_suffix
 
 
+_URL_FIELD_SED = (
+    '''sed -i -E "s#^([[:space:]]*)url[[:space:]]*=.*#\\1url='{url}',#" {config_file}'''
+)
+# grep -F: the URL is matched as a fixed string, so no regex escaping applies.
+_URL_FIELD_CHECK = (
+    '''if ! grep -qF "url='{url}'" {config_file}; then '''
+    '''echo "错误：AISBench 模型配置缺少可用的 url 字段，无法使用端点 {url}" >&2; exit 1; fi'''
+)
+
+
+def _validate_url_literal(url: str) -> None:
+    """Reject characters that would break the single-quoted sed/echo snippets."""
+    if not url:
+        raise ValueError("AISBench url override must not be empty")
+    # '#': sed s### delimiter; '&': sed backreference in the replacement;
+    # "'"/'"'/'$'/'`'/'\': shell and quoting hazards in the generated script.
+    for bad in ("'", '"', "$", "`", "\\", "#", "&"):
+        if bad in url:
+            raise ValueError(
+                f"AISBench url override contains unsupported character {bad!r}: {url!r}"
+            )
+
+
+def append_api_endpoint_override(
+    shell_content, api_type_file, api_address, api_port, aisbench_url=""
+):
+    """Write the model-under-test endpoint into the case-local AISBench config.
+
+    Two mutually exclusive modes:
+
+    * ``aisbench_url`` empty -> historical behaviour: sed ``host_ip`` /
+      ``host_port``. Byte-identical to the scripts xTask generated before
+      external-service URL support existed.
+    * ``aisbench_url`` set -> sed AISBench's ``url`` field and leave
+      ``host_ip`` at the template default ``"localhost"``. AISBench ignores
+      host_ip/host_port whenever ``url`` is non-empty, and ``localhost`` is
+      the only value its config validator whitelists besides IP literals.
+
+    Only the copied, case-local config (``$CONFIG_FILE``) is rewritten; the
+    shared AISBench install is never touched.
+    """
+    if aisbench_url:
+        _validate_url_literal(aisbench_url)
+        shell_content.append(
+            _URL_FIELD_SED.format(url=aisbench_url, config_file=api_type_file)
+        )
+        shell_content.append(
+            _URL_FIELD_CHECK.format(url=aisbench_url, config_file=api_type_file)
+        )
+        return
+    shell_content.append(
+        f'sed -i.bak "s/host_ip\\s*=\\s*.*,/host_ip=\'{api_address}\',/g" {api_type_file}'
+    )
+    shell_content.append(
+        f'sed -i "s/host_port\\s*=\\s*.*,/host_port={api_port},/g" {api_type_file}'
+    )
+
+
 def get_api_type_file(api_type, shell_content):
     _validate_config_name(api_type, "api_type")
     model_config_name = f"xtask_{api_type}"
@@ -515,6 +573,21 @@ def generate_aisbench_script(
     model_path_inside = path_mapping_in_container(model_path)
     user_id = os.getuid()
 
+    # external_service 的域名 / https / 带子路径端点无法用 AISBench 的 host_ip
+    # 表达（AISBench 校验只放行 IP 字面量 + localhost）。这类端点改走 url 字段，
+    # 纯 IP + http + 无子路径时返回 ""，脚本与历史行为逐字节一致。
+    from xtask.core.external_service import resolve_aisbench_url_override
+
+    aisbench_url = resolve_aisbench_url_override(task_config)
+    if aisbench_url and not model_name:
+        # url 模式下若 model 为空，AISBench 会去请求 v1/models 探测模型名；
+        # 该探测走 requests(verify=True) 且路径拼接语义与 urljoin 不同，
+        # 会引入额外的失败面，因此显式要求 served_model_name 非空。
+        raise ValueError(
+            "external_service endpoint requires the AISBench url field; "
+            "served_model_name must be non-empty so AISBench does not probe v1/models"
+        )
+
     # ========== 2. 构造shell脚本内容 ==========
     shell_content = []
     # 基础配置：shebang、出错退出、日志输出
@@ -576,10 +649,11 @@ def generate_aisbench_script(
         # Step 3: 修改配置文件中的核心参数（使用sed命令）
         is_gedit_api = str(api_type or "").startswith("gedit")
         shell_content.append("\n# 3. 修改vllm_api配置文件$CONFIG_FILE参数")
-        # 替换API地址
-        shell_content.append(f'sed -i.bak "s/host_ip\s*=\s*.*,/host_ip=\'{api_address}\',/g" {api_type_file}')
-        # 替换API端口
-        shell_content.append(f'sed -i "s/host_port\s*=\s*.*,/host_port={api_port},/g" {api_type_file}')
+        # 替换API地址：external_service 的域名/https/带子路径端点无法用 host_ip
+        # 表达（AISBench 只接受 IP 字面量 + localhost 白名单），此时改写 url 字段。
+        append_api_endpoint_override(
+            shell_content, api_type_file, api_address, api_port, aisbench_url
+        )
         # 替换模型名称
         shell_content.append(f'sed -i "s/model\s*=\s*.*,/model=\'{model_name}\',/g" {api_type_file}')
         # 替换模型路径
@@ -691,10 +765,10 @@ def generate_aisbench_script(
 
         # Step 2: 修改配置文件中的核心参数（使用sed命令）
         shell_content.append("\n# 3. 修改vllm_api配置文件$CONFIG_FILE参数")
-        # 替换API地址
-        shell_content.append(f'sed -i.bak "s/host_ip\s*=\s*.*,/host_ip=\'{api_address}\',/g" {api_type_file}')
-        # 替换API端口
-        shell_content.append(f'sed -i "s/host_port\s*=\s*.*,/host_port={api_port},/g" {api_type_file}')
+        # 替换API地址：同精度分支，external_service 端点无法用 host_ip 时改写 url。
+        append_api_endpoint_override(
+            shell_content, api_type_file, api_address, api_port, aisbench_url
+        )
         # 替换模型名称
         shell_content.append(f'sed -i "s/model\s*=\s*.*,/model=\'{model_name}\',/g" {api_type_file}')
         # 替换模型路径

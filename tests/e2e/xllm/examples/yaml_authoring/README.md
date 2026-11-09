@@ -42,4 +42,5 @@ TP2 自部署基础用例位于 `tests/e2e/xllm/joyai/joyai_asr/`；40/41 是同
 | `28` | `startup_environment`：按逻辑实例继承、按 node 整段替换的启动脚本 shell 行 |
 | `40` | 外部 JoyaiASR 服务 + 原始客户端：完整 1162 条精度与性能评测（multipart/SSE，并发 2，不管理服务生命周期） |
 | `41` | 外部 JoyaiASR 服务 + 两轮完整 1162 条评测：验证日期归档、多轮 CSV/统计和全局/用例组 Excel（并发 2） |
+| `43` | 外部已有服务 + AISBench GPQA 精度，endpoint 用**域名**（验证 external_service 走 AISBench `url` 字段） |
 | `42` | Qwen3.6-35B-A3B 普通 LLM perf 回归抽测：复制现有 BS1 用例到本机 `.75`，保持 AISBench 请求、预热、MTP 和基线不变 |

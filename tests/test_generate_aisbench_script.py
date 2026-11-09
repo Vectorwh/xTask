@@ -1297,5 +1297,285 @@ class AisbenchScriptGenerationTests(unittest.TestCase):
         self.assertFalse(_should_run_perf_warmup(custom_without))
 
 
+class AisbenchExternalEndpointTests(unittest.TestCase):
+    """external_service endpoints that AISBench's host_ip cannot express.
+
+    AISBench validates host_ip with ipaddress.ip_address() and only whitelists
+    "localhost", so hostnames / https / sub-path gateways must be written into
+    the case-local config's ``url`` field instead (non-empty url makes AISBench
+    ignore host_ip/host_port). Plain IPv4 + http + no path must keep producing
+    the historical host_ip scripts byte for byte.
+    """
+
+    def _task(self, endpoint):
+        task = {
+            "case_name": "external_endpoint",
+            "served_model_name": "glm-5.3-flash",
+            "model_path": "/models/glm",
+            "metrics": "perf",
+            "dataset_name": "gsm8k",
+            "external_service": {"enabled": True, "endpoint": endpoint},
+            "benchmark": {
+                "benchmark_type": "aisbench",
+                "perf": {
+                    "api_type": "vllm_api_general_stream",
+                    "dataset_conf": "gsm8k_gen_0_shot_cot_str_perf",
+                    "batch_size": 1,
+                    "output_len": 64,
+                    "request_rate": 1,
+                    "num_warmups": 0,
+                },
+            },
+        }
+        from xtask.core.external_service import (
+            apply_external_service_to_task_config,
+        )
+
+        apply_external_service_to_task_config(task)
+        return task
+
+    def _script(self, task):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_dir = Path(temporary_directory)
+            with mock.patch.object(
+                generator, "path_mapping_in_container", side_effect=lambda p: p
+            ), mock.patch.object(generator, "download_dataset", return_value=[]), mock.patch.object(
+                generator, "preprocess_dataset", return_value=(["true"], "gsm8k")
+            ):
+                generator.generate_aisbench_script(task, str(output_dir))
+            return (output_dir / "run_aisbench_test.sh").read_text(encoding="utf-8")
+
+    def test_ip_endpoint_keeps_historical_host_ip_script(self):
+        script = self._script(self._task("http://10.20.30.40:8800"))
+        self.assertIn("host_ip='10.20.30.40'", script)
+        self.assertIn("host_port=8800", script)
+        # No url rewrite: host_ip mode must stay byte-identical to old output.
+        self.assertNotIn("url=", script)
+
+    def test_domain_endpoint_writes_url_and_drops_host_ip_sed(self):
+        script = self._script(self._task("http://glm53-flash-test.jd.local:8800"))
+        self.assertIn("url='http://glm53-flash-test.jd.local:8800/'", script)
+        # Regression guard: writing url but still sed-ing the hostname into
+        # host_ip leaves AISBench's validator failing (UTILS-CFG-002).
+        self.assertNotIn("host_ip='glm53-flash-test.jd.local'", script)
+
+    def test_https_and_gateway_subpath_keep_trailing_slash(self):
+        script = self._script(self._task("https://gw.jd.local:8443/inference/svc"))
+        # urljoin() replaces the last path segment when the base lacks a
+        # trailing slash, silently dropping "svc" from the request URL.
+        self.assertIn("url='https://gw.jd.local:8443/inference/svc/'", script)
+
+    def test_url_mode_rejects_empty_served_model_name(self):
+        task = self._task("http://glm53-flash-test.jd.local:8800")
+        task["served_model_name"] = ""
+        # Empty model makes AISBench probe v1/models via requests(verify=True),
+        # which has different TLS and path-join semantics. Fail fast instead.
+        with self.assertRaises(ValueError):
+            self._script(task)
+
+
+class AisbenchUrlOverrideResolutionTests(unittest.TestCase):
+    def _resolve(self, **overrides):
+        from xtask.core.external_service import resolve_aisbench_url_override
+
+        task = {
+            "external_service": {"enabled": True, "endpoint": "http://10.0.0.1:8800"},
+            "benchmark": {"benchmark_type": "aisbench", "perf": {}},
+            "metrics": "perf",
+            "dataset_name": "gsm8k",
+        }
+        task.update(overrides)
+        return resolve_aisbench_url_override(task)
+
+    def test_ip_http_origin_keeps_host_ip_mode(self):
+        self.assertEqual(self._resolve(), "")
+
+    def test_ipv6_literal_keeps_host_ip_mode(self):
+        # Brackets are required by _parse_endpoint; host_ip mode then works
+        # because AISBench's validator accepts bare IPv6 literals.
+        self.assertEqual(
+            self._resolve(
+                external_service={"enabled": True, "endpoint": "http://[::1]:8800"}
+            ),
+            "",
+        )
+
+    def test_domain_switches_to_url(self):
+        self.assertEqual(
+            self._resolve(external_service={"enabled": True, "endpoint": "http://svc.jd.local:8800"}),
+            "http://svc.jd.local:8800/",
+        )
+
+    def test_https_switches_to_url(self):
+        self.assertEqual(
+            self._resolve(external_service={"enabled": True, "endpoint": "https://10.0.0.1:8443"}),
+            "https://10.0.0.1:8443/",
+        )
+
+    def test_subpath_switches_to_url_and_keeps_trailing_slash(self):
+        self.assertEqual(
+            self._resolve(
+                external_service={
+                    "enabled": True,
+                    "endpoint": "https://gw.jd.local/inference/svc",
+                }
+            ),
+            "https://gw.jd.local:443/inference/svc/",
+        )
+
+    def test_switch_off_never_switches_mode(self):
+        self.assertEqual(
+            self._resolve(
+                external_service=False,
+                host_addr="glm53-flash-test.jd.local",
+                port=8800,
+            ),
+            "",
+        )
+
+
+class AisbenchEndpointOverrideSnippetTests(unittest.TestCase):
+    """The generated sed must survive real AISBench templates unmodified."""
+
+    def test_url_sed_targets_top_level_url_only(self):
+        import subprocess
+
+        source = (
+            Path(generator.__file__).resolve().parent
+            / "configs" / "models" / "gedit_image_edit.py"
+        )
+        content = source.read_text(encoding="utf-8")
+        self.assertIn("encoder_url=", content)
+
+        shell_content = []
+        generator.append_api_endpoint_override(
+            shell_content, "$CONFIG_FILE", "127.0.0.1", 19000, "https://gw.jd.local/svc/"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = Path(temporary_directory) / "model.py"
+            config.write_text(content, encoding="utf-8")
+            for line in shell_content:
+                subprocess.run(
+                    line.replace("$CONFIG_FILE", str(config)),
+                    shell=True,
+                    capture_output=True,
+                    check=False,
+                )
+            rewritten = config.read_text(encoding="utf-8")
+
+        self.assertIn("url='https://gw.jd.local/svc/'", rewritten)
+        # Anchored sed must not clobber the unrelated encoder_url field.
+        self.assertIn('encoder_url="http://127.0.0.1:18007"', rewritten)
+
+    def test_url_sed_rejects_shell_and_sed_metacharacters(self):
+        for bad in ("https://gw/a#b", "https://gw/a&b", "https://gw/$(id)", "https://gw/a'b"):
+            with self.assertRaises(ValueError):
+                generator.append_api_endpoint_override(
+                    [], "$CONFIG_FILE", "127.0.0.1", 8800, bad
+                )
+
+    def test_missing_url_field_fails_loudly_instead_of_silently(self):
+        """A template without a top-level url= must abort, not fall back.
+
+        If the sed silently no-ops, the config keeps host_ip="localhost" and
+        AISBench would talk to the wrong address with no error at all, so the
+        generated script has to stop explicitly.
+        """
+        import subprocess
+
+        shell_content = []
+        generator.append_api_endpoint_override(
+            shell_content, "$CONFIG_FILE", "127.0.0.1", 8800, "https://gw.jd.local/svc/"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = Path(temporary_directory) / "model.py"
+            config.write_text('models = [dict(url="", host_ip="localhost")]\n', encoding="utf-8")
+            lines = [f"CONFIG_FILE={config}"] + [
+                line.replace("$CONFIG_FILE", str(config)) for line in shell_content
+            ]
+            result = subprocess.run(
+                ["bash", "-c", "\n".join(lines)], capture_output=True, text=True
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("url", result.stderr)
+
+
+class ExternalEndpointExampleTests(unittest.TestCase):
+    """The shipped domain-endpoint example must keep exercising url mode."""
+
+    EXAMPLE = (
+        Path(__file__).resolve().parent
+        / "e2e" / "xllm" / "examples" / "yaml_authoring"
+        / "43_external_aisbench_gpqa_acc_domain.yaml"
+    )
+
+    def test_example_uses_domain_endpoint_and_resolves_to_url(self):
+        import yaml
+
+        task = yaml.safe_load(self.EXAMPLE.read_text(encoding="utf-8"))
+        endpoint = task["external_service"]["endpoint"]
+
+        from xtask.core.external_service import (
+            apply_external_service_to_task_config,
+            resolve_aisbench_url_override,
+            validate_external_service_config,
+        )
+
+        validate_external_service_config(task)
+        apply_external_service_to_task_config(task)
+
+        # Domain (not an IP literal) is what forces AISBench's url field.
+        self.assertEqual(
+            resolve_aisbench_url_override(task), f"{endpoint.rstrip('/')}/"
+        )
+        self.assertEqual(task["host_addr"], "glm53-flash-test.jd.local")
+        self.assertEqual(task["port"], 8800)
+        # served_model_name must stay non-empty for url mode.
+        self.assertTrue(task["served_model_name"])
+
+    def test_example_keeps_the_gpqa_benchmark_shape(self):
+        import yaml
+
+        task = yaml.safe_load(self.EXAMPLE.read_text(encoding="utf-8"))
+        acc = task["benchmark"]["acc"]
+        self.assertEqual(task["benchmark"]["benchmark_type"], "aisbench")
+        self.assertEqual(acc["api_type"], "vllm_api_general_chat")
+        self.assertEqual(acc["dataset_conf"], "gpqa_gen_0_shot_cot_chat_prompt")
+        # Copied verbatim from glm5.3_xllm_acc_gpqa_nothink_1P1D.yaml.
+        self.assertEqual(acc["num_prompts"], 198)
+        self.assertEqual(acc["output_len"], 12288)
+        self.assertFalse(
+            acc["generation_kwargs"]["chat_template_kwargs"]["enable_thinking"]
+        )
+
+    def test_example_generates_url_sed_not_host_ip_sed(self):
+        import yaml
+
+        task = yaml.safe_load(self.EXAMPLE.read_text(encoding="utf-8"))
+
+        from xtask.core.external_service import (
+            apply_external_service_to_task_config,
+            resolve_aisbench_url_override,
+        )
+
+        # host_addr/port are injected by the scheduler from external_service.
+        apply_external_service_to_task_config(task)
+
+        # Call the shared endpoint-override helper directly: the full script
+        # needs the shared AISBench dataset tree, which is not part of this
+        # repository, but the endpoint half of the script does not.
+        shell_content = []
+        generator.append_api_endpoint_override(
+            shell_content,
+            "$CONFIG_FILE",
+            task["host_addr"],
+            task["port"],
+            resolve_aisbench_url_override(task),
+        )
+        content = "\n".join(shell_content)
+        self.assertIn("url='http://glm53-flash-test.jd.local:8800/'", content)
+        self.assertNotIn("host_ip='glm53-flash-test.jd.local'", content)
+
+
 if __name__ == "__main__":
     unittest.main()
