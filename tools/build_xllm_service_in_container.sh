@@ -31,6 +31,8 @@ restore_host_ownership() {
     [[ -d "${BUILD_DIR}" ]] && chown -R "${HOST_UID}:${HOST_GID}" "${BUILD_DIR}"
     [[ -d "${SERVICE_ARCHIVE_DIR}" ]] && \
       chown -R "${HOST_UID}:${HOST_GID}" "${SERVICE_ARCHIVE_DIR}"
+    [[ -d "${XLLM_PKG_DIR}/release_pack" ]] && \
+      chown -R "${HOST_UID}:${HOST_GID}" "${XLLM_PKG_DIR}/release_pack"
   fi
 }
 trap restore_host_ownership EXIT
