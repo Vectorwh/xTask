@@ -191,6 +191,7 @@ def generate_xllm_script(config, output_file_path: str, output_file="xllm_serv_s
     if pd_enabled:
         pd_parameters = [
             "--enable_disagg_pd=true",
+            "--enable_service_routing=true",
             f"--instance_role={pd_role}",
             f"--etcd_addr={pd_master_host}:{pd_etcd_port}",
             (

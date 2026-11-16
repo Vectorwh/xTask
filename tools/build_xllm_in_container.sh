@@ -181,6 +181,13 @@ echo "Archived xLLM wheel: ${XLLM_PKG_DIR}/${XLLM_WHEEL_NAME}"
 # 独立 FLA wheel 放入通用三方包目录，随 pkg/ 同步到 runtime。
 archive_optional_fla_npu_wheel
 
+# The new upstream build additionally emits a complete release pack. Archive
+# it separately; absence preserves the original wheel/vendors workflow.
+if [[ -f "${XLLM_DIR}/xllm_pack.tar.gz" ]]; then
+  python3 "${WORK_ROOT}/tools/xllm_release_pack.py" publish \
+    "${XLLM_DIR}/xllm_pack.tar.gz" "${XLLM_PKG_DIR}/release_pack"
+fi
+
 # 收集编译环境中 xLLM 启动所需、但尚未打入 wheel 的动态库。
 # libxxhash.so.0 通常是版本化文件的软链接，解引用后归档，避免测试容器拿到断链。
 XXHASH_SONAME_PATH="/usr/lib64/libxxhash.so.0"

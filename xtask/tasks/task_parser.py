@@ -3,6 +3,10 @@ import inspect
 import logging
 import copy
 import re
+from xtask.core.xllm_service_config import (
+    canonical_xllm_service_parameter_path,
+    normalize_xllm_service_config,
+)
 from xtask.tasks.base_task import Task, get_case_name_by_args
 from xtask.tasks.topology_search import (
     ASSESS_TOPOLOGY_PARAMETER,
@@ -344,7 +348,8 @@ def _update_config_by_path(
     """
     if not isinstance(key_path, str) or not key_path.strip():
         raise ValueError("assess_test_param keys must be non-empty strings")
-    key_path = key_path.strip()
+    key_path = canonical_xllm_service_parameter_path(key_path.strip())
+    normalize_xllm_service_config(config)
 
     # Explicit dotted paths are strict: a typo must not silently generate an
     # unchanged candidate YAML.
@@ -434,6 +439,7 @@ def _normalize_assess_parameters(assess_test: Dict[str, Any]) -> Dict[str, Any]:
 
             key = raw_key.strip()
             path = f"{prefix}.{key}" if prefix else key
+            path = canonical_xllm_service_parameter_path(path)
             if isinstance(raw_value, dict):
                 if not raw_value:
                     raise ValueError(f"Empty assess_test_param mapping: {path}")
@@ -744,8 +750,10 @@ def gen_group_autoassess_task(
             logging.error(f"基础配置文件为空或解析失败: {basecase_file}")
             return False
 
-        # 2. 准备配置副本
-        config_copy = base_config.copy()
+        # Normalize even the first/default round, which does not call the
+        # parameter updater. Do not mutate the retained source configuration.
+        config_copy = copy.deepcopy(base_config)
+        normalize_xllm_service_config(config_copy)
         param_value = None
 
         # 3. 确定参数值并更新配置

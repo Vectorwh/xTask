@@ -1,6 +1,6 @@
 """External already-running service mode for xTask.
 
-Default is off. When enabled, xTask does not start xLLM / pd_control / etcd
+Default is off. When enabled, xTask does not start xLLM / xllm_service / etcd
 and only prepares datasets, a client (or VBench) container, benchmark, and
 results against a caller-provided IP:port or API URL.
 
@@ -21,6 +21,7 @@ _FORBIDDEN_ASSESS_TOKENS = (
     "device_ids",
     "pd_instances",
     "service_instances",
+    "xllm_service",
     "pd_control",
     "service_control",
     "assess_topologies",
@@ -32,6 +33,7 @@ _TOPOLOGY_DEPLOYMENT_KEYS = (
     "instances",
     "pd_instances",
     "service_instances",
+    "xllm_service",
     "pd_control",
     "service_control",
 )

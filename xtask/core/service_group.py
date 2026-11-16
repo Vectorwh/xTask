@@ -9,6 +9,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from xtask.core.xllm_service_config import (
+    get_xllm_service_config,
+    normalize_xllm_service_config,
+    build_xllm_service_topology,
+    has_service_instance_lists,
+    service_container_nodes,
+    service_etcd_location,
+    service_port_claims,
+)
 from xtask.utils.container_manager import ContainerConfig, ContainerManager
 from xtask.utils.host_executor import create_host_executor, is_local_host
 
@@ -25,6 +34,7 @@ def validate_pd_deployment_authoring(task_config: Dict[str, Any]) -> None:
     if not isinstance(task_config, dict):
         raise TypeError("task_config must be a mapping")
 
+    normalize_xllm_service_config(task_config)
     deployment = task_config.get("deployment")
     if not isinstance(deployment, dict):
         return
@@ -52,14 +62,14 @@ def validate_pd_deployment_authoring(task_config: Dict[str, Any]) -> None:
             raise ValueError(
                 "deployment.service_instances must be a non-empty list"
             )
-        service_control = deployment.get("service_control")
-        if not isinstance(service_control, dict):
+        control = deployment.get("xllm_service")
+        if not isinstance(control, dict):
             raise ValueError(
-                "service_routed deployment requires deployment.service_control"
+                "service_routed deployment requires deployment.xllm_service"
             )
-        if not (service_control.get("host") or deployment.get("master_host")):
+        if not service_etcd_location(task_config)[0]:
             raise ValueError(
-                "service_routed deployment requires service_control.host or "
+                "service_routed deployment requires xllm_service.host or "
                 "deployment.master_host"
             )
         return
@@ -96,6 +106,7 @@ def normalize_service_routed_deployment(task_config: Dict[str, Any]) -> Dict[str
     if not isinstance(task_config, dict):
         raise TypeError("task_config must be a mapping")
 
+    normalize_xllm_service_config(task_config)
     deployment = task_config.get("deployment")
     if not isinstance(deployment, dict):
         return task_config
@@ -252,6 +263,7 @@ def normalize_pd_deployment(task_config: Dict[str, Any]) -> Dict[str, Any]:
 
     normalize_service_routed_deployment(task_config)
 
+    normalize_xllm_service_config(task_config)
     deployment = task_config.get("deployment")
     if not isinstance(deployment, dict):
         return task_config
@@ -445,9 +457,9 @@ def resolve_master_host(task_config: Dict[str, Any]) -> str:
     normalize_pd_deployment(task_config)
     deployment = task_config.get("deployment") or {}
     if deployment.get("mode") == "service_routed":
-        service_control = deployment.get("service_control") or {}
-        if service_control.get("host"):
-            return str(service_control["host"])
+        control = deployment.get("xllm_service") or {}
+        if control.get("host"):
+            return str(control["host"])
     if deployment.get("master_host"):
         return deployment["master_host"]
     for instance in deployment.get("instances") or []:
@@ -539,18 +551,17 @@ def merge_instance_task_config(
     base_ext = copy.deepcopy(cfg.get("serving_extensiable_param") or {})
     base_ext.update(instance.get("serving_extensiable_param") or {})
     deployment = task_config.get("deployment") or {}
-    pd_control = deployment.get("pd_control") or {}
+    control = get_xllm_service_config(task_config)
     instance_role = str(instance.get("role", cfg.get("role", ""))).lower()
     if deployment.get("mode") == "pd_disaggregated" or instance_role in {"prefill", "decode"}:
         cfg["enable_disagg_pd"] = True
         cfg["pd_role"] = instance_role.upper()
-        cfg["pd_master_host"] = pd_control.get("host") or master_host
-        cfg["pd_etcd_port"] = int(pd_control.get("etcd_client_port", 3389))
-        cfg["pd_service_port"] = int(pd_control.get("http_server_port", 38888))
+        cfg["pd_master_host"], cfg["pd_etcd_port"] = service_etcd_location(task_config)
+        cfg["pd_service_port"] = int(control.get("http_server_port", 38888))
         cfg["transfer_port_base"] = int(
             instance.get(
                 "transfer_port_base",
-                pd_control.get("transfer_port_base", 26000),
+                control.get("transfer_port_base", 26000),
             )
         )
         instance_hosts = [
@@ -558,7 +569,7 @@ def merge_instance_task_config(
             for item in deployment.get("instances") or []
             if item.get("host")
         ]
-        configured_no_proxy = pd_control.get("no_proxy_hosts") or []
+        configured_no_proxy = control.get("no_proxy_hosts") or []
         cfg["pd_no_proxy"] = ",".join(
             dict.fromkeys(
                 ["localhost", "127.0.0.1", "0.0.0.0", cfg["pd_master_host"]]
@@ -567,7 +578,6 @@ def merge_instance_task_config(
             )
         )
     elif deployment.get("mode") == "service_routed":
-        service_control = deployment.get("service_control") or {}
         reserved_routing_parameters = {
             "enable_service_routing",
             "etcd_addr",
@@ -583,18 +593,16 @@ def merge_instance_task_config(
                 "must not appear in serving_extensiable_param: "
                 f"{conflicting_parameters}"
             )
-        control_host = service_control.get("host") or resolve_master_host(task_config)
+        control_host, etcd_port = service_etcd_location(task_config)
         cfg["enable_service_routing"] = True
         cfg["service_control_host"] = str(control_host)
-        cfg["service_etcd_port"] = int(
-            service_control.get("etcd_client_port", 3389)
-        )
+        cfg["service_etcd_port"] = etcd_port
         instance_hosts = [
             str(item.get("host"))
             for item in deployment.get("instances") or []
             if item.get("host")
         ]
-        configured_no_proxy = service_control.get("no_proxy_hosts") or []
+        configured_no_proxy = control.get("no_proxy_hosts") or []
         cfg["service_no_proxy"] = ",".join(
             dict.fromkeys(
                 ["localhost", "127.0.0.1", "0.0.0.0", str(control_host)]
@@ -602,6 +610,14 @@ def merge_instance_task_config(
                 + [str(item) for item in configured_no_proxy]
             )
         )
+    if deployment.get("mode") in {"pd_disaggregated", "service_routed"}:
+        if base_ext.get("control_plane_shard_id", "default") != "default":
+            raise ValueError("Phase 1 supports Engine control_plane_shard_id=default only")
+        namespace = control.get("etcd_namespace")
+        if namespace is not None:
+            if "etcd_namespace" in base_ext and base_ext["etcd_namespace"] != namespace:
+                raise ValueError("Conflicting Engine and Service etcd_namespace")
+            base_ext["etcd_namespace"] = namespace
     cfg["serving_extensiable_param"] = base_ext
 
     if instance.get("readiness"):
@@ -865,41 +881,12 @@ def _validate_service_plans(
                 f"logical group {group_name} disagg_pd_port",
             )
 
-    if pd_mode:
-        deployment = task_config.get("deployment") or {}
-        pd_control = deployment.get("pd_control") or {}
-        control_host = str(pd_control.get("host") or resolve_master_host(task_config))
-        for field_name, default in (
-            ("etcd_client_port", 3389),
-            ("etcd_peer_port", 3390),
-            ("http_server_port", 38888),
-            ("rpc_server_port", 38889),
-        ):
-            claim_port(
-                control_host,
-                int(pd_control.get(field_name, default)),
-                f"pd_control.{field_name}",
-            )
-    elif is_service_routed_deployment(task_config):
-        deployment = task_config.get("deployment") or {}
-        service_control = deployment.get("service_control") or {}
-        control_host = str(service_control.get("host") or resolve_master_host(task_config))
-        runtime_hosts = {str(plan.host) for plan in plans}
-        if control_host not in runtime_hosts:
-            raise ValueError(
-                f"service_control.host {control_host!r} must match a service node host"
-            )
-        for field_name, default in (
-            ("etcd_client_port", 3389),
-            ("etcd_peer_port", 3390),
-            ("http_server_port", 38888),
-            ("rpc_server_port", 38889),
-        ):
-            claim_port(
-                control_host,
-                int(service_control.get(field_name, default)),
-                f"service_control.{field_name}",
-            )
+    if pd_mode or is_service_routed_deployment(task_config):
+        # Resolve hosting containers before process launch. Multiple instances
+        # on one host are legal only with an explicit container binding.
+        service_container_nodes(task_config, plans)
+        for host, port, description in service_port_claims(task_config):
+            claim_port(host, port, description)
 
 
 def build_service_plans(
@@ -1140,13 +1127,11 @@ def create_runtime_for_plan(
 def get_benchmark_endpoint(task_config: Dict[str, Any], plans: List[ServiceLaunchPlan]) -> str:
     """Derive the Benchmark endpoint from deployment topology.
 
-    PD deployments use ``pd_control.host:http_server_port`` and ordinary
-    service-routed deployments use ``service_control.host:http_server_port``.
-    Other deployments use ``master_host`` and the matching instance's
-    ``local_port``. An explicit ``deployment.benchmark.endpoint`` is
-    intentionally ignored so topology has one authoritative source for
-    service addressing, except when ``external_service`` is enabled: then the
-    caller-provided live URL (origin, without API path) is authoritative.
+    Routed deployments use ``xllm_service.host:http_server_port``. Other
+    deployments use ``master_host`` and the matching Engine's ``local_port``.
+    An explicit ``deployment.benchmark.endpoint`` is ignored unless
+    ``external_service`` is enabled, preserving the existing addressing rules.
+    Legacy control blocks are normalized before resolving the endpoint.
     """
     from xtask.core.external_service import (
         is_external_service_enabled,
@@ -1158,21 +1143,24 @@ def get_benchmark_endpoint(task_config: Dict[str, Any], plans: List[ServiceLaunc
 
     normalize_pd_deployment(task_config)
     deployment = task_config.get("deployment") or {}
-    pd_control = deployment.get("pd_control")
-    if pd_control is not None:
-        control_host = pd_control.get("host")
-        control_port = pd_control.get("http_server_port")
-        if not control_host or control_port is None:
-            raise ValueError(
-                "PD deployment requires pd_control.host and "
-                "pd_control.http_server_port to derive Benchmark endpoint"
-            )
+    control = deployment.get("xllm_service")
+    if has_service_instance_lists(task_config):
+        router = build_xllm_service_topology(task_config).router
+        return f"http://{router.host}:{router.http_server_port}"
+    if deployment.get("mode") == "service_routed":
+        control = control or {}
+        control_host = control.get("host") or resolve_master_host(task_config)
+        control_port = control.get("http_server_port", 38888)
         return f"http://{control_host}:{int(control_port)}"
 
-    if deployment.get("mode") == "service_routed":
-        service_control = deployment.get("service_control") or {}
-        control_host = service_control.get("host") or resolve_master_host(task_config)
-        control_port = service_control.get("http_server_port", 38888)
+    if control is not None:
+        control_host = control.get("host")
+        control_port = control.get("http_server_port")
+        if not control_host or control_port is None:
+            raise ValueError(
+                "PD deployment requires xllm_service.host and "
+                "xllm_service.http_server_port to derive Benchmark endpoint"
+            )
         return f"http://{control_host}:{int(control_port)}"
 
     master_host = deployment.get("master_host")

@@ -19,6 +19,13 @@ from xtask.utils.container_manager import ContainerManager, ContainerConfig
 from xtask.utils.config_parser import get_xtask_config_data
 from xtask.serv_fmk.serv_common import wait_serv_start
 from xtask.core.result_processor import verify_result, write_result
+from xtask.core.xllm_service_config import (
+    get_xllm_service_config,
+    normalize_xllm_service_config,
+    service_container_nodes,
+    service_etcd_location,
+    service_port_claims,
+)
 
 
 class Json_Reader:
@@ -391,7 +398,7 @@ def generate_commands(
     benchmark_cmd = ""
 
     # External mode must not build xLLM launch plans even if a copied YAML
-    # still contains deployment.instances / pd_control.
+    # still contains deployment.instances / xllm_service.
     if is_external_service_enabled(task_config):
         benchmark_cmd = generate_benchmark_command(
             task_config,
@@ -911,6 +918,16 @@ def _record_service_group_archive_path(state, benchmarkpath) -> None:
     archive_paths = state.setdefault("service_group_archive_paths", [])
     if benchmarkpath not in archive_paths:
         archive_paths.append(benchmarkpath)
+    control_service = state.get("xllm_control_service")
+    if getattr(control_service, "is_split", False):
+        try:
+            control_service.collect_logs()
+            control_service.archive_logs(
+                state.get("output_file_path") or str(Path(control_service.local_root).parent.parent),
+                benchmarkpath,
+            )
+        except Exception:
+            logging.warning("Failed to snapshot this trial's Service logs", exc_info=True)
 
 
 def _post_process_benchmark_rst(
@@ -1408,7 +1425,7 @@ def _load_task_and_engine(context):
         if ignored:
             logging.warning(
                 "external_service is enabled; ignored topology fields %s "
-                "(xLLM / pd_control will not be started)",
+                "(xLLM / xllm_service will not be started)",
                 ", ".join(ignored),
             )
 
@@ -1881,6 +1898,14 @@ def _prepare_container_multi_host(context):
                 state["service_runtimes"] = runtimes
                 return
 
+        try:
+            from xtask.utils.hccn_config import prepare_runtime_hccn
+            prepare_runtime_hccn(plan, runtime.container_config, manager.executor)
+        except (ValueError, OSError) as exc:
+            _fail_stage(context, str(exc))
+            state["service_runtimes"] = runtimes
+            return
+
         success, container_id = manager.create_container()
         if not success:
             _fail_stage(
@@ -1956,19 +1981,19 @@ def _xllm_control_host(task_config):
     if not _uses_xllm_control_service(task_config):
         return None
     deployment = task_config.get("deployment") or {}
-    control_key = (
-        "service_control"
-        if deployment.get("mode") == "service_routed"
-        else "pd_control"
-    )
-    control = deployment.get(control_key) or {}
-    host = control.get("host") or deployment.get("master_host")
+    host, _port = service_etcd_location(task_config)
     return str(host) if host else None
 
 
-def _download_xllm_command(install_service):
+def _download_xllm_command(install_service, task_config=None):
     value = 1 if install_service else 0
-    return f"XLLM_INSTALL_SERVICE={value} bash /workspace/tools/download_xllm.sh;"
+    package = ((task_config or {}).get("deployment") or {}).get("xllm_package") or {}
+    environment = [f"XLLM_INSTALL_SERVICE={value}"]
+    for key, variable in (("release_pack", "XLLM_RELEASE_PACK"), ("etcd_bin_dir", "XLLM_ETCD_BIN_DIR")):
+        setting = package.get(key) or os.environ.get(variable)
+        if setting:
+            environment.append(variable + "=" + shlex.quote(str(setting)))
+    return " ".join(environment) + " bash /workspace/tools/download_xllm.sh;"
 
 
 def _prepare_runtime_dependencies(context):
@@ -1990,7 +2015,7 @@ def _prepare_runtime_dependencies(context):
     timeout = engine_config.get("startup_timeout", 300)
 
     compilation_cmd = _download_xllm_command(
-        _uses_xllm_control_service(task_config)
+        _uses_xllm_control_service(task_config), task_config
     )
     logging.info(f"Starting the compilation task: {compilation_cmd}")
     download_result = container_manager.exec_in_container(
@@ -2074,22 +2099,12 @@ def _prepare_runtime_dependencies_multi_host(context):
     plans = state.get("service_plans") or []
     timeout = engine_config.get("startup_timeout", 300)
 
-    control_runtime = None
+    control_runtimes = []
     if _uses_xllm_control_service(task_config):
-        control_host = _xllm_control_host(task_config)
-        control_runtime = next(
-            (
-                runtime
-                for runtime in runtimes
-                if str(runtime.plan.host) == str(control_host)
-            ),
-            None,
-        )
-        if control_runtime is None:
-            _fail_stage(
-                context,
-                f"xLLM control host {control_host!r} has no service runtime",
-            )
+        try:
+            control_runtimes = service_container_nodes(task_config, runtimes)
+        except (ValueError, TypeError) as exc:
+            _fail_stage(context, str(exc))
             return
 
     # Auto-generate / merge / inject HCCL ranktables before downloading deps.
@@ -2146,7 +2161,7 @@ def _prepare_runtime_dependencies_multi_host(context):
             runtime.plan.instance_name,
             runtime.plan.host,
         )
-        download_cmd = _download_xllm_command(runtime is control_runtime)
+        download_cmd = _download_xllm_command(any(runtime is item for item in control_runtimes), task_config)
         result = manager.exec_in_container(
             name, download_cmd, timeout=timeout
         )
@@ -3065,23 +3080,9 @@ def _control_plane_ports(task_config) -> set:
     deployment = task_config.get("deployment")
     if not isinstance(deployment, dict):
         return ports
-    for section in ("pd_control", "service_control"):
-        control = deployment.get(section)
-        if not isinstance(control, dict):
-            continue
-        for field in (
-            "etcd_client_port",
-            "etcd_peer_port",
-            "http_server_port",
-            "rpc_server_port",
-        ):
-            try:
-                port = int(control[field])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if 1 <= port <= 65535:
-                ports.add(port)
-    return ports
+    if not get_xllm_service_config(task_config):
+        return ports
+    return {port for _host, port, _description in service_port_claims(task_config)}
 
 
 def _xllm_fixed_ports(plan, task_config=None) -> list:
@@ -3124,8 +3125,12 @@ def _xllm_fixed_ports(plan, task_config=None) -> list:
         port = node_base + offset
         if 1 <= port <= 65535:
             ports.add(port)
-    # Control plane ports; reserving them on every host is harmless.
-    ports.update(_control_plane_ports(task_config))
+    # Reserve Service/etcd listeners only on their configured host.
+    if task_config and get_xllm_service_config(task_config):
+        ports.update(
+            port for host, port, _description in service_port_claims(task_config)
+            if str(host) == str(getattr(plan, "host", ""))
+        )
     return sorted(ports)
 
 
@@ -3222,49 +3227,31 @@ def _start_and_wait_service_multi_host(context):
 
     state = context.state
     task_config = state["task_config"]
+    _reserve_xllm_ports_before_start(state, state.get("service_runtimes") or [])
     if state.get("pd_disaggregated") or state.get("service_routed"):
-        from xtask.core.pd_control_service import (
-            XllmControlService,
-            build_pd_control_config,
-            build_service_control_config,
-        )
+        from xtask.core.xllm_service_cluster import XllmServiceCluster
+        from xtask.core.pd_control_service import XllmControlService, build_xllm_service_config, begin_service_run
 
-        control_config = (
-            build_pd_control_config(task_config)
-            if state.get("pd_disaggregated")
-            else build_service_control_config(task_config)
-        )
-        control_runtime = next(
-            (
-                runtime
-                for runtime in state.get("service_runtimes") or []
-                if str(runtime.plan.host) == str(control_config.host)
-            ),
-            None,
-        )
-        if control_runtime is None:
-            _fail_stage(
-                context,
-                f"xLLM control host {control_config.host} has no service runtime",
-            )
-            return
-        control_service = XllmControlService(
-            control_runtime,
-            control_config,
-            task_config.get("model_path", ""),
-            context.output_file_path,
-        )
+        begin_service_run(task_config)
+        control_config = build_xllm_service_config(task_config)
         try:
+            if control_config.service_binary_profile == "legacy":
+                runtime = service_container_nodes(task_config, state["service_runtimes"])[0]
+                control_service = XllmControlService(
+                    runtime, control_config, task_config.get("model_path", ""),
+                    context.output_file_path,
+                )
+            else:
+                control_service = XllmServiceCluster(
+                    task_config, state["service_runtimes"], context.output_file_path
+                )
+            # Store before start so even a partially-started cluster has an
+            # owner during scheduler failure cleanup.
+            state["xllm_control_service"] = control_service
             control_service.start_with_retry()
         except Exception as exc:
             _fail_stage(context, f"xLLM control service startup failed: {exc}")
-            state["xllm_control_service"] = control_service
-            if state.get("pd_disaggregated"):
-                state["pd_control_service"] = control_service
             return
-        state["xllm_control_service"] = control_service
-        if state.get("pd_disaggregated"):
-            state["pd_control_service"] = control_service
     engine_config = state["engine_config"]
     runtimes = state.get("service_runtimes") or []
     serving_wait_time = (
@@ -3272,10 +3259,7 @@ def _start_and_wait_service_multi_host(context):
         if task_config.get("serving_wait_time")
         else state["config_data"].get("XLLM_CONFIG").get("serving_wait_time")
     )
-    # Ephemeral source ports from a wide ip_local_port_range can collide
-    # with xLLM's fixed ports (TCPStore EADDRINUSE aborts process-group
-    # creation). Reserve them first; merged, best-effort, reboot-safe.
-    _reserve_xllm_ports_before_start(state, runtimes)
+    # Fixed Service and Engine ports were reserved before control startup.
     # PD leftover LISTEN on disagg_pd_port / transfer_listen_port prevents
     # pairing and keeps HTTP 28888 closed. Wait only for this case's ports.
     _wait_pd_listen_ports_before_start(state, runtimes)
@@ -3363,34 +3347,38 @@ def _start_and_wait_service_multi_host(context):
         if not control_service.wait_for_http_endpoint(timeout=90):
             _fail_stage(
                 context,
-                f"xLLM control HTTP endpoint did not open at "
-                f"http://{control_service.config.host}:"
-                f"{control_service.config.http_server_port}/health",
+                f"xLLM-Service endpoint not ready: "
+                f"{getattr(control_service, 'benchmark_endpoint', None) or get_benchmark_endpoint(task_config, state['service_plans'])}; "
+                f"{getattr(control_service, 'last_error', '')}",
             )
             state["service_healthy"] = False
             return
 
     endpoint = get_benchmark_endpoint(task_config, state["service_plans"])
-    health_path = (task_config.get("deployment") or {}).get("benchmark", {}).get(
-        "health_path", "/health"
-    )
-    check_url = endpoint.rstrip("/") + health_path
-    runner = get_benchmark_runtime(runtimes)
-    check_cmd = f"curl --noproxy '*' -i {check_url}"
-    health_result = runner.container_manager.exec_in_container(
-        runner.container_config.container_name, check_cmd, timeout=30
-    )
-    state["health_result"] = health_result
-    state["service_healthy"] = (
-        health_result.success and "ok" in health_result.stdout.lower()
-    )
-    if state["service_healthy"]:
-        logging.info("Unified service endpoint is healthy: %s", check_url)
+    if getattr(control_service, "is_split", False):
+        state["service_healthy"] = True  # wait_for_http_endpoint checked roles/models
+        try:
+            control_service.collect_logs()
+        except Exception:
+            logging.warning("Failed to collect live Service logs", exc_info=True)
+        logging.info("Router inference endpoint is healthy: %s", endpoint)
     else:
-        context.result["message"] = (
-            f"Service health check failed for {check_url}: {health_result.stderr}"
+        health_path = (task_config.get("deployment") or {}).get("benchmark", {}).get(
+            "health_path", "/health"
         )
-        logging.error(context.result["message"])
+        check_url = endpoint.rstrip("/") + health_path
+        runner = get_benchmark_runtime(runtimes)
+        check_cmd = f"curl --noproxy '*' -i {check_url}"
+        health_result = runner.container_manager.exec_in_container(
+            runner.container_config.container_name, check_cmd, timeout=30
+        )
+        state["health_result"] = health_result
+        state["service_healthy"] = (
+            health_result.success and "ok" in health_result.stdout.lower()
+        )
+        if not state["service_healthy"]:
+            _fail_stage(context, f"Service health check failed for {check_url}: {health_result.stderr}")
+            return
 
     # Pull remote instance logs back to the control host for aggregation.
     for runtime in runtimes:
@@ -4400,15 +4388,27 @@ def _cleanup_scheduler(context):
             pd_stop_timeout = 15
         try:
             if should_clean and control_service is not None:
-                # Stop routed data-plane processes before etcd/xllm-service,
-                # otherwise instances keep retrying heartbeat/etcd during cleanup.
+                # Keep etcd until the routed data-plane processes have exited.
                 # CLEAN_RESULTS=false deliberately leaves the complete runtime
                 # (xLLM, xLLM-Service, ETCD and the containers) available.
-                _wait_xllm_processes_exit(runtimes, grace_s=shutdown_grace_s)
+                # The synchronous benchmark has returned: xTask sends no more
+                # requests. Do not invent a drain endpoint for other clients.
+                # Split Service follows Quickstart order, retaining owned etcd
+                # until the Engines have released their communication state.
+                from xtask.core.xllm_service_cluster import XllmServiceCluster
+                if isinstance(control_service, XllmServiceCluster) and not control_service.legacy:
+                    try:
+                        control_service.drain_after_benchmark()
+                        control_service.stop_members()
+                    except Exception:
+                        logging.error("Failed to stop Service members", exc_info=True)
                 try:
-                    control_service.stop()
-                except Exception:
-                    logging.error("Failed to stop xLLM control service", exc_info=True)
+                    _wait_xllm_processes_exit(runtimes, grace_s=shutdown_grace_s)
+                finally:
+                    try:
+                        control_service.stop()
+                    except Exception:
+                        logging.error("Failed to stop xLLM control service", exc_info=True)
             elif should_clean:
                 # Non-service-routed deployments never went through
                 # _wait_xllm_processes_exit above; stop xllm here so the SHM
@@ -4429,6 +4429,11 @@ def _cleanup_scheduler(context):
                     )
                 _cleanup_xllm_shm(runtimes)
         finally:
+            if getattr(control_service, "is_split", False):
+                try:
+                    control_service.collect_logs()
+                except Exception:
+                    logging.warning("Failed to collect split Service logs", exc_info=True)
             if should_clean:
                 _separate_shutdown_logs(runtimes, snapshots)
             for benchmarkpath in context.state.get(
@@ -4439,6 +4444,11 @@ def _cleanup_scheduler(context):
                     context.output_file_path,
                     benchmarkpath,
                 )
+                if getattr(control_service, "is_split", False):
+                    try:
+                        control_service.archive_logs(context.output_file_path, benchmarkpath)
+                    except Exception:
+                        logging.warning("Failed to archive Service logs", exc_info=True)
         if control_service is not None:
             cleanup_service_group(
                 runtimes, should_clean, stop_timeout=pd_stop_timeout
@@ -4525,6 +4535,7 @@ def _set_scheduler_error(context, message: str) -> None:
 
 def _benchmark_only_service_config(task_config: Dict[str, Any]) -> Dict[str, Any]:
     service_config = copy.deepcopy(task_config)
+    normalize_xllm_service_config(service_config)
     for key in ("benchmark", "case_name", "metrics"):
         service_config.pop(key, None)
     return service_config
@@ -4649,6 +4660,16 @@ def _check_session_service_health(context) -> bool:
             f"{task_config.get('port', 14830)}/health"
         )
         check_cmd = f"curl -i {check_url}"
+
+    control_service = state.get("xllm_control_service")
+    if getattr(control_service, "is_split", False):
+        ready = control_service.wait_for_http_endpoint(timeout=90)
+        state["service_healthy"] = ready
+        if not ready:
+            context.result["message"] = (
+                "Reused Router endpoint is not ready: " + control_service.last_error
+            )
+        return ready
 
     health_result = manager.exec_in_container(
         container_config.container_name, check_cmd, timeout=30

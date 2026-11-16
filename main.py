@@ -47,6 +47,8 @@ def report_benchmark_if_available(result):
         if plugin_root not in sys.path:
             sys.path.insert(0, plugin_root)
         from bench_reporter.integration import report_xtask_result
+        from xtask.utils.secrets import redact_tree
+        result = redact_tree(result)
         task_config = result.get("task_config", {}) if isinstance(result, dict) else {}
 
         # TODO: get device_type and engine_version from environment

@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import shlex
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from xtask.core.service_group import ServiceRuntime, normalize_pd_deployment
+from xtask.core.xllm_service_config import get_xllm_service_config, service_etcd_location
 
-DEFAULT_INTERNAL_API_TOKEN = "xtask-internal-api-token"
+_RUN_TOKENS = {}
 DEFAULT_MASTER_SERVICE_KEY = "XLLM:SERVICE:MASTER"
 DEFAULT_SERVICE_DEPLOYMENT_ROLE = "COORDINATOR"
 DEFAULT_MASTER_KEY_WAIT_SECONDS = 30
@@ -38,13 +40,28 @@ class XllmServiceBinaryCapabilities:
 
 
 def resolve_internal_api_token(control: Dict[str, Any]) -> str:
-    """Resolve the shared xllm_master_serving internal auth token."""
+    """Resolve once per run; generated credentials stay in private memory only."""
+    from xtask.utils.secrets import register_secret
+
     token = str(control.get("internal_api_token") or "").strip()
     if not token:
         token = str(os.environ.get("XLLM_INTERNAL_TOKEN", "")).strip()
     if not token:
-        token = DEFAULT_INTERNAL_API_TOKEN
+        cached = _RUN_TOKENS.get(id(control))
+        token = cached[1] if cached and cached[0] is control else None
+    if not token:
+        token = secrets.token_urlsafe(32)
+        _RUN_TOKENS[id(control)] = (control, token)
+    if not token.isascii() or any(ord(char) < 32 or ord(char) > 126 for char in token):
+        raise ValueError("internal_api_token must be non-empty printable ASCII")
+    register_secret(token)
     return token
+
+
+def begin_service_run(task_config):
+    """Rotate only generated credentials; explicit YAML/env overrides win."""
+    control = get_xllm_service_config(task_config)
+    _RUN_TOKENS.pop(id(control), None)
 
 
 @dataclass(frozen=True)
@@ -58,7 +75,7 @@ class XllmControlConfig:
     startup_wait_seconds: int = 3
     no_proxy_hosts: tuple[str, ...] = ()
     output_subdir: str = "pd_control"
-    internal_api_token: str = DEFAULT_INTERNAL_API_TOKEN
+    internal_api_token: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
     service_deployment_role: str = DEFAULT_SERVICE_DEPLOYMENT_ROLE
     master_service_key: str = DEFAULT_MASTER_SERVICE_KEY
     master_key_wait_seconds: int = DEFAULT_MASTER_KEY_WAIT_SECONDS
@@ -95,86 +112,73 @@ def is_pd_deployment(task_config: Dict[str, Any]) -> bool:
     return bool(roles & {"prefill", "decode"})
 
 
-def build_pd_control_config(task_config: Dict[str, Any]) -> XllmControlConfig:
-    normalize_pd_deployment(task_config)
-    deployment = task_config.get("deployment") or {}
-    control = deployment.get("pd_control") or {}
-    host = control.get("host") or deployment.get("master_host")
-    if not host:
-        raise ValueError("PD deployment requires deployment.pd_control.host or master_host")
-    instance_hosts = [
-        str(instance.get("host"))
-        for instance in deployment.get("instances") or []
-        if instance.get("host")
-    ]
-    configured_no_proxy = control.get("no_proxy_hosts") or []
-    no_proxy_hosts = tuple(
-        dict.fromkeys(
-            ["localhost", "127.0.0.1", "0.0.0.0", host]
-            + instance_hosts
-            + [str(item) for item in configured_no_proxy]
-        )
-    )
-    control_plane = _resolve_control_plane_options(control)
-    return XllmControlConfig(
-        host=host,
-        etcd_client_port=int(control.get("etcd_client_port", 3389)),
-        etcd_peer_port=int(control.get("etcd_peer_port", 3390)),
-        http_server_port=int(control.get("http_server_port", 38888)),
-        rpc_server_port=int(control.get("rpc_server_port", 38889)),
-        startup_attempts=int(control.get("startup_attempts", 2)),
-        startup_wait_seconds=int(control.get("startup_wait_seconds", 3)),
-        no_proxy_hosts=no_proxy_hosts,
-        output_subdir="pd_control",
-        internal_api_token=resolve_internal_api_token(control),
-        **control_plane,
-    )
-
-
 def is_service_routed_deployment(task_config: Dict[str, Any]) -> bool:
     normalize_pd_deployment(task_config)
     deployment = task_config.get("deployment") or {}
     return deployment.get("mode") == "service_routed"
 
 
-def build_service_control_config(task_config: Dict[str, Any]) -> XllmControlConfig:
-    """Build the shared control-plane config for ordinary routed instances."""
+def _build_control_config(
+    task_config: Dict[str, Any], output_subdir: str
+) -> XllmControlConfig:
     normalize_pd_deployment(task_config)
     deployment = task_config.get("deployment") or {}
-    control = deployment.get("service_control") or {}
-    host = control.get("host") or deployment.get("master_host")
+    control = get_xllm_service_config(task_config)
+    if not control:
+        control = deployment.setdefault("xllm_service", {})
+        if control is None:
+            control = deployment["xllm_service"] = {}
+    host, etcd_port = service_etcd_location(task_config)
     if not host:
         raise ValueError(
-            "service_routed deployment requires deployment.service_control.host "
-            "or master_host"
+            "xLLM-Service requires deployment.xllm_service.host or "
+            "deployment.master_host"
         )
+    host = str(host)
     instance_hosts = [
         str(instance.get("host"))
         for instance in deployment.get("instances") or []
         if instance.get("host")
     ]
-    configured_no_proxy = control.get("no_proxy_hosts") or []
     no_proxy_hosts = tuple(
         dict.fromkeys(
-            ["localhost", "127.0.0.1", "0.0.0.0", str(host)]
+            ["localhost", "127.0.0.1", "0.0.0.0", host]
             + instance_hosts
-            + [str(item) for item in configured_no_proxy]
+            + [str(item) for item in control.get("no_proxy_hosts") or []]
         )
     )
-    control_plane = _resolve_control_plane_options(control)
     return XllmControlConfig(
-        host=str(host),
-        etcd_client_port=int(control.get("etcd_client_port", 3389)),
-        etcd_peer_port=int(control.get("etcd_peer_port", 3390)),
+        host=host,
+        etcd_client_port=etcd_port,
+        etcd_peer_port=int(
+            (control.get("etcd") or {}).get("peer_port", control.get("etcd_peer_port", 3390))
+        ),
         http_server_port=int(control.get("http_server_port", 38888)),
         rpc_server_port=int(control.get("rpc_server_port", 38889)),
         startup_attempts=int(control.get("startup_attempts", 2)),
         startup_wait_seconds=int(control.get("startup_wait_seconds", 3)),
         no_proxy_hosts=no_proxy_hosts,
-        output_subdir="service_control",
+        # Retain historical log paths and the PD-specific response environment.
+        output_subdir=output_subdir,
         internal_api_token=resolve_internal_api_token(control),
-        **control_plane,
+        **_resolve_control_plane_options(control),
     )
+
+
+def build_xllm_service_config(task_config: Dict[str, Any]) -> XllmControlConfig:
+    """Parse the shared Service block without changing deployment behavior."""
+    output_subdir = "pd_control" if is_pd_deployment(task_config) else "service_control"
+    return _build_control_config(task_config, output_subdir)
+
+
+def build_pd_control_config(task_config: Dict[str, Any]) -> XllmControlConfig:
+    """Compatibility entry point; configuration lives in xllm_service."""
+    return _build_control_config(task_config, "pd_control")
+
+
+def build_service_control_config(task_config: Dict[str, Any]) -> XllmControlConfig:
+    """Compatibility entry point; configuration lives in xllm_service."""
+    return _build_control_config(task_config, "service_control")
 
 
 class XllmControlService:
@@ -183,6 +187,8 @@ class XllmControlService:
     def __init__(self, runtime: ServiceRuntime, config: XllmControlConfig, model_path: str, output_dir: str) -> None:
         self.runtime = runtime
         self.config = config
+        from xtask.utils.secrets import register_secret
+        register_secret(config.internal_api_token)
         self.model_path = model_path
         from xtask.utils.container_manager import path_mapping_in_container
 
@@ -191,23 +197,23 @@ class XllmControlService:
             config.output_subdir,
         )
         self._binary_capabilities: XllmServiceBinaryCapabilities | None = None
+        self._managed_etcd = None
+        self._managed_service = None
 
     def start_with_retry(self) -> None:
         last_error = "unknown error"
         for attempt in range(1, self.config.startup_attempts + 1):
             self.stop()
-            result = self._exec(self._build_start_command(), timeout=60)
-            if result.success:
+            try:
+                self._start_owned_processes()
                 time.sleep(self.config.startup_wait_seconds)
                 healthy, detail = self._check_health()
                 if healthy:
-                    logging.info(
-                        "xLLM control services are healthy on %s", self.config.host
-                    )
+                    logging.info("xLLM control services are healthy on %s", self.config.host)
                     return
                 last_error = detail
-            else:
-                last_error = result.stderr or result.stdout
+            except RuntimeError as exc:
+                last_error = str(exc)
             logging.warning(
                 "xLLM control startup attempt %d/%d failed: %s",
                 attempt,
@@ -217,8 +223,55 @@ class XllmControlService:
         self.stop()
         raise RuntimeError(f"xLLM control startup failed: {last_error}")
 
+    def _start_owned_processes(self):
+        """Legacy binary behavior, with fenced per-run process ownership."""
+        from xtask.core.xllm_service_cluster import ManagedServiceProcess
+        if self._managed_etcd is None:
+            directory = self.output_dir + "/owned-" + secrets.token_hex(12)
+            self._managed_etcd = ManagedServiceProcess(self.runtime, directory + "/etcd", "etcd.log")
+            self._managed_service = ManagedServiceProcess(self.runtime, directory + "/service", "xservice.log")
+        cfg = self.config
+        environment = {"no_proxy": ",".join(cfg.no_proxy_hosts), "NO_PROXY": ",".join(cfg.no_proxy_hosts)}
+        if cfg.output_subdir == "pd_control":
+            environment["ENABLE_DECODE_RESPONSE_TO_SERVICE"] = "true"
+        check = self._managed_etcd.execute(self._managed_etcd._helper("check"))
+        if not check.success:
+            raise RuntimeError("Safe process ownership helper/pidfd unavailable")
+        self._managed_etcd.start([
+            "etcd", "--data-dir", self._managed_etcd.directory + "/data",
+            "--listen-peer-urls", "http://0.0.0.0:%s" % cfg.etcd_peer_port,
+            "--listen-client-urls", "http://0.0.0.0:%s" % cfg.etcd_client_port,
+            "--advertise-client-urls", "http://%s:%s" % (cfg.host, cfg.etcd_client_port),
+            "--initial-advertise-peer-urls", "http://%s:%s" % (cfg.host, cfg.etcd_peer_port),
+            "--initial-cluster", "xtask-etcd=http://%s:%s" % (cfg.host, cfg.etcd_peer_port),
+            "--name", "xtask-etcd",
+        ], environment)
+        time.sleep(1)
+        argv = ["xllm_master_serving", "--etcd_addr=%s:%s" % (cfg.host, cfg.etcd_client_port),
+                "--http_server_port=%s" % cfg.http_server_port, "--rpc_server_port=%s" % cfg.rpc_server_port,
+                "--internal_api_token=" + cfg.internal_api_token, "--tokenizer_path=" + self.model_path]
+        if self._resolve_binary_capabilities().supports_deployment_role:
+            argv.append("--service_deployment_role=" + cfg.service_deployment_role)
+        self._managed_service.start(argv, environment)
+        # Preserve historical top-level log names without erasing etcd data.
+        links = self._managed_service.execute(
+            "mkdir -p " + shlex.quote(self.output_dir) + "; ln -sfn "
+            + shlex.quote(self._managed_etcd.log_file) + " " + shlex.quote(self.output_dir + "/etcd.log")
+            + "; ln -sfn " + shlex.quote(self._managed_service.log_file) + " "
+            + shlex.quote(self.output_dir + "/xservice.log"))
+        if not links.success:
+            raise RuntimeError("Unable to preserve owned Service log links")
+
     def stop(self) -> None:
-        self._exec("pkill -f '[x]llm_master_serving' 2>/dev/null || true; pkill -f '[e]tcd' 2>/dev/null || true", timeout=30)
+        errors = []
+        for process in (self._managed_service, self._managed_etcd):
+            if process is not None:
+                try:
+                    process.stop()
+                except RuntimeError as exc:
+                    errors.append(str(exc))
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
     def _resolve_binary_capabilities(self) -> XllmServiceBinaryCapabilities:
         if self._binary_capabilities is not None:
@@ -281,6 +334,8 @@ class XllmControlService:
         cfg = self.config
         control_dir = shlex.quote(self.output_dir)
         tokenizer_path = shlex.quote(self.model_path)
+        from xtask.utils.secrets import register_secret
+        register_secret(cfg.internal_api_token)
         internal_api_token = shlex.quote(cfg.internal_api_token)
         no_proxy = ",".join(cfg.no_proxy_hosts)
         decode_response_env = ""
@@ -375,6 +430,9 @@ class XllmControlService:
         return False, last_detail
 
     def _check_health(self):
+        if self._managed_etcd is not None:
+            if not self._managed_etcd.healthy() or not self._managed_service.healthy():
+                return False, "Owned control-plane process exited or emitted a fatal error"
         result = self._exec(self._build_basic_health_command(), timeout=30)
         if not result.success:
             logs = self._exec(

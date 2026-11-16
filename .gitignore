@@ -31,3 +31,6 @@ pkg/xllm/service_binary/releases/
 *.whl
 .joycode
 /xllm/
+
+pkg/xllm/release_pack/
+.build-hccn.*

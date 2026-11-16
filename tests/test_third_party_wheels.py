@@ -381,6 +381,7 @@ class FlaRuntimeSetupTests(FlaWheelFixture):
             "elif any(arg.endswith('.whl') and '/third_whl/' in arg for arg in sys.argv):\n"
             "    sys.exit(int(os.environ['FLA_TEST_PIP_EXIT']))\n",
         )
+        self._executable("readelf", "#!/bin/bash\necho 'Shared library: [librust_tokenizers.so]'\n")
         self._executable("ldconfig", "#!/bin/bash\nexit 0\n")
         self._executable("numactl", "#!/bin/bash\nexit 0\n")
         self._executable("wget", "#!/bin/bash\necho 'Unexpected network download' >&2\nexit 99\n")

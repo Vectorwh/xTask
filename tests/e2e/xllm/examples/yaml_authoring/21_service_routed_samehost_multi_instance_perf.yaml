@@ -31,7 +31,7 @@ deployment:
   mode: service_routed
   master_host: 11.87.191.75
   sync_workspace: true
-  service_control:
+  xllm_service:
     host: 11.87.191.75
     etcd_client_port: 13389
     etcd_peer_port: 13390

@@ -410,7 +410,7 @@ class RanktableGroupingTests(unittest.TestCase):
             "world_size": 32,
             "deployment": {
                 "mode": "pd_disaggregated",
-                "pd_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -454,7 +454,7 @@ class RanktableGroupingTests(unittest.TestCase):
         task = {
             "deployment": {
                 "mode": "service_routed",
-                "service_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "service_instances": [
                     {
                         "name": "default-0",
@@ -492,7 +492,7 @@ class RanktableGroupingTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",

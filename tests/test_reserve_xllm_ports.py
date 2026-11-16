@@ -33,7 +33,7 @@ def _plan(**kwargs):
 def _task_config():
     return {
         "deployment": {
-            "pd_control": {
+            "xllm_service": {
                 "host": "11.87.191.75",
                 "etcd_client_port": 22389,
                 "etcd_peer_port": 22380,
@@ -117,7 +117,7 @@ class ControlPlanePortsTests(unittest.TestCase):
     def test_extracts_pd_control_ports(self):
         self.assertEqual(
             scheduler._control_plane_ports(_task_config()),
-            {22380, 22389, 28888, 38889},
+            {22380, 22389, 28888, 38889, 38888, 48889},
         )
 
     def test_tolerates_missing_config(self):
@@ -142,8 +142,13 @@ class XllmFixedPortsTests(unittest.TestCase):
         self.assertTrue(set(range(43432, 43448)) <= ports)
         # Node service ports.
         self.assertTrue(set(range(18004, 18020)) <= ports)
-        # Control plane.
-        self.assertTrue({22380, 22389, 28888, 38889} <= ports)
+        # This plan is on the Decode host; listeners on the Prefill/control
+        # host must not reserve ephemeral ports on this unrelated node.
+        self.assertFalse({22380, 22389, 28888, 38889}.intersection(ports))
+        control_ports = set(scheduler._xllm_fixed_ports(
+            _plan(host="11.87.191.75"), _task_config()
+        ))
+        self.assertTrue({22380, 22389, 28888, 38889, 38888, 48889} <= control_ports)
 
     def test_single_card_has_no_tcpstore_window(self):
         plan = _plan(

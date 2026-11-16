@@ -117,7 +117,21 @@ repair_xllm_submodule_heads() {
 update_xllm_submodules() {
   # 每轮重试前恢复上次递归 clone 中断留下的异常 HEAD。
   repair_xllm_submodule_heads || return "$?"
-  git -C "${XLLM_DIR}" submodule update --init --recursive --progress
+  local update_status=0 verify_status=0
+  git -C "${XLLM_DIR}" submodule update --init --recursive --progress || update_status=$?
+  # Some interrupted recursive clones can leave an empty checkout even after
+  # Git reports success. Repair only provably empty clones, then independently
+  # verify HEAD, the indexed pin and actual source files before using a container.
+  repair_xllm_submodule_heads || return "$?"
+  "${PYTHON_EXEC:-python}" "${SCRIPT_DIR}/repair_submodule_heads.py" "${XLLM_DIR}" --verify || verify_status=$?
+  echo "[submodule-update] git_exit=${update_status} postflight_exit=${verify_status}"
+  if (( verify_status == 2 )); then
+    return "${RETRY_LOCAL_STATE_EXIT_CODE}"
+  fi
+  if (( verify_status != 0 )); then
+    return 1
+  fi
+  return "${update_status}"
 }
 
 update_xllm_checkout() {
@@ -253,13 +267,24 @@ RUN_OPTS=(
   -v /export/home:/export/home
   # archives/: vcpkg binary cache；downloads/: VCPKG_DOWNLOADS distfile（容器脚本设置）  
   -v /export/home/npu_vcpkg_cache_abi_1:/root/.cache/vcpkg # cached vcpkg installed dir
-  -v /etc/hccn.conf:/etc/hccn.conf
   -e WORK_ROOT="${WORK_ROOT}"
   # 传入宿主机启动用户的 uid/gid，供容器内归档后 chown，避免产物被 root 占有
   -e HOST_UID="$(id -u)"
   -e HOST_GID="$(id -g)"
   -w /export/home
 )
+
+# Generate a private copy for the physical device used by this build. Never
+# mutate or bind a TLS-only host file into a failing Client-Server IP path.
+HCCN_COPY="$(mktemp "${WORK_ROOT}/.build-hccn.XXXXXX")"
+trap 'rm -f "$HCCN_COPY"' EXIT
+HCCN_RESULT="$("${PYTHON_EXEC:-python}" "${SCRIPT_DIR}/prepare_hccn_config.py" \
+  --devices "${XLLM_BUILD_DEVICES:-all}" --output "$HCCN_COPY" --mode "${XLLM_HCCN_MODE:-auto}")"
+if [[ "$HCCN_RESULT" == *'"path": null'* ]]; then
+  echo "[hccn] no complete config; preserving device-tool fallback."
+else
+  RUN_OPTS+=(-v "${HCCN_COPY}:/etc/hccn.conf:ro")
+fi
 
 # 在容器内执行 build_in_container.sh（路径已通过 -v /export/home 挂载，保持一致）
 docker run "${RUN_OPTS[@]}" "${IMAGE}" bash "${IN_CONTAINER_SCRIPT}"

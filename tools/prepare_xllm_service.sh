@@ -198,11 +198,18 @@ git config --global --add safe.directory "${SERVICE_SOURCE_DIR}" 2>/dev/null || 
 # cpprestsdk carries optional nested submodules (websocketpp/vcpkg) that this
 # build does not need and that add unrelated network failure points.
 retry "xLLM-Service submodule update" git -C "${SERVICE_SOURCE_DIR}" submodule update --init
-# xLLM-Service links against xLLM's pinned spdlog via
-# third_party/xllm/third_party/spdlog. That nested submodule must be present
-# before CMake configure, but only under third_party/xllm.
-retry "xLLM-Service xllm nested submodule update" \
-  git -C "${SERVICE_SOURCE_DIR}" submodule update --init --recursive third_party/xllm
+# New Service resolves spdlog independently and only consumes Engine protocol
+# sources. Keep the nested initialization solely for old CMake contracts.
+SERVICE_NEEDS_NESTED_XLLM=1
+if grep -q 'find_package(spdlog' "${SERVICE_SOURCE_DIR}/CMakeLists.txt"; then
+  SERVICE_NEEDS_NESTED_XLLM=0
+fi
+if [[ "$SERVICE_NEEDS_NESTED_XLLM" == 1 ]] || grep -RqE 'third_party/xllm/third_party/spdlog|\$\{XLLM[^}]*\}/third_party/spdlog' \
+    "${SERVICE_SOURCE_DIR}/CMakeLists.txt" "${SERVICE_SOURCE_DIR}/cmake" 2>/dev/null; then
+  SERVICE_NEEDS_NESTED_XLLM=1
+  retry "xLLM-Service xllm nested submodule update" \
+    git -C "${SERVICE_SOURCE_DIR}" submodule update --init --recursive third_party/xllm
+fi
 
 if [[ ! -f "${SERVICE_SOURCE_DIR}/CMakeLists.txt" ]]; then
   echo "ERROR: xLLM-Service source is incomplete: ${SERVICE_SOURCE_DIR}" >&2
@@ -216,9 +223,14 @@ REQUIRED_SOURCE_FILES=(
   third_party/sentencepiece/CMakeLists.txt
   third_party/smhasher/src/CMakeLists.txt
   third_party/xllm/CMakeLists.txt
-  third_party/xllm/third_party/spdlog/CMakeLists.txt
   third_party/xxHash/CMakeLists.txt
 )
+
+if [[ "${SERVICE_NEEDS_NESTED_XLLM}" == 1 ]]; then
+  REQUIRED_SOURCE_FILES+=(third_party/xllm/third_party/spdlog/CMakeLists.txt)
+elif grep -q 'provider.proto' "${SERVICE_SOURCE_DIR}/CMakeLists.txt"; then
+  REQUIRED_SOURCE_FILES+=(third_party/xllm/xllm/proto/provider.proto)
+fi
 
 submodule_path_for_required_file() {
   local source_file="$1"
@@ -291,8 +303,13 @@ repair_required_submodules() {
       rm -rf -- "${submodule_dir}"
     fi
     if [[ "${submodule_path}" == "third_party/xllm" ]]; then
-      retry "xLLM-Service submodule repair ${submodule_path}" \
-        git -C "${SERVICE_SOURCE_DIR}" submodule update --init --recursive third_party/xllm
+      if [[ "${SERVICE_NEEDS_NESTED_XLLM}" == 1 ]]; then
+        retry "xLLM-Service submodule repair ${submodule_path}" \
+          git -C "${SERVICE_SOURCE_DIR}" submodule update --init --recursive third_party/xllm
+      else
+        retry "xLLM-Service submodule repair ${submodule_path}" \
+          git -C "${SERVICE_SOURCE_DIR}" submodule update --init third_party/xllm
+      fi
     else
       retry "xLLM-Service submodule repair ${submodule_path}" \
         git -C "${SERVICE_SOURCE_DIR}" submodule update --init "${submodule_path}"
@@ -364,9 +381,10 @@ RUN_OPTS=(
   -v /var/log/npu/dump/:/var/log/npu/dump
   -v /export/home:/export/home
   -v /export/home/npu_vcpkg_cache_abi_1:/root/.cache/vcpkg
-  -v /etc/hccn.conf:/etc/hccn.conf
   -e WORK_ROOT="${WORK_ROOT}"
   -e XLLM_SERVICE_SOURCE_DIR="${SERVICE_SOURCE_DIR}"
+  -e XLLM_SERVICE_APPEND_PACK="${XLLM_SERVICE_APPEND_PACK:-}"
+  -e XLLM_SERVICE_BUILD_TESTING="${XLLM_SERVICE_BUILD_TESTING:-1}"
   -e XLLM_SERVICE_BUILD_JOBS="${XLLM_SERVICE_BUILD_JOBS:-8}"
   -e XLLM_SERVICE_BUILD_TYPE="${XLLM_SERVICE_BUILD_TYPE:-Release}"
   -e XLLM_SERVICE_CXX_STANDARD="${XLLM_SERVICE_CXX_STANDARD:-20}"

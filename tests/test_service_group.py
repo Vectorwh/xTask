@@ -30,7 +30,7 @@ class ServiceGroupTests(unittest.TestCase):
         task = {
             "deployment": {
                 "mode": "service_routed",
-                "service_control": {
+                "xllm_service": {
                     "host": "10.0.0.1",
                     "etcd_client_port": 13389,
                     "etcd_peer_port": 13390,
@@ -75,7 +75,8 @@ class ServiceGroupTests(unittest.TestCase):
         command = service._build_start_command()
         self.assertIn("--etcd_addr=10.0.0.1:13389", command)
         self.assertIn("--http_server_port 13888", command)
-        self.assertIn("--internal_api_token=xtask-internal-api-token", command)
+        self.assertIn("--internal_api_token=" + config.internal_api_token, command)
+        self.assertNotEqual(config.internal_api_token, "xtask-internal-api-token")
         self.assertNotIn("ENABLE_DECODE_RESPONSE_TO_SERVICE", command)
 
     def test_pd_control_start_command_includes_internal_api_token(self):
@@ -88,7 +89,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {
+                "xllm_service": {
                     "host": "10.0.0.1",
                     "internal_api_token": "pd-shared-secret",
                     "service_binary_profile": "refactor",
@@ -131,7 +132,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {
+                "xllm_service": {
                     "host": "10.0.0.1",
                     "service_binary_profile": "legacy",
                 },
@@ -166,7 +167,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1", "service_binary_profile": "auto"},
+                "xllm_service": {"host": "10.0.0.1", "service_binary_profile": "auto"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -193,7 +194,13 @@ class ServiceGroupTests(unittest.TestCase):
             command = service._build_start_command()
 
         self.assertIn("--service_deployment_role=COORDINATOR", command)
-        runtime.container_manager.exec_in_container.assert_called_once()
+        commands = [
+            call.args[1]
+            for call in runtime.container_manager.exec_in_container.call_args_list
+        ]
+        self.assertEqual(len(commands), 2)
+        self.assertIn("grep -q 'service_deployment_role'", commands[0])
+        self.assertIn("grep -aq 'readyz'", commands[1])
 
     def test_pd_control_health_waits_for_master_key_or_readyz(self):
         from xtask.core.pd_control_service import (
@@ -205,7 +212,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1", "master_key_wait_seconds": 5, "service_binary_profile": "refactor"},
+                "xllm_service": {"host": "10.0.0.1", "master_key_wait_seconds": 5, "service_binary_profile": "refactor"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -253,7 +260,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {
+                "xllm_service": {
                     "host": "10.0.0.1",
                     "master_key_wait_seconds": 5,
                     "service_binary_profile": "legacy",
@@ -307,7 +314,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {
+                "xllm_service": {
                     "host": "10.0.0.1",
                     "master_key_wait_seconds": 2,
                     "service_binary_profile": "legacy",
@@ -367,7 +374,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {
+                "xllm_service": {
                     "host": "10.0.0.1",
                     "master_key_wait_seconds": 2,
                     "service_binary_profile": "refactor",
@@ -420,7 +427,7 @@ class ServiceGroupTests(unittest.TestCase):
         task = {
             "deployment": {
                 "mode": "service_routed",
-                "service_control": {"host": "10.0.0.1", "service_binary_profile": "refactor"},
+                "xllm_service": {"host": "10.0.0.1", "service_binary_profile": "refactor"},
                 "service_instances": [
                     {
                         "name": "default-0",
@@ -446,7 +453,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "service_routed",
                 "master_host": "10.0.0.1",
-                "service_control": {
+                "xllm_service": {
                     "host": "10.0.0.1",
                     "http_server_port": 38888,
                 },
@@ -502,7 +509,7 @@ class ServiceGroupTests(unittest.TestCase):
         task = {
             "deployment": {
                 "mode": "service_routed",
-                "service_control": {"host": "10.0.0.9"},
+                "xllm_service": {"host": "10.0.0.9"},
                 "service_instances": [
                     {
                         "name": "default-0",
@@ -732,7 +739,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1", "http_server_port": 38888},
+                "xllm_service": {"host": "10.0.0.1", "http_server_port": 38888},
                 "benchmark": {"runner_instance": "prefill-0-node-0"},
                 "pd_instances": [
                     {
@@ -833,7 +840,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -1062,7 +1069,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.4"},
+                "xllm_service": {"host": "10.0.0.4"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -1181,7 +1188,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -1216,7 +1223,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -1253,7 +1260,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -1336,7 +1343,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -1382,7 +1389,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1"},
+                "xllm_service": {"host": "10.0.0.1"},
                 "pd_instances": [
                     {
                         "name": "prefill-0",
@@ -1522,7 +1529,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {
+                "xllm_service": {
                     "host": "10.0.0.9",
                     "http_server_port": 38888,
                 },
@@ -1555,11 +1562,10 @@ class ServiceGroupTests(unittest.TestCase):
                 ],
             }
         }
+        self.assertEqual(get_benchmark_endpoint(task, []), "http://10.0.0.9:38888")
         with tempfile.TemporaryDirectory() as temporary_directory:
-            plans = build_service_plans(task, temporary_directory)
-            self.assertEqual(
-                get_benchmark_endpoint(task, plans), "http://10.0.0.9:38888"
-            )
+            with self.assertRaisesRegex(ValueError, "must match a service node host"):
+                build_service_plans(task, temporary_directory)
 
     def test_topology_ignores_legacy_explicit_endpoint(self):
         task = {
@@ -1694,7 +1700,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "pd_disaggregated",
                 "master_host": "10.0.0.1",
-                "pd_control": {"host": "10.0.0.1", "http_server_port": 38888},
+                "xllm_service": {"host": "10.0.0.1", "http_server_port": 38888},
                 "benchmark": {"runner_instance": "prefill-0-node-0"},
                 "pd_instances": [
                     {
@@ -1730,7 +1736,7 @@ class ServiceGroupTests(unittest.TestCase):
             "deployment": {
                 "mode": "service_routed",
                 "master_host": "10.0.0.1",
-                "service_control": {
+                "xllm_service": {
                     "host": "10.0.0.1",
                     "http_server_port": 13888,
                 },

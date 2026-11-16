@@ -36,6 +36,80 @@ XLLM_PACK_LOCAL_CANDIDATES=(
 )
 XLLM_PACK_LOCAL_SOURCE=""
 
+# Opt-in new release pack, or a locally published new pack when no separate
+# Engine artifacts exist. Never silently combine a selected new pack with old
+# pkg wheels/runtime libraries or download the old pack to supply its etcd.
+XLLM_RELEASE_PACK="${XLLM_RELEASE_PACK:-}"
+XLLM_PACK_LAYOUT=legacy
+RELEASE_STAGE=""
+MOONCAKE_RUNTIME=""
+if [ -z "$XLLM_RELEASE_PACK" ] && ! compgen -G "$XLLM_PKG_DIR/xllm_npu*.whl" >/dev/null && \
+   [ -f "$XLLM_PKG_DIR/release_pack/current/xllm_pack.tar.gz" ]; then
+    XLLM_RELEASE_PACK="$XLLM_PKG_DIR/release_pack/current/xllm_pack.tar.gz"
+fi
+if [ -n "$XLLM_RELEASE_PACK" ]; then
+    RELEASE_STAGE="$(mktemp -d "$TARGET_DIR/.runtime-release.XXXXXX")"
+    rmdir "$RELEASE_STAGE"
+    trap 'rm -rf "$RELEASE_STAGE"' EXIT
+    python3 /workspace/tools/xllm_release_pack.py prepare "$XLLM_RELEASE_PACK" "$RELEASE_STAGE"
+    XLLM_PKG_DIR="$RELEASE_STAGE/xllm_pack"
+    XLLM_VENDORS_DIR="$XLLM_PKG_DIR/vendors"
+    XLLM_THIRD_WHL_DIR="$XLLM_PKG_DIR/third_whl"
+    XLLM_RUNTIME_LIB_DIR="$XLLM_PKG_DIR/runtime_libs"
+    XLLM_SERVICE_BINARY_DIR="$XLLM_PKG_DIR/service_binary"
+    XLLM_SERVICE_CURRENT_DIR="$XLLM_SERVICE_BINARY_DIR/current"
+    XLLM_PACK_LAYOUT=release-v1
+    MOONCAKE_RUNTIME="$(find "$XLLM_PKG_DIR" -maxdepth 1 -type d -name 'mooncake-v*' -print -quit)"
+fi
+
+service_archive_ready() {
+    local directory="$1" info
+    [ -f "$directory/xllm_master_serving" ] || return 1
+    # Inspect DT_NEEDED: missing tokenizer is only legal for static builds.
+    info="$(readelf -d "$directory/xllm_master_serving" 2>&1)" || return 1
+    if grep -q 'Shared library: \[librust_tokenizers.so\]' <<< "$info"; then
+        [ -f "$directory/librust_tokenizers.so" ] || return 1
+    fi
+    if [ -f "$directory/SHA256SUMS" ]; then
+        (cd "$directory" && sha256sum -c SHA256SUMS) || return 1
+    fi
+}
+
+install_mooncake_runtime() {
+    [ -n "$MOONCAKE_RUNTIME" ] || return 0
+    # A dedicated directory retains metadata/check scripts; active libraries
+    # are installed alongside the legacy /usr/lib64 loader contract.
+    local destination="/opt/xllm/mooncake/$(basename "$MOONCAKE_RUNTIME")"
+    mkdir -p "$destination"
+    cp -a "$MOONCAKE_RUNTIME/." "$destination/"
+    install -m 0755 "$MOONCAKE_RUNTIME"/lib/* /usr/lib64/
+    install -m 0755 "$MOONCAKE_RUNTIME"/bin/* /usr/local/bin/
+    ldconfig
+}
+
+prepare_release_etcd() {
+    local directory="${XLLM_ETCD_BIN_DIR:-}"
+    if [ -n "$directory" ]; then
+        if [ ! -x "$directory/etcd" ] || [ ! -x "$directory/etcdctl" ]; then
+            echo "错误: XLLM_ETCD_BIN_DIR 必须包含可执行的 etcd/etcdctl。" >&2
+            return 1
+        fi
+        install -m 0755 "$directory/etcd" "$directory/etcdctl" /usr/local/bin/
+    elif ! command -v etcd >/dev/null || ! command -v etcdctl >/dev/null; then
+        echo "错误: 新 pack 不含 etcd。预装 etcd/etcdctl 或设置 XLLM_ETCD_BIN_DIR。" >&2
+        return 1
+    fi
+}
+
+# Validate control-plane components before touching Engine packages/vendors.
+if [ "$XLLM_PACK_LAYOUT" = release-v1 ] && [ "$XLLM_INSTALL_SERVICE" -eq 1 ]; then
+    if ! service_archive_ready "$XLLM_SERVICE_BINARY_DIR"; then
+        echo "错误: 新 pack 未包含有效 Service；请先 append/publish Service。" >&2
+        exit 1
+    fi
+    prepare_release_etcd
+fi
+
 ensure_xllm_pack() {
     if [ "$XLLM_PACK_READY" -eq 1 ]; then
         return 0
@@ -63,6 +137,10 @@ ensure_xllm_pack() {
             if [ ! -d "$XLLM_PACK_DIR" ]; then
                 echo "Error: 本地归档解压后未生成目录: $XLLM_PACK_DIR，回退到外网下载。" >&2
             else
+                if compgen -G "$XLLM_PACK_DIR/mooncake-runtime-v*.tar.gz" >/dev/null; then
+                    echo "错误: 检测到新版 pack；请用 XLLM_RELEASE_PACK 或 deployment.xllm_package.release_pack 选择完整安装，不能混用旧 pkg。" >&2
+                    exit 1
+                fi
                 XLLM_PACK_READY=1
                 return 0
             fi
@@ -79,6 +157,10 @@ ensure_xllm_pack() {
 
     if [ ! -d "$XLLM_PACK_DIR" ]; then
         echo "Error: xllm_pack 解压后未生成目录: $XLLM_PACK_DIR" >&2
+        exit 1
+    fi
+    if compgen -G "$XLLM_PACK_DIR/mooncake-runtime-v*.tar.gz" >/dev/null; then
+        echo "错误: 下载到新版 pack；请使用 XLLM_RELEASE_PACK 完整安装，不能按旧 xllm-lib 格式安装。" >&2
         exit 1
     fi
     XLLM_PACK_READY=1
@@ -132,12 +214,14 @@ install_xllm_runtime_libraries() {
     echo "xLLM runtime libraries installed to /usr/lib64: libxxhash.so.0 libasio.so liburing.so.2"
 }
 
-if ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/dev/null 2>&1 && [ -d "$XLLM_VENDORS_DIR" ]; then
+if { [ "$XLLM_PACK_LAYOUT" = release-v1 ] || ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/dev/null 2>&1; } && [ -d "$XLLM_VENDORS_DIR" ]; then
     echo "检测到 $XLLM_PKG_DIR 下存在 xllm_npu*.whl 且 $XLLM_VENDORS_DIR 存在，开始处理 xLLM 依赖库..."
 
     # xLLM 依赖所需 Lib64 从外网连接下载。
-    ensure_xllm_pack
-    cd "$XLLM_PACK_DIR"
+    if [ "$XLLM_PACK_LAYOUT" = legacy ]; then
+        ensure_xllm_pack
+        cd "$XLLM_PACK_DIR"
+    fi
 
     #for binary in etcd etcdctl xllm_master_serving; do
     #    if [ ! -f "$binary" ]; then
@@ -148,13 +232,17 @@ if ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/dev/null 2>&1 && [ -d "$XLLM_VENDORS_DIR" 
 
     #install -m 0755 etcd etcdctl xllm_master_serving /usr/local/bin/
 
-    tar -zxvf xllm-lib-*.tar.gz
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to extract xllm-lib-*.tar.gz"
-        exit 1
+    if [ "$XLLM_PACK_LAYOUT" = legacy ]; then
+        tar -zxvf xllm-lib-*.tar.gz
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to extract xllm-lib-*.tar.gz"
+            exit 1
+        fi
+        yes | mv xllm-lib/* /usr/lib64/
+    else
+        install_mooncake_runtime
+        install -m 0644 "$XLLM_PKG_DIR/xtask-pack-manifest.json" /opt/xllm/installed-pack.json
     fi
-
-    yes | mv xllm-lib/* /usr/lib64/
      
     # cd /workspace
     # 删除旧数据
@@ -176,8 +264,10 @@ if ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/dev/null 2>&1 && [ -d "$XLLM_VENDORS_DIR" 
         exit 1
     fi
 
-    rm -f "$TARGET_DIR/$TORCH_NPU_FILE"
-    cp -fv "$SOURCE_DIR/$TORCH_NPU_FILE" "$TARGET_DIR/"
+    if [ "$XLLM_PACK_LAYOUT" = legacy ]; then
+        rm -f "$TARGET_DIR/$TORCH_NPU_FILE"
+        cp -fv "$SOURCE_DIR/$TORCH_NPU_FILE" "$TARGET_DIR/"
+    fi
 
     # 最新镜像已经预装torch_npu，不再单独安装
     #"$XLLM_PYTHON" -m pip install \
@@ -188,7 +278,11 @@ if ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/dev/null 2>&1 && [ -d "$XLLM_VENDORS_DIR" 
     #echo "torch_npu 安装完成: $TORCH_NPU_FILE"
 
     # 安装 xLLM wheel。
-    "$XLLM_PYTHON" -m pip install "$XLLM_PKG_DIR"/xllm_npu*.whl --force-reinstall
+    if [ "$XLLM_PACK_LAYOUT" = legacy ]; then
+        "$XLLM_PYTHON" -m pip install "$XLLM_PKG_DIR"/xllm_npu*.whl --force-reinstall
+    else
+        "$XLLM_PYTHON" -m pip install "$XLLM_PKG_DIR"/xllm*.whl --force-reinstall --no-deps --no-index
+    fi
 
     # 目录不存在或没有 wheel 时仅跳过，不影响原有 xLLM/service 安装。
     install_optional_third_party_wheels
@@ -245,15 +339,18 @@ if [ "$XLLM_INSTALL_SERVICE" -eq 1 ]; then
     # xLLM-Service 编译归档使用 service_binary/current；保留直接放置文件的
     # 旧布局兼容。Service 的 etcd_cpp_apiv3 是客户端库，不替代 etcd 服务端。
     SERVICE_RUNTIME_DIR=""
-    if [ -f "$XLLM_SERVICE_CURRENT_DIR/xllm_master_serving" ] && \
-        [ -f "$XLLM_SERVICE_CURRENT_DIR/librust_tokenizers.so" ]; then
+    if service_archive_ready "$XLLM_SERVICE_CURRENT_DIR"; then
         SERVICE_RUNTIME_DIR="$XLLM_SERVICE_CURRENT_DIR"
         echo "service_binary/current下找到xLLM-Service二进制，使用本地二进制。"
     elif [ -e "$XLLM_SERVICE_CURRENT_DIR" ] || [ -L "$XLLM_SERVICE_CURRENT_DIR" ]; then
-        echo "警告: service_binary/current归档不完整，将尝试旧布局或xllm_pack。" >&2
+        echo "错误: service_binary/current 归档不完整或 ELF/校验失败，拒绝静默回退旧 Service。" >&2
+        exit 1
     fi
-    if [ -z "$SERVICE_RUNTIME_DIR" ] && \
-        [ -f "$XLLM_SERVICE_BINARY_DIR/xllm_master_serving" ]; then
+    if [ -z "$SERVICE_RUNTIME_DIR" ] && [ -f "$XLLM_SERVICE_BINARY_DIR/xllm_master_serving" ]; then
+        if ! service_archive_ready "$XLLM_SERVICE_BINARY_DIR"; then
+            echo "错误: 本地 Service 归档不完整或 ELF/校验失败，拒绝回退。" >&2
+            exit 1
+        fi
         SERVICE_RUNTIME_DIR="$XLLM_SERVICE_BINARY_DIR"
         echo "service_binary下找到xLLM-Service二进制，使用本地二进制。"
     fi
@@ -279,6 +376,17 @@ if [ "$XLLM_INSTALL_SERVICE" -eq 1 ]; then
         LOCAL_ETCD_READY=1
     else
         echo "service_binary下未找到本地etcd/etcdctl。"
+    fi
+
+    if [ "$XLLM_PACK_LAYOUT" = release-v1 ]; then
+        if [ -z "$SERVICE_RUNTIME_DIR" ]; then
+            echo "错误: 新 pack 未包含有效 Service；请先 append/publish Service。" >&2
+            exit 1
+        fi
+        if [ "$LOCAL_ETCD_READY" -eq 0 ]; then
+            prepare_release_etcd
+            LOCAL_ETCD_READY=1
+        fi
     fi
 
     # Download/extract the legacy pack only when one of its independent runtime
@@ -308,9 +416,12 @@ else
 fi
 
 cd "$TARGET_DIR"
-# 删除旧数据
-rm -rf "$XLLM_PACK_DIR"
-rm -f "$XLLM_PACK_ARCHIVE" "$XLLM_PACK_ARCHIVE".*
+# Release input is immutable/user-owned, even when selected from /workspace.
+# Only legacy downloads/extractions are temporary to this installer.
+if [ "$XLLM_PACK_LAYOUT" = legacy ]; then
+    rm -rf "$XLLM_PACK_DIR"
+    rm -f "$XLLM_PACK_ARCHIVE" "$XLLM_PACK_ARCHIVE".*
+fi
 
 # 从本地安装numctl
 if command -v numactl >/dev/null 2>&1; then

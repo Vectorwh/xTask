@@ -206,12 +206,11 @@ class DownloadXllmScriptTests(unittest.TestCase):
             self.script,
         )
         self.assertIn(
-            '[ -f "$XLLM_SERVICE_CURRENT_DIR/xllm_master_serving" ]',
+            'service_archive_ready "$XLLM_SERVICE_CURRENT_DIR"',
             self.script,
         )
         self.assertIn(
-            '[ -f "$XLLM_SERVICE_CURRENT_DIR/librust_tokenizers.so" ]',
-            self.script,
+            "readelf -d", self.script,
         )
         self.assertIn(
             '[ -f "$XLLM_SERVICE_BINARY_DIR/etcd" ]', self.script
@@ -276,6 +275,7 @@ class PrepareXllmScriptTests(unittest.TestCase):
         tools_dir.mkdir(parents=True)
         shutil.copy2(self.root / "tools" / "prepare_xllm.sh", tools_dir)
         shutil.copy2(self.root / "tools" / "repair_submodule_heads.py", tools_dir)
+        shutil.copy2(self.root / "tools" / "prepare_hccn_config.py", tools_dir)
         (tools_dir / "build_xllm_in_container.sh").write_text(
             "#!/bin/bash\nexit 0\n", encoding="utf-8"
         )
@@ -933,6 +933,28 @@ class PrepareXllmServiceScriptTests(unittest.TestCase):
                 "xllm",
             )
 
+    def test_standalone_service_skips_nested_engine_dependencies(self):
+        with self._temporary_root() as temporary_directory:
+            root = Path(temporary_directory)
+            remote = self._create_remote(root, "standalone", "find_package(spdlog CONFIG REQUIRED)\n# provider.proto\n")
+            source = root / "standalone-source"
+            nested = source / "third_party/xllm/third_party/spdlog/CMakeLists.txt"
+            nested.unlink()
+            proto = source / "third_party/xllm/xllm/proto/provider.proto"
+            proto.parent.mkdir(parents=True)
+            proto.write_text("syntax = \"proto3\";\n", encoding="utf-8")
+            self._git("add", "-A", cwd=source)
+            self._git("-c", "user.name=xTask Test", "-c", "user.email=xtask@example.invalid",
+                      "commit", "-m", "standalone protocol contract", cwd=source)
+            self._git("push", "origin", "main", cwd=source)
+            project = root / "project"
+            project.mkdir()
+            result = self._run_prepare(project, remote)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("xllm nested submodule update", result.stdout + result.stderr)
+            self.assertTrue((project / "xllm-service/third_party/xllm/xllm/proto/provider.proto").exists())
+            self.assertFalse((project / "xllm-service/third_party/xllm/third_party/spdlog/CMakeLists.txt").exists())
+
     def test_update_source_disabled_does_not_replace_existing_checkout(self):
         with self._temporary_root() as temporary_directory:
             root = Path(temporary_directory)
@@ -996,7 +1018,8 @@ class BuildXllmServiceScriptTests(unittest.TestCase):
         self.assertIn('CXX_STANDARD="${XLLM_SERVICE_CXX_STANDARD:-20}"', self.inner_script)
         self.assertIn("CMAKE_PROJECT_xllm_service_INCLUDE", self.inner_script)
         self.assertIn("-DWERROR=OFF", self.inner_script)
-        self.assertIn("-DBUILD_TESTING=ON", self.inner_script)
+        self.assertIn('-DBUILD_TESTING="${CMAKE_TESTING}"', self.inner_script)
+        self.assertIn('BUILD_TESTING="${XLLM_SERVICE_BUILD_TESTING:-1}"', self.inner_script)
         self.assertIn("trap restore_host_ownership EXIT", self.inner_script)
 
     def test_service_archive_is_versioned_and_atomic(self):

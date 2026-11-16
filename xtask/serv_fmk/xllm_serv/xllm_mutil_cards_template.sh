@@ -11,6 +11,7 @@ export TRITON_BINARY_PATH="$(python3 -c 'import importlib.util, pathlib; print(p
 #export LD_LIBRARY_PATH=/usr/local/libtorch_npu/lib:$LD_LIBRARY_PATH
 
 export ASCEND_RT_VISIBLE_DEVICES={VISIBLE_DEVICES}
+export ASCEND_VISIBLE_DEVICES={VISIBLE_DEVICES}
 
 # Ascend 环境设置
 source /usr/local/Ascend/ascend-toolkit/set_env.sh

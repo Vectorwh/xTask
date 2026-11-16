@@ -147,7 +147,7 @@ class TaskSchedulerTests(unittest.TestCase):
                     "deployment": {
                         "mode": "pd_disaggregated",
                         "master_host": "10.0.0.1",
-                        "pd_control": {"host": "10.0.0.1"},
+                        "xllm_service": {"host": "10.0.0.1"},
                     },
                 },
                 engine_config={"startup_timeout": 30},

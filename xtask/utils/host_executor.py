@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from xtask.utils.secrets import redact
 import os
 import shlex
 import shutil
@@ -86,7 +87,7 @@ class LocalHostExecutor(HostExecutor):
                     }
                 )
             process_kwargs.update(kwargs)
-            logging.debug("LocalHostExecutor running: %s", command)
+            logging.debug("LocalHostExecutor running: %s", redact(command))
             result = subprocess.run(command, **process_kwargs)
             return CommandResult(
                 success=result.returncode == 0,
@@ -322,7 +323,7 @@ class SshHostExecutor(HostExecutor):
             logging.warning(
                 "SshHostExecutor ignores abort_event for host %s in v1", self.host
             )
-        logging.debug("SshHostExecutor(%s) running: %s", self.host, command)
+        logging.debug("SshHostExecutor(%s) running: %s", self.host, redact(command))
         # Pass a single remote command string so ssh runs it under the login shell.
         # Avoid ["bash","-lc",cmd] argv splitting issues across OpenSSH versions.
         return self._run_ssh([command], timeout)

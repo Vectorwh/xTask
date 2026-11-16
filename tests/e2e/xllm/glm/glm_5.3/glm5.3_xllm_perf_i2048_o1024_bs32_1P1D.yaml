@@ -45,17 +45,33 @@ deployment:
     max_workers: 4
     timeout: 3600
   master_host: 11.87.191.75
-  pd_control:
-    host: 11.87.191.75
-    etcd_client_port: 3389
-    etcd_peer_port: 3390
-    http_server_port: 38888
-    rpc_server_port: 38889
+  # 显式 C/R 复用引擎容器；etcd 与模型传输参数保持本用例原值。
+  xllm_service:
+    service_binary_profile: auto
+    etcd:
+      host: 11.87.191.75
+      client_port: 3389
+      peer_port: 3390
+      container_instance: prefill-0-node-0
     startup_attempts: 2
     startup_wait_seconds: 3
+    master_key_wait_seconds: 30
+    coordinators:
+      - name: coordinator-0
+        host: 11.87.191.75
+        http_server_port: 28888
+        rpc_server_port: 28889
+        container_instance: prefill-0-node-0
+    routers:
+      - name: router-0
+        host: 11.87.191.121
+        http_server_port: 38888
+        rpc_server_port: 38889
+        container_instance: decode-0-node-0
   benchmark:
     runner_instance: prefill-0-node-0
-    health_path: /health
+    health_path: /readyz
+    router_instance: router-0
   pd_instances:
   - name: prefill-0
     role: prefill

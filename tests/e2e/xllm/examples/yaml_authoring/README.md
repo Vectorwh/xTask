@@ -35,3 +35,17 @@
 | `26` | 外部已有 OpenAI 兼容服务 + AISBench 性能（不启动 xLLM） |
 | `27` | 外部已有 Wan2.2 + 独立 VBench runner 质量评测（不启动 xLLM） |
 | `28` | `startup_environment`：按逻辑实例继承、按 node 整段替换的启动脚本 shell 行 |
+| `34_glm5.3_pd_split_service_reuse_containers_perf.yaml` | GLM5.3 2048/1024、bs1、1P1D，显式 Coordinator/Router 复用对应引擎节点容器 |
+
+## PD 的 Coordinator / Router 配置
+
+`tests/e2e/` 下的 PD 用例统一使用 `deployment.xllm_service` 中的显式
+`coordinators`、`routers` 列表，写法参见 `34_glm5.3_pd_split_service_reuse_containers_perf.yaml`：
+
+- Coordinator：HTTP/RPC 为 `28888/28889`，通常复用 Prefill 主节点容器。
+- Router：HTTP/RPC 为 `38888/38889`，通常复用 Decode 主节点容器。
+- `host` 与 `container_instance` 必须匹配本用例的 Engine node；后者是 YAML 中的 node 名称，不是逻辑 P/D 组名或 Docker 容器名。Service 不新增容器，也不计入 NPU/rank 拓扑。
+- `deployment.benchmark.router_instance: router-0` 指定请求入口，健康检查路径为 `/readyz`；etcd 的地址及端口按各用例原配置保留，Engine 与两个 Service 角色共享该 etcd。
+- 同机 PD 用例的 Router 仍绑定本机实际 Decode node。`14` 号示例的 Decode 节点会随拓扑候选变化，故 Router 固定复用 `75/prefill-0-node-0`，确保所有候选均可规划。
+
+这些端口是单个用例的默认配置，不代表可以在同一服务器上并行启动多个用例；并行运行前应分别调整角色和 etcd 端口，并检查 NPU 占用。显式 C/R 列表面向新版 xllm-service，需要配套使用支持两个角色的二进制。

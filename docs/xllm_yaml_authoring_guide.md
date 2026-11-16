@@ -637,6 +637,97 @@ deployment:
 
 普通部署的 ranktable 规则是：所有 `deployment.instances` 组成同一个 `default` 组；实例数大于 1 时，框架按物理 host 汇总本组卡号，同一 host 只生成一个 server 条目，同时保留每个 runtime 的全局 rank。只有一个实例时不自动生成 ranktable。
 
+### 统一的 xLLM-Service 配置
+
+PD 分离和普通实例统一路由均使用 `deployment.xllm_service` 描述 etcd 与
+`xllm_master_serving` 的 IP、端口、启动重试和二进制兼容参数。部署模式仍分别为
+`pd_disaggregated`、`service_routed`；模型计算拓扑仍使用 `pd_instances`、
+`service_instances`，不能把它们当成 Service 进程列表。
+
+历史 `deployment.pd_control`、`deployment.service_control` 在配置边界转换为
+`deployment.xllm_service`，旧配置仍可读取；不要同时填写新旧配置块，即使内容相同
+也会报冲突。参数搜索中的旧 dotted path 同样转换到新路径。
+
+旧二进制保留单 Service 流程及历史 `pd_control/`、`service_control/` 日志目录。
+新二进制已支持第一阶段双角色部署：Coordinator/Router 是独立进程，复用本用例在
+对应 IP 上的模型引擎容器，不创建额外容器，也不参与设备/rank/world_size 计算。
+详见下一节；仅改字段名与启用双角色部署是两个不同的变更。
+
+### 新版 Service 第一阶段：复用引擎容器
+
+现有扁平 `xllm_service` 无需批量重写。`service_binary_profile: auto` 探测到角色参数后，
+自动在控制节点启动 1 个 Coordinator 和 1 个 Router：
+
+| 监听项 | 扁平字段/默认派生 | 说明 |
+| --- | --- | --- |
+| Router HTTP | `http_server_port`（原值不变） | benchmark 仍访问原业务端口 |
+| Coordinator RPC | `rpc_server_port`（原值不变） | Engine 从 etcd 发现控制面 |
+| Coordinator HTTP | `coordinator_http_server_port`，默认 HTTP + 10000 | 可覆盖，不能冲突或越界 |
+| Router RPC | `router_rpc_server_port`，默认 RPC + 10000 | 可覆盖，不能冲突或越界 |
+
+`legacy` 不派生新监听端口，继续单 Service；`refactor` 使用新流程。`auto` 在规划阶段
+为可能的新二进制检查派生端口，若冲突需明确修改端口或选择实际的 legacy profile，
+不能跳过冲突检查。端口不会因占用而静默漂移。
+
+需按 IP、数量或承载容器定制时，使用以下列表（本节配置已实现）：
+
+```yaml
+deployment:
+  mode: pd_disaggregated
+  xllm_service:
+    service_binary_profile: auto
+    etcd:
+      host: 11.87.191.75
+      client_port: 3389
+      peer_port: 3390
+      container_instance: prefill-0-node-0
+    etcd_namespace: ""
+    control_plane_shard_id: default
+    startup_attempts: 2
+    startup_wait_seconds: 3
+    master_key_wait_seconds: 30
+    coordinators:
+      - name: coordinator-0
+        host: 11.87.191.75
+        http_server_port: 48888
+        rpc_server_port: 38889
+        container_instance: prefill-0-node-0
+    routers:
+      - name: router-0
+        host: 11.87.191.121
+        http_server_port: 38888
+        rpc_server_port: 48889
+        container_instance: decode-0-node-0
+  benchmark:
+    runner_instance: prefill-0-node-0
+    router_instance: router-0
+    health_path: /readyz
+  # pd_instances 仍是独立的模型计算拓扑，省略部分沿用实际用例配置。
+```
+
+- `container_instance` 是展开后的 **node 名称**，不是 P/D 逻辑组名或实际 Docker 容器名。
+  指定 IP 必须匹配本例已有引擎节点。显式列表遇到同 IP 多个容器时必须指定；扁平
+  兼容模式优先选择该 host 上的 benchmark runner。第一阶段不支持无引擎节点的新 IP。
+- 每类列表至少 1 个实例，名称全局唯一；`etcd`、`remote`、`archive` 是保留名。
+  一个 shard 只有一个 active Coordinator leader，多个 Coordinator 是候选副本；Router
+  可多个，不要求 1:1。多个 Router 必须用 `deployment.benchmark.router_instance` 明确
+  选择一个业务入口，本阶段不自动增加 LB 或向所有 Router 平分请求。
+- 列表内分别配置 HTTP/RPC 端口，不再同时填写扁平 `http_server_port`、`rpc_server_port`、
+  `service_deployment_role` 或两个派生端口字段，避免歧义。共享 etcd 只启动一次，
+  `etcd.host` 与成员 host 可不同；嵌套与旧扁平 etcd 端口同时填写时必须一致。
+- Service 与 Engine 共用 `etcd_namespace`；第一阶段只支持 `control_plane_shard_id: default`。
+  不支持外部 etcd 接管、named shard 模型订阅、动态扩缩容；`external_service` 模式仍不
+  启动/清理这些组件。内部 token 统一从共享字段或 `XLLM_INTERNAL_TOKEN` 解析。
+- 检查顺序：etcd → Coordinator 进程及本例 leader → Router 进程 → Engine 注册后
+  Router `/readyz` 与 `/v1/models` 的实际模型。仅有 `/health` 200 不算新 Service 业务就绪。
+  这些检查不等价于已经验证真实推理成功，性能/精度仍由 benchmark 验证。
+- 每次执行采用独立运行 ID，日志写入 `xllm_service/<run-id>/<name>/xservice.log`，etcd
+  日志独立；远端日志按 host 归档。每个 benchmark 轮次保存自己的日志快照，不覆盖历史轮次。
+- 通过 PID、Linux start-time、PID namespace、executable 及 pidfd 清理本例拥有的进程，
+  不用进程名批量 pkill。重试某个 Router/Coordinator 不删除 etcd 数据或影响其他成员。
+  容器内需 Python 3.9+、Linux pidfd 支持（当前测试镜像满足）；未验证支持的运行环境
+  应先做进程 helper 的 CPU 检查。`CLEAN_RESULTS=false` 保留完整运行环境。
+
 ### 多个普通实例统一路由
 
 当目标是启动多个彼此独立的普通 xLLM 实例，并由一组 `xllm-service + etcd` 统一分发请求时，使用 `mode: service_routed`。不要使用普通 `instances`：普通 `instances` 的多个元素始终属于同一个分布式 xLLM 实例。
@@ -645,7 +736,7 @@ deployment:
 deployment:
   mode: service_routed
   master_host: 11.87.191.83
-  service_control:
+  xllm_service:
     host: 11.87.191.83
     etcd_client_port: 13389
     etcd_peer_port: 13390
@@ -667,17 +758,17 @@ deployment:
        device_ids: [2,3], local_port: 48100, hccl_if_port: 43539}
 ```
 
-每个 `service_instances[]` 是一个完整的普通逻辑实例，角色保持 xLLM `DEFAULT`；它可以只有一个 node，也可以由同一 host 或不同 host 上的多个 node 组成。xTask 自动为每个实例注入 `--enable_service_routing=true` 和统一的 `--etcd_addr`，benchmark 只访问 `service_control.host:http_server_port`。
+每个 `service_instances[]` 是一个完整的普通逻辑实例，角色保持 xLLM `DEFAULT`；它可以只有一个 node，也可以由同一 host 或不同 host 上的多个 node 组成。xTask 自动为每个实例注入 `--enable_service_routing=true` 和统一的 `--etcd_addr`，benchmark 只访问 `xllm_service.host:http_server_port`。
 
 | 字段 | 作用和约束 |
 | --- | --- |
 | `deployment.mode` | 固定写 `service_routed`，只在明确选择此模式时启用普通实例统一路由。 |
-| `service_control.host` | etcd 和 `xllm_master_serving` 所在 host，必须对应一个实际 node。 |
-| `service_control.etcd_client_port` / `etcd_peer_port` | etcd 客户端和 peer 端口，默认 3389/3390。 |
-| `service_control.http_server_port` / `rpc_server_port` | 统一 HTTP 入口和内部 RPC 端口，默认 38888/38889。 |
-| `service_control.service_deployment_role` | 默认 `COORDINATOR`；与 PD 相同，仅在 refactor 二进制上生效。 |
-| `service_control.service_binary_profile` | 默认 `auto`；`legacy` / `refactor` 语义同 `pd_control.service_binary_profile`。 |
-| `service_control.master_key_wait_seconds` | 控制面启动后等待 MASTER key 或 `/readyz` ready 的最长秒数，默认 30。 |
+| `xllm_service.host` | etcd 和 `xllm_master_serving` 所在 host，必须对应一个实际 node。 |
+| `xllm_service.etcd_client_port` / `etcd_peer_port` | etcd 客户端和 peer 端口，默认 3389/3390。 |
+| `xllm_service.http_server_port` / `rpc_server_port` | 统一 HTTP 入口和内部 RPC 端口，默认 38888/38889。 |
+| `xllm_service.service_deployment_role` | 扁平新模式允许 `COORDINATOR`（自动补 Router）；不能用唯一 `ROUTER` 替代控制面。列表内角色由所在列表确定。 |
+| `xllm_service.service_binary_profile` | 默认 `auto`；`legacy` / `refactor` 在普通实例路由与 PD 模式下使用相同语义。 |
+| `xllm_service.master_key_wait_seconds` | 控制面启动后等待 MASTER key 或 `/readyz` ready 的最长秒数，默认 30。 |
 | `service_instances[].name` | 独立普通逻辑实例名，全局唯一。 |
 | `service_instances[].group_master_host` | 本逻辑实例的主节点，必须对应本组某个 node；默认取本组第一个 node。 |
 | `service_instances[].progress_conn_port` | 本逻辑实例所有 node 共用；同 host 上的不同逻辑实例必须不同。 |
@@ -756,7 +847,7 @@ PD 可以简单理解为：Prefill 负责“读输入”，Decode 负责“生�
 deployment:
   mode: pd_disaggregated
   master_host: 11.87.191.75
-  pd_control:
+  xllm_service:
     host: 11.87.191.75
     etcd_client_port: 3389
     http_server_port: 38888
@@ -781,31 +872,31 @@ deployment:
              device_ids: [0,1], local_port: 48000, hccl_if_port: 43439}]
 ```
 
-`pd_control.host` 是 etcd 和统一 HTTP 服务所在节点，必须对应一个实际 node。`pd_instances[].name` 只标识逻辑 P/D 实例，`role` 只表示它是 P 还是 D；不要再写 `pd_group`。同一个逻辑实例有两个及以上 node 时，才为这一组生成和合并 ranktable；不同 P/D 组互不合并。
+`xllm_service.host` 是 etcd 和统一 HTTP 服务所在节点，必须对应一个实际 node。`pd_instances[].name` 只标识逻辑 P/D 实例，`role` 只表示它是 P 还是 D；不要再写 `pd_group`。同一个逻辑实例有两个及以上 node 时，才为这一组生成和合并 ranktable；不同 P/D 组互不合并。
 
 ### PD 顶层和控制面字段
 
 | 字段 | 新用例是否填写 | 通俗解释 | 当前行为和注意事项 |
 | --- | --- | --- | --- |
 | `deployment.mode` | 是 | 声明这是 PD 分离服务 | 固定写 `pd_disaggregated`。PD YAML 只允许层级 `pd_instances` 写法，不能再用扁平 `instances` 写 P/D。 |
-| `deployment.master_host` | 是 | 整个任务的主控 host | 一般与 `pd_control.host` 一致，并应是实际 node 之一。 |
-| `pd_control.host` | 是 | etcd 和 `xllm_master_serving` 在哪台服务器的服务容器内启动 | 必须能在展开后的某个 node host 中找到对应 runtime。统一 benchmark endpoint 也使用这个 IP。 |
-| `pd_control.etcd_client_port` | 建议 | P/D 实例注册和查询 etcd 的端口 | 默认 3389，并传给 xLLM 的 `--etcd_addr`。 |
-| `pd_control.etcd_peer_port` | 建议 | etcd 自身 peer 监听端口 | 默认 3390。单节点 etcd 也需要该监听端口不冲突。 |
-| `pd_control.http_server_port` | 是 | 对外统一 xLLM 服务端口 | benchmark 最终请求 `http://<pd_control.host>:<http_server_port>`，默认 38888。它不是 node 的 `local_port`。 |
-| `pd_control.rpc_server_port` | 建议 | `xllm_master_serving` 内部 RPC 端口 | 默认 38889，确保控制节点端口未占用。 |
-| `pd_control.startup_attempts` | 否 | 控制面启动失败最多重试几次 | 默认 2；每次重试前会清理旧的 etcd 和 `xllm_master_serving` 进程。 |
-| `pd_control.startup_wait_seconds` | 否 | 每次启动控制面后先等多少秒再检查 | 默认 3。它不是全部 P/D 实例注册完成的超时。 |
-| `pd_control.master_key_wait_seconds` | 否 | 等待控制面锚点就位的最长秒数 | 默认 30。框架优先用 `etcdctl`（gRPC）轮询 etcd 的 `XLLM:SERVICE:MASTER`，回退到 etcd v3 REST 网关 `/v3/kv/range`；refactor 二进制还接受 `http://<host>:<http_server_port>/readyz` 返回 `status=ready`。 |
-| `pd_control.service_deployment_role` | 否 | `xllm_master_serving` 部署角色 | 默认 `COORDINATOR`，仅在 refactor 二进制上生效。 |
-| `pd_control.service_binary_profile` | 否 | 控制面二进制兼容模式 | 默认 `auto`：启动前探测 `xllm_master_serving --help` 是否支持 `--service_deployment_role`。`legacy` 对应 GitHub 旧版（不传 role flag；MASTER key 探测为**非阻塞**告警——旧版二进制启动即自动写 MASTER，但用 3s 短租约，硬性门控易在租约边界抖动，故沿用历史的 `pgrep + etcd /health + 无 fatal 日志` 基础健康检查）；`refactor` 对应 JD 新版（传 `COORDINATOR`，MASTER key/`/readyz` 为**硬性门控**，用于捕获默认 ROUTER 不选举的回归）。 |
-| `pd_control.master_service_key` | 否 | 控制面锚点 etcd key | 默认 `XLLM:SERVICE:MASTER`。仅在自定义 `control_plane_shard_id` 时可能需要改成带 shard 前缀的 key。 |
-| `pd_control.transfer_port_base` | 仅兼容 | 所有 P/D 逻辑组的 transfer 端口默认值 | 默认 26000。旧用例继续有效；同 host 多 P/D 组的新用例应改在各 `pd_instances[]` 上分别配置。 |
-| `pd_control.no_proxy_hosts` | 否 | 额外加入 `NO_PROXY` 的 host 列表 | localhost、控制面和所有实例 host 会自动加入；这里只需补充环境中特殊地址。 |
+| `deployment.master_host` | 是 | 整个任务的主控 host | 一般与 `xllm_service.host` 一致，并应是实际 node 之一。 |
+| `xllm_service.host` | 是 | etcd 和 `xllm_master_serving` 在哪台服务器的服务容器内启动 | 必须能在展开后的某个 node host 中找到对应 runtime。统一 benchmark endpoint 也使用这个 IP。 |
+| `xllm_service.etcd_client_port` | 建议 | P/D 实例注册和查询 etcd 的端口 | 默认 3389，并传给 xLLM 的 `--etcd_addr`。 |
+| `xllm_service.etcd_peer_port` | 建议 | etcd 自身 peer 监听端口 | 默认 3390。单节点 etcd 也需要该监听端口不冲突。 |
+| `xllm_service.http_server_port` | 是 | 对外统一 xLLM 服务端口 | benchmark 最终请求 `http://<xllm_service.host>:<http_server_port>`，默认 38888。它不是 node 的 `local_port`。 |
+| `xllm_service.rpc_server_port` | 建议 | `xllm_master_serving` 内部 RPC 端口 | 默认 38889，确保控制节点端口未占用。 |
+| `xllm_service.startup_attempts` | 否 | 控制面启动失败最多重试几次 | 默认 2；每次重试前会清理旧的 etcd 和 `xllm_master_serving` 进程。 |
+| `xllm_service.startup_wait_seconds` | 否 | 每次启动控制面后先等多少秒再检查 | 默认 3。它不是全部 P/D 实例注册完成的超时。 |
+| `xllm_service.master_key_wait_seconds` | 否 | 等待控制面锚点就位的最长秒数 | 默认 30。框架优先用 `etcdctl`（gRPC）轮询 etcd 的 `XLLM:SERVICE:MASTER`，回退到 etcd v3 REST 网关 `/v3/kv/range`；refactor 二进制还接受 `http://<host>:<http_server_port>/readyz` 返回 `status=ready`。 |
+| `xllm_service.service_deployment_role` | 否 | 扁平兼容模式角色 | 新二进制默认补 1C+1R；角色列表不能再填此字段。 |
+| `xllm_service.service_binary_profile` | 否 | 控制面二进制兼容模式 | 默认 `auto`：启动前探测 `xllm_master_serving --help` 是否支持 `--service_deployment_role`。`legacy` 对应 GitHub 旧版（不传 role flag；MASTER key 探测为**非阻塞**告警——旧版二进制启动即自动写 MASTER，但用 3s 短租约，硬性门控易在租约边界抖动，故沿用历史的 `pgrep + etcd /health + 无 fatal 日志` 基础健康检查）；`refactor` 对应 JD 新版（传 `COORDINATOR`，MASTER key/`/readyz` 为**硬性门控**，用于捕获默认 ROUTER 不选举的回归）。 |
+| `xllm_service.master_service_key` | 否 | 控制面锚点 etcd key | 默认 `XLLM:SERVICE:MASTER`。仅在自定义 `control_plane_shard_id` 时可能需要改成带 shard 前缀的 key。 |
+| `xllm_service.transfer_port_base` | 仅兼容 | 所有 P/D 逻辑组的 transfer 端口默认值 | 默认 26000。旧用例继续有效；同 host 多 P/D 组的新用例应改在各 `pd_instances[]` 上分别配置。 |
+| `xllm_service.no_proxy_hosts` | 否 | 额外加入 `NO_PROXY` 的 host 列表 | localhost、控制面和所有实例 host 会自动加入；这里只需补充环境中特殊地址。 |
 | `deployment.benchmark.runner_instance` | 建议 | 在哪个物理 node 的容器里跑 benchmark | 层级 PD YAML 中应填写一个实际的 `nodes[].name`，例如 `prefill-0-node-0`，不是逻辑实例名 `prefill-0`。不写时框架会自动选择；写了却不匹配任何 node 时会退回首个 runtime，但配置含义会变得不明确。 |
-| `deployment.benchmark.health_path` | 建议 | 统一服务健康检查路径 | 默认 `/health`，拼在 `pd_control` 的 HTTP endpoint 后。 |
+| `deployment.benchmark.health_path` | 建议 | 统一服务健康检查路径 | 默认 `/health`，拼在 `xllm_service` 的 HTTP endpoint 后。 |
 
-注意：`deployment.benchmark.endpoint` 即使手工填写，当前服务组逻辑也不会把它作为权威地址；普通部署从 `master_host + local_port` 推导，PD 从 `pd_control.host + http_server_port` 推导。**仅当顶层 `external_service` 开启时**，该字段（以及 `external_service.endpoint`）才成为被测服务地址。
+注意：`deployment.benchmark.endpoint` 即使手工填写，当前服务组逻辑也不会把它作为权威地址；普通部署从 `master_host + local_port` 推导，PD 从 `xllm_service.host + http_server_port` 推导。**仅当顶层 `external_service` 开启时**，该字段（以及 `external_service.endpoint`）才成为被测服务地址。
 
 xLLM-Service 在 `service architecture refactor`（约 `55905ea` / `3fe20c6`）之后引入了 `COORDINATOR` / `ROUTER` 双角色：二进制默认是 `ROUTER`，只有 `COORDINATOR` 会通过 `elect_master()` 写入 `XLLM:SERVICE:MASTER`。GitHub 旧版 main（如 `72ab598` / `73d5e00`）没有该 flag，启动时会自动写 MASTER（用 3s 短租约 + 后台 keepalive 续约）。xTask 默认 `service_binary_profile=auto` 自动探测并兼容两类二进制：探测到 refactor 二进制时注入 `--service_deployment_role=COORDINATOR` 并把 MASTER key/`/readyz` 作为**硬性**控制面门控（捕获默认 ROUTER 不选举的回归）；探测到 legacy 二进制时不传 role flag，MASTER key 探测退化为**非阻塞**告警，沿用历史的基础健康检查（`pgrep + etcd /health + 无 fatal 日志`），避免 3s 租约边界抖动误杀旧版二进制。也可显式设为 `legacy` 或 `refactor`。
 
@@ -834,8 +925,8 @@ pkg/xllm/service_binary/current/librust_tokenizers.so
 加载。
 
 运行时依赖准备会按部署模式选择安装范围：普通实例不会安装
-`xllm_master_serving` 或 ETCD；PD / `service_routed` 只在 `pd_control.host` 或
-`service_control.host` 对应的控制面容器中安装，其他 runtime 只准备 xLLM wheel
+`xllm_master_serving` 或 ETCD；PD / `service_routed` 只在
+`xllm_service.host` 对应的控制面容器中安装，其他 runtime 只准备 xLLM wheel
 及其依赖。直接手工执行 `download_xllm.sh` 时，未设置开关仍保留旧行为；如需显式
 跳过控制面组件，可使用 `XLLM_INSTALL_SERVICE=0 bash tools/download_xllm.sh`。
 
@@ -872,7 +963,7 @@ bash tools/cron_daily_build.sh build service_build test
 | `pd_instances[].group_master_host` | 多 node 建议 | 这个逻辑 P/D 实例内谁是主节点 | 默认取 `nodes` 的第一个 host。组内 world size、启动主从关系和 readiness 都使用它；它必须对应本组实际 node。 |
 | `pd_instances[].hccl_if_port` | 仅作默认值 | 本逻辑实例各 node 的 HCCL 默认端口 | 默认继承顶层值或 43439。HCCL 实际是 node 级配置；同一 host 上有多个 node 时，必须在各 `nodes[].hccl_if_port` 覆盖成不同值。 |
 | `pd_instances[].progress_conn_port` | 同 host 多组是 | 本逻辑实例的主节点协调端口 | 默认继承顶层值或 9590。同一逻辑实例的 node 必须一致；多个逻辑组的 `group_master_host` 相同时必须不同。启用 `enable_shm` 的逻辑组只要共享任一物理 host，也必须使用不同值，避免共享内存对象重名。 |
-| `pd_instances[].transfer_port_base` | 同 host 多组是 | 本逻辑实例的数据传输端口起点 | 默认回退 `pd_control.transfer_port_base` 或 26000。实际端口为 `transfer_port_base + rank`，因此同 host 的不同逻辑组必须使用不重叠端口段。 |
+| `pd_instances[].transfer_port_base` | 同 host 多组是 | 本逻辑实例的数据传输端口起点 | 默认回退 `xllm_service.transfer_port_base` 或 26000。实际端口为 `transfer_port_base + rank`，因此同 host 的不同逻辑组必须使用不重叠端口段。 |
 | `pd_instances[].disagg_pd_port` | 同 host 多组是 | 本逻辑实例的 PD 调度 bRPC 监听端口 | 默认 7777，并传给 xLLM 的 `--disagg_pd_port`。同一逻辑实例的所有 node 必须一致；不同 P/D 逻辑实例的 `group_master_host` 相同时必须不同。 |
 | `pd_instances[].ipc_mode` / `shm_size` | 特殊场景按需 | 本逻辑实例各 node 的容器 IPC 配置 | 同 host 存在多个 runtime 时默认使用 host IPC。同一逻辑实例需要在同 host node 间使用共享内存时禁止配置 `private`；不需要跨容器共享内存时可显式配置 private IPC 和相应 `shm_size`。 |
 | `pd_instances[].serving_extensiable_param` | 是 | 本逻辑实例所有 node 默认共用的 xLLM 参数 | P 和 D 可以写不同参数块。 |
@@ -903,7 +994,7 @@ bash tools/cron_daily_build.sh build service_build test
 
 ranktable 以逻辑实例为组分别处理。一个逻辑组内即使多个 node 位于同一物理 host，也会按 host 合并成一个 server 条目并保留各 node 的 rank。上例只给 `prefill-0` 和 `decode-0` 自动生成 ranktable；单 node 的 `prefill-1` 跳过自动生成。P/D 各组之间不合并。
 
-同一物理 host 上所有 runtime 的 `device_ids`、xLLM 监听端口段和 PD transfer 端口都必须互不重叠；`pd_control` 的 etcd、HTTP、RPC 端口也会参与冲突检查。多个 P/D 逻辑组共机的完整写法见 `20_pd_samehost_multi_instance_perf.yaml`。
+同一物理 host 上所有 runtime 的 `device_ids`、xLLM 监听端口段和 PD transfer 端口都必须互不重叠；`xllm_service` 的 etcd、HTTP、RPC 端口也会参与冲突检查。多个 P/D 逻辑组共机的完整写法见 `20_pd_samehost_multi_instance_perf.yaml`。
 
 `startup_policy` 虽然在部分历史 YAML 中出现，但当前调度代码始终并行启动所有实例，它暂时不能真正切换串行/并行策略。新用例不需要依赖这个字段。
 
@@ -1080,7 +1171,7 @@ assess_search: {strategy: exhaustive, objective: {metric: output_tps_total, dire
 拓扑搜索的完整规则：
 
 - `assess_topologies` 只用于层级 PD YAML，并且基础部署不能再写扁平 P/D `deployment.instances`。
-- 每个拓扑名字下面目前只允许一个字段：`pd_instances`。`pd_control`、`master_host`、资源同步、benchmark runner 等公共配置仍放在基础 `deployment` 中。
+- 每个拓扑名字下面目前只允许一个字段：`pd_instances`。`xllm_service`、`master_host`、资源同步、benchmark runner 等公共配置仍放在基础 `deployment` 中。
 - `assess_test_param.deployment_topology` 的每个值必须正好匹配一个 `assess_topologies` 名字。
 - 每个候选拓扑都要写完整的 P/D 实例、node、host、卡和端口，且必须单独合法。
 - 框架先替换本轮完整拓扑，再应用同一轮的普通搜索参数。因此与拓扑联合搜索的路径必须在每个候选拓扑里都能匹配。
@@ -1564,7 +1655,7 @@ external_service:
 | `external_service` | `true` / mapping。缺省或 `false` = 端到端。 |
 | `endpoint` | 权威地址。解析顺序：`external_service.endpoint` → `host`+`port` → `deployment.benchmark.endpoint` → 顶层 `host_addr`+`port`。 |
 | `health_path` | 拼在 **origin**（不含 API path）后探测。默认 `/health`；HTTP 2xx 即通过。空 = 跳过。 |
-| `deployment.instances` / `pd_control` 等 | 开启后忽略并打 warning，不会去那些 host 起服务容器。 |
+| `deployment.instances` / `xllm_service` 等 | 开启后忽略并打 warning，不会去那些 host 起服务容器。 |
 
 **AISBench / EvalScope：** 仍起一台 engine 镜像作为 client，并下载对应 bench 工具；不执行 `download_xllm.sh`。AISBench 使用 `host_ip`/`host_port`，网关 URL 里的 path 不会写入 AISBench 配置。EvalScope 使用 origin + path 作为 `--api-url` 前缀。
 

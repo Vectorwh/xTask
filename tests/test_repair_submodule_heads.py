@@ -108,7 +108,9 @@ class RepairSubmoduleHeadsTests(unittest.TestCase):
         result = self.repair()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Recovered 1", result.stdout)
+        # The failed retry also cloned the second module without checkout.
+        # Both invalid HEAD and valid-HEAD empty clones now recover safely.
+        self.assertIn("Recovered 2", result.stdout)
         self.assertEqual(self.git(child, "rev-parse", "HEAD").stdout.strip(), self.commit)
         self.assertEqual((child / "source.txt").read_text(), "original source\n")
         self.assertEqual(self.git(child, "symbolic-ref", "-q", "HEAD", check=False).returncode, 1)
@@ -368,6 +370,39 @@ class RepairSubmoduleHeadsTests(unittest.TestCase):
         child = self.parent / "nested/llvm"
         self.assertEqual(self.git(child, "rev-parse", "HEAD").stdout.strip(), self.commit)
 
+    def test_repairs_valid_head_clone_without_checkout_at_parent_pin(self):
+        self._add_links(self.parent, [("llvm", self.seed, self.commit)])
+        child = self.parent / "llvm"
+        self.git(self.seed, "checkout", "-b", "tip")
+        (self.seed / "source.txt").write_text("new branch", encoding="utf-8")
+        self.git(self.seed, "add", "source.txt")
+        self._commit(self.seed)
+        tip = self.git(self.seed, "rev-parse", "HEAD").stdout.strip()
+        self.git(self.parent, "clone", "--no-checkout", str(self.seed), str(child))
+        self.assertEqual(self.git(child, "rev-parse", "HEAD").stdout.strip(), tip)
+        result = self.repair()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git(child, "rev-parse", "HEAD").stdout.strip(), self.commit)
+        self.assertEqual((child / "source.txt").read_text(), "original source\n")
+        self.assertEqual(self.repair("--verify").returncode, 0)
+
+    def test_verify_rejects_incomplete_checkouts_and_preserves_staged_deletion(self):
+        self._add_links(self.parent, [("llvm", self.seed, self.commit)])
+        result = self.repair("--verify")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Uninitialized submodule", result.stderr)
+        self.assertFalse((self.parent / "llvm").exists())
+        self.git(self.parent, "submodule", "update", "--init")
+        child = self.parent / "llvm"
+        (child / "source.txt").unlink()
+        self.assertIn("Missing tracked source files", self.repair("--verify").stderr)
+        self.git(child, "add", "-A")
+        before = self.git(child, "diff", "--cached").stdout
+        self.assertEqual(self.repair().returncode, 0)
+        self.assertFalse((child / "source.txt").exists())
+        self.assertEqual(self.git(child, "diff", "--cached").stdout, before)
+        self.assertIn("Empty checkout/index", self.repair("--verify").stderr)
+
 
 class PrepareRetryTests(unittest.TestCase):
     def _run_retry(self, function_body, stop_on_local_state=True):
@@ -395,6 +430,41 @@ result=$?
 printf 'result=%s calls=%s\\n' "$result" "$calls"
 """
         return subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
+
+    def test_successful_git_exit_does_not_bypass_postflight_or_retry(self):
+        source = PREPARE_SCRIPT.read_text(encoding="utf-8")
+        definitions = source[source.index("_apply_git_proxy_mode() {"):
+                             source.index("update_xllm_checkout() {")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            helper = root / "repair_submodule_heads.py"
+            helper.write_text(
+                "import pathlib,sys\n"
+                "if '--verify' in sys.argv:\n"
+                " p=pathlib.Path(sys.argv[1])/'calls'\n"
+                " count=int(p.read_text())+1 if p.exists() else 1\n"
+                " p.write_text(str(count))\n"
+                " sys.exit(1 if count<2 else 0)\n"
+            )
+            command = f"""
+GIT_HTTP_PROXY=http://unused.invalid
+GIT_HTTPS_PROXY=http://unused.invalid
+GIT_MAX_RETRIES=2
+GIT_RETRY_DELAY=0
+SCRIPT_DIR='{root}'
+XLLM_DIR='{root}'
+PYTHON_EXEC='{sys.executable}'
+{definitions}
+git() {{ return 0; }}
+RETRY_STOP_ON_LOCAL_STATE=1 retry 'fixture update' update_xllm_submodules
+printf 'result=%s\\n' "$?"
+"""
+            result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
+            self.assertIn("git_exit=0 postflight_exit=1", result.stdout)
+            self.assertIn("git_exit=0 postflight_exit=0", result.stdout)
+            self.assertIn("result=0", result.stdout)
+            self.assertEqual((root / "calls").read_text(), "2")
+            self.assertEqual(result.stderr.count("retrying in"), 1)
 
     def test_local_recovery_failure_stops_retrying(self):
         result = self._run_retry("return 125")

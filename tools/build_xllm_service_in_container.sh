@@ -19,6 +19,12 @@ BUILD_DIR="${SERVICE_SOURCE_DIR}/build"
 BUILD_JOBS="${XLLM_SERVICE_BUILD_JOBS:-8}"
 BUILD_TYPE="${XLLM_SERVICE_BUILD_TYPE:-Release}"
 CXX_STANDARD="${XLLM_SERVICE_CXX_STANDARD:-20}"
+BUILD_TESTING="${XLLM_SERVICE_BUILD_TESTING:-1}"
+case "$BUILD_TESTING" in
+  1) CMAKE_TESTING=ON ;;
+  0) CMAKE_TESTING=OFF ;;
+  *) echo "ERROR: XLLM_SERVICE_BUILD_TESTING must be 0 or 1." >&2; exit 1 ;;
+esac
 
 restore_host_ownership() {
   if [[ -n "${HOST_UID:-}" && -n "${HOST_GID:-}" ]]; then
@@ -87,7 +93,33 @@ ensure_vcpkg_compat_links() {
   done
 }
 
+# Wheel-installed Torch is not in CMake's default prefix search. Resolve its
+# config with the same Python used by setup.py, without importing torch/NPU or
+# installing/replacing any package in the image. Explicit Torch_DIR takes
+# precedence; keep the caller's remaining CMake prefixes intact.
+ensure_torch_cmake_prefix() {
+  local torch_dir="${Torch_DIR:-}"
+  if [[ -z "$torch_dir" ]]; then
+    if ! torch_dir="$(python3 -c 'import importlib.util,pathlib; spec=importlib.util.find_spec("torch"); print(pathlib.Path(spec.origin).resolve().parent / "share/cmake/Torch" if spec and spec.origin else "")')"; then
+      echo "ERROR: failed to discover Torch CMake directory with python3." >&2
+      return 1
+    fi
+  fi
+  if [[ -z "$torch_dir" ]]; then
+    echo "[service-build] Python Torch is absent; leave CMake discovery unchanged for legacy/no-Torch builds."
+    return 0
+  fi
+  if [[ ! -f "$torch_dir/TorchConfig.cmake" ]]; then
+    echo "ERROR: Torch CMake config is missing: $torch_dir/TorchConfig.cmake" >&2
+    return 1
+  fi
+  export Torch_DIR="$torch_dir"
+  export CMAKE_PREFIX_PATH="$torch_dir${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+  echo "[service-build] Torch_DIR=$Torch_DIR"
+}
+
 ensure_vcpkg_compat_links
+ensure_torch_cmake_prefix
 
 # Newer Service versions (coding.jd.com main) build through setup.py, which
 # checks every direct submodule against the indexed gitlink before invoking
@@ -100,7 +132,15 @@ ensure_vcpkg_compat_links
 # fallback whenever a non-default build type is requested.
 if [[ -f "${SERVICE_SOURCE_DIR}/setup.py" && "${BUILD_TYPE}" == "Release" ]]; then
   echo "[service-build] python3 setup.py build (jobs=${BUILD_JOBS})"
-  python3 setup.py build --jobs "${BUILD_JOBS}" --build-dir "${BUILD_DIR}"
+  TESTING_ARGS=()
+  if [[ "$BUILD_TESTING" == 0 ]]; then
+    if ! python3 setup.py build --help | grep -q -- '--no-testing'; then
+      echo "ERROR: this Service setup.py does not support --no-testing." >&2
+      exit 1
+    fi
+    TESTING_ARGS+=(--no-testing)
+  fi
+  python3 setup.py build --jobs "${BUILD_JOBS}" --build-dir "${BUILD_DIR}" "${TESTING_ARGS[@]}"
   ensure_vcpkg_compat_links
 else
   if [[ -f "${SERVICE_SOURCE_DIR}/setup.py" ]]; then
@@ -112,7 +152,7 @@ else
   cmake -S "${SERVICE_SOURCE_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DCMAKE_PROJECT_xllm_service_INCLUDE="${CMAKE_COMPAT_FILE}" \
-    -DBUILD_TESTING=ON \
+    -DBUILD_TESTING="${CMAKE_TESTING}" \
     -DWERROR=OFF
   ensure_vcpkg_compat_links
   cmake --build "${BUILD_DIR}" --target xllm_master_serving --parallel "${BUILD_JOBS}"
@@ -124,18 +164,25 @@ if [[ ! -x "${SERVICE_BINARY}" ]]; then
   exit 1
 fi
 
-# The service executable has a runtime dependency on the Rust tokenizer shared
-# object. It must travel with the service archive; etcd/etcdctl are independent
-# runtime tools and are intentionally not built here.
-TOKENIZER_LIB="$(
-  find "${BUILD_DIR}/xllm_service/tokenizer" \
-    -type f -path '*/release/librust_tokenizers.so' \
-    ! -path '*/release/deps/*' -print -quit
-)"
-if [[ -z "${TOKENIZER_LIB:-}" || ! -f "${TOKENIZER_LIB}" ]]; then
-  echo "ERROR: librust_tokenizers.so was not produced by xLLM-Service build." >&2
+# Inspect the executable, not a stale Cargo output directory. New tokenizer
+# staticlib builds need no tokenizer .so; legacy DT_NEEDED contracts still do.
+if ! DYNAMIC_INFO="$(readelf -d "${SERVICE_BINARY}" 2>&1)"; then
+  echo "ERROR: cannot inspect Service ELF runtime dependencies." >&2
   exit 1
 fi
+TOKENIZER_LINKAGE=static
+TOKENIZER_LIB=""
+if grep -q 'Shared library: \[librust_tokenizers.so\]' <<< "$DYNAMIC_INFO"; then
+  TOKENIZER_LINKAGE=dynamic
+  TOKENIZER_LIB="$(find "${BUILD_DIR}/xllm_service/tokenizer" \
+    -type f -path '*/release/librust_tokenizers.so' \
+    ! -path '*/release/deps/*' -print -quit)"
+  if [[ -z "$TOKENIZER_LIB" || ! -f "$TOKENIZER_LIB" ]]; then
+    echo "ERROR: Service requires librust_tokenizers.so, but it was not produced." >&2
+    exit 1
+  fi
+fi
+# etcd/etcdctl are independent runtime tools, not Service build outputs.
 
 SERVICE_COMMIT="unknown"
 XLLM_SUBMODULE_COMMIT="unknown"
@@ -153,17 +200,24 @@ STAGE_DIR="${SERVICE_ARCHIVE_DIR}/.release-${RELEASE_ID}.tmp"
 rm -rf "${STAGE_DIR}"
 mkdir -p "${STAGE_DIR}"
 install -m 0755 "${SERVICE_BINARY}" "${STAGE_DIR}/xllm_master_serving"
-install -m 0755 "${TOKENIZER_LIB}" "${STAGE_DIR}/librust_tokenizers.so"
+if [[ "$TOKENIZER_LINKAGE" == dynamic ]]; then
+  install -m 0755 "${TOKENIZER_LIB}" "${STAGE_DIR}/librust_tokenizers.so"
+fi
 {
   printf 'service_commit=%s\n' "${SERVICE_COMMIT}"
   printf 'service_version=%s\n' "$(cat "${SERVICE_SOURCE_DIR}/version.txt" 2>/dev/null || echo unknown)"
   printf 'xllm_submodule_commit=%s\n' "${XLLM_SUBMODULE_COMMIT}"
+  printf 'tokenizer_linkage=%s\n' "$TOKENIZER_LINKAGE"
+  printf 'build_testing=%s\n' "$BUILD_TESTING"
   printf 'build_type=%s\n' "${BUILD_TYPE}"
   printf 'build_jobs=%s\n' "${BUILD_JOBS}"
   printf 'cxx_standard=%s\n' "${CXX_STANDARD}"
   printf 'build_image=%s\n' "${XLLM_SERVICE_BUILD_IMAGE:-unknown}"
   printf 'built_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "${STAGE_DIR}/manifest.txt"
+
+(cd "$STAGE_DIR" && sha256sum xllm_master_serving manifest.txt \
+  ${TOKENIZER_LIB:+librust_tokenizers.so} > SHA256SUMS)
 
 # Keep previous usable releases until the complete new release is staged, then
 # atomically switch the current pointer. Legacy direct files are left alone so
@@ -176,3 +230,9 @@ mv -Tf "${TMP_LINK}" "${CURRENT_LINK}"
 
 echo "Archived xLLM-Service release: ${RELEASE_DIR}"
 echo "Current xLLM-Service release: ${CURRENT_LINK}"
+
+# Explicitly requested combined pack publishing is staged and checksum-safe.
+if [[ -n "${XLLM_SERVICE_APPEND_PACK:-}" ]]; then
+  python3 "${WORK_ROOT}/tools/xllm_release_pack.py" publish \
+    "$XLLM_SERVICE_APPEND_PACK" "${XLLM_PKG_DIR}/release_pack" --service "$RELEASE_DIR"
+fi

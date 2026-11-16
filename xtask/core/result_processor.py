@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from xtask.benchmarks.base_benchmark import ResultSummary
 from xtask.core.model_identity import resolve_model_name, resolve_source_yaml
+from xtask.core.xllm_service_config import get_xllm_service_config
 from xtask.core.result_workbook import (
     MISSING_ACCURACY,
     PERF_SUMMARY_FIELDS,
@@ -531,11 +532,9 @@ def _execution_time_seconds(result):
 
 def _resolve_host_addr(task_config):
     deployment = task_config.get("deployment") or {}
-    pd_control = deployment.get("pd_control") or {}
-    service_control = deployment.get("service_control") or {}
+    control = get_xllm_service_config(task_config)
     candidates = (
-        pd_control.get("host"),
-        service_control.get("host"),
+        control.get("host"),
         deployment.get("master_host"),
         task_config.get("host_addr"),
         os.getenv("LOCAL_HOST_IP"),
@@ -1033,6 +1032,9 @@ def _case_group_workbook_path(outputs, case_group, args):
 def write_result(result, task_config=None, task_path=None, args=None):
     """Append one scheduler result to global and optional case-group workbooks."""
     logging.debug("entry function: %s", inspect.currentframe().f_code.co_name)
+    from xtask.utils.secrets import redact_tree
+    result = redact_tree(result)
+    task_config = redact_tree(task_config)
     model_name, row = _build_result_row(
         result, task_config or {}, task_path, args=args
     )

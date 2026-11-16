@@ -6,6 +6,7 @@ import shlex
 import signal
 import inspect
 import logging
+from xtask.utils.secrets import redact
 import subprocess
 import threading
 from pathlib import Path
@@ -739,8 +740,8 @@ class ContainerManager:
         
         # Build command string
         exec_cmd = " ".join(exec_parts)
-        logging.info("exec_in_container exec_cmd is: %s"% exec_cmd)
-        logging.info(f"Executing in container '{container_name}': {cmd}")
+        logging.info("exec_in_container exec_cmd is: %s"% redact(exec_cmd))
+        logging.info("Executing in container '%s': %s", container_name, redact(cmd))
         
         # Execute command
         return self.run_command(exec_cmd, capture_output=capture_output, timeout=timeout,
