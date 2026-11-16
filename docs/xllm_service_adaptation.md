@@ -47,9 +47,29 @@ python tools/xllm_release_pack.py publish \
   --service pkg/xllm/service_binary/current
 ```
 
-或者构建 Service 时设置 `XLLM_SERVICE_APPEND_PACK=/path/to/xllm_pack.tar.gz`，构建成功后发布合并包。
+构建 Service 时也可以设置 `XLLM_SERVICE_APPEND_PACK=/path/to/xllm_pack.tar.gz`，构建成功后发布合并包。
 
-append 后重新生成整包校验值，临时目录验证成功后才切换 current，旧包仍保留。上游自行 append 后如果原 `.sha256` 已过期，应先按可信构建产物重新生成正确校验值；xTask 不会忽略错误 checksum。
+`service_build` 默认会自动把新 Service 合入当前 xLLM release pack：
+
+```bash
+XLLM_SERVICE_AUTO_APPEND_PACK=1   # 默认
+```
+
+选择输入 pack 的优先级为：
+
+```text
+XLLM_SERVICE_APPEND_PACK
+  > pkg/xllm/release_pack/current/xllm_pack.tar.gz（auto append 开启且存在时）
+  > 不合并，仅保留独立 Service 产物
+```
+
+关闭自动合并：
+
+```bash
+XLLM_SERVICE_AUTO_APPEND_PACK=0
+```
+
+该操作只更新 release pack 发布目录；默认用例仍走独立 `pkg/xllm/{wheel,vendors,third_whl,runtime_libs,service_binary}` 流程，只有显式配置 `deployment.xllm_package.release_pack` 或 `XLLM_RELEASE_PACK` 时才用 pack 安装。合并时重新生成整包校验值，临时目录验证成功后才原子切换 current，旧包仍保留。pack 仍不携带 etcd；运行控制面容器要求镜像预装 etcd，或显式配置 `XLLM_ETCD_BIN_DIR`。上游自行 append 后如果原 `.sha256` 已过期，应先按可信构建产物重新生成正确校验值；xTask 不会忽略错误 checksum。
 
 ## 3. HCCN 配置副本
 

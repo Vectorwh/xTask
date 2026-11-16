@@ -387,7 +387,7 @@ class ServiceBuildTests(unittest.TestCase):
             path = fake / name
             path.write_text("#!/bin/bash\n" + text + "\n")
             path.chmod(0o755)
-        executable("python3", "echo \"$*\" >> \"$WORK_ROOT/python.log\"; if [[ \"$1\" != '-c' ]]; then echo --no-testing; fi; exit 0")
+        executable("python3", "if [[ \"$1\" == *xllm_release_pack.py ]]; then exec \"/usr/bin/python3\" \"$@\"; fi; echo \"$*\" >> \"$WORK_ROOT/python.log\"; if [[ \"$1\" != '-c' ]]; then echo --no-testing; fi; exit 0")
         if dynamic:
             executable("readelf", "echo 'Shared library: [librust_tokenizers.so]'")
             if not missing:
@@ -395,12 +395,65 @@ class ServiceBuildTests(unittest.TestCase):
                 lib.parent.mkdir(parents=True)
                 lib.write_bytes(b"dynamic tokenizer")
         executable("git", "if [[ \"$*\" == *'rev-parse HEAD'* ]]; then echo fixturecommit; fi; exit 0")
+        (root / "tools").mkdir(exist_ok=True)
+        shutil.copy2(ROOT / "tools/xllm_release_pack.py", root / "tools" / "xllm_release_pack.py")
         env = dict(os.environ, WORK_ROOT=str(root), PATH=str(fake) + ":" + os.environ["PATH"],
                    XLLM_SERVICE_BUILD_TESTING="0")
         env.pop("HOST_UID", None)
         env.pop("HOST_GID", None)
         env.pop("XLLM_SERVICE_APPEND_PACK", None)
+        env.pop("XLLM_SERVICE_AUTO_APPEND_PACK", None)
         return env
+
+    def release_pack_fixture(self, root):
+        """Minimal valid upstream xLLM pack accepted by the real publisher."""
+        source = root / "release-pack-input"
+        source.mkdir(parents=True)
+        wheel_name = "xllm_npu_test-0.0.1-cp312-cp312-linux_aarch64.whl"
+        wheel = source / wheel_name
+        wheel.write_bytes(b"xllm wheel")
+        vendors = root / "vendors"
+        (vendors / "custom_xllm_math").mkdir(parents=True)
+        (vendors / "custom_transformer").mkdir(parents=True)
+        (vendors / "config.ini").write_text("fixture\n")
+        with tarfile.open(source / "vendors-fixture-cann9.1.0-arm-a3.tar.gz", "w:gz") as bundle:
+            bundle.add(vendors, arcname="vendors")
+
+        runtime = root / "mooncake-runtime-v0.3.12"
+        (runtime / "bin").mkdir(parents=True)
+        (runtime / "lib").mkdir(parents=True)
+        (runtime / "MANIFEST.txt").write_text(json.dumps({
+            "architecture": platform.machine(),
+            "source_wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+            "xllm_commit": "fixturecommit",
+        }))
+        for name in ("mooncake_master", "mooncake_client"):
+            binary = runtime / "bin" / name
+            binary.write_text("#!/bin/bash\nexit 0\n")
+            binary.chmod(0o755)
+        library = runtime / "lib/libasio.so"
+        library.write_bytes(b"runtime")
+        hashes = hashlib.sha256(library.read_bytes()).hexdigest() + "  lib/libasio.so\n"
+        (runtime / "SHA256SUMS").write_text(hashes)
+        with tarfile.open(source / "mooncake-runtime-v0.3.12.tar.gz", "w:gz") as bundle:
+            bundle.add(runtime, arcname="mooncake-v0.3.12")
+
+        archive = source / "xllm_pack.tar.gz"
+        with tarfile.open(archive, "w:gz") as bundle:
+            bundle.add(source / "vendors-fixture-cann9.1.0-arm-a3.tar.gz",
+                       arcname="xllm_pack/vendors-fixture-cann9.1.0-arm-a3.tar.gz")
+            bundle.add(source / "mooncake-runtime-v0.3.12.tar.gz",
+                       arcname="xllm_pack/mooncake-runtime-v0.3.12.tar.gz")
+            bundle.add(wheel, arcname="xllm_pack/" + wheel_name)
+        sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+        (archive.parent / (archive.name + ".sha256")).write_text(sha256 + "  " + archive.name + "\n")
+
+        # The publisher publishes content-addressed releases and makes the
+        # source archive available as release_pack/current/xllm_pack.tar.gz.
+        current = root / "pkg/xllm/release_pack/current"
+        current.parent.mkdir(parents=True)
+        current.symlink_to(source.resolve())
+        return current / "xllm_pack.tar.gz"
 
     def run_torch_prefix(self, root, discovered, override=None):
         import re
@@ -444,6 +497,58 @@ class ServiceBuildTests(unittest.TestCase):
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("prefix=/existing/prefix", result.stdout)
+
+    def test_service_build_auto_appends_current_release_pack_after_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            env = self.fixture(root)
+            archive = self.release_pack_fixture(root)
+            previous_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            result = subprocess.run(["bash", str(ROOT / "tools/build_xllm_service_in_container.sh")],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Auto-appending Service", result.stdout)
+            current = root / "pkg/xllm/release_pack/current/xllm_pack.tar.gz"
+            self.assertNotEqual(hashlib.sha256(current.read_bytes()).hexdigest(), previous_sha256)
+            with tarfile.open(current) as bundle:
+                names = bundle.getnames()
+            self.assertIn("xllm_pack/xllm_master_serving", names)
+            self.assertIn("xllm_pack/xllm-service_version.txt", names)
+            with tarfile.open(current) as bundle:
+                self.assertIn("tokenizer_linkage=static",
+                              bundle.extractfile("xllm_pack/xllm-service_version.txt").read().decode())
+            self.assertTrue(root.joinpath("pkg/xllm/release_pack/current/xllm_pack.tar.gz.sha256").is_file())
+
+    def test_auto_append_disabled_keeps_independent_artifacts_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            env = self.fixture(root)
+            env["XLLM_SERVICE_AUTO_APPEND_PACK"] = "0"
+            result = subprocess.run(["bash", str(ROOT / "tools/build_xllm_service_in_container.sh")],
+                                    env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("keep independent artifacts only", result.stdout)
+            self.assertFalse((root / "pkg/xllm/release_pack").exists())
+
+    def test_invalid_auto_append_value_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            env = self.fixture(root)
+            env["XLLM_SERVICE_AUTO_APPEND_PACK"] = "invalid"
+            result = subprocess.run(["bash", str(ROOT / "tools/build_xllm_service_in_container.sh")],
+                                    env=env, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("XLLM_SERVICE_AUTO_APPEND_PACK", result.stderr)
+
+    def test_missing_explicit_append_pack_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            env = self.fixture(root)
+            env["XLLM_SERVICE_APPEND_PACK"] = str(root / "missing/xllm_pack.tar.gz")
+            result = subprocess.run(["bash", str(ROOT / "tools/build_xllm_service_in_container.sh")],
+                                    env=env, capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("XLLM_SERVICE_APPEND_PACK does not exist", result.stderr)
 
     def test_static_build_archives_without_so_and_preserves_testing_switch(self):
         with tempfile.TemporaryDirectory() as temp:

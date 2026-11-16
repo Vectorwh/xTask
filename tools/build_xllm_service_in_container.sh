@@ -231,8 +231,33 @@ mv -Tf "${TMP_LINK}" "${CURRENT_LINK}"
 echo "Archived xLLM-Service release: ${RELEASE_DIR}"
 echo "Current xLLM-Service release: ${CURRENT_LINK}"
 
-# Explicitly requested combined pack publishing is staged and checksum-safe.
-if [[ -n "${XLLM_SERVICE_APPEND_PACK:-}" ]]; then
+# Publish the complete optional pack after a successful Service build. This
+# keeps the legacy independent artifacts usable and only updates the pack that
+# cases may select explicitly via deployment.xllm_package.release_pack.
+XLLM_SERVICE_APPEND_PACK="${XLLM_SERVICE_APPEND_PACK:-}"
+XLLM_SERVICE_AUTO_APPEND_PACK="${XLLM_SERVICE_AUTO_APPEND_PACK:-1}"
+case "$XLLM_SERVICE_AUTO_APPEND_PACK" in
+  1|true|yes) XLLM_SERVICE_AUTO_APPEND_PACK=1 ;;
+  0|false|no) XLLM_SERVICE_AUTO_APPEND_PACK=0 ;;
+  *)
+    echo "ERROR: XLLM_SERVICE_AUTO_APPEND_PACK must be 0/1 or true/false." >&2
+    exit 1
+    ;;
+esac
+RELEASE_PACK_CURRENT="${XLLM_PKG_DIR}/release_pack/current/xllm_pack.tar.gz"
+if [[ -z "$XLLM_SERVICE_APPEND_PACK" &&
+      "$XLLM_SERVICE_AUTO_APPEND_PACK" == 1 &&
+      -f "$RELEASE_PACK_CURRENT" ]]; then
+  XLLM_SERVICE_APPEND_PACK="$RELEASE_PACK_CURRENT"
+  echo "[service-pack] Auto-appending Service to the current xLLM release pack."
+fi
+if [[ -n "$XLLM_SERVICE_APPEND_PACK" ]]; then
+  if [[ ! -f "$XLLM_SERVICE_APPEND_PACK" ]]; then
+    echo "ERROR: XLLM_SERVICE_APPEND_PACK does not exist: $XLLM_SERVICE_APPEND_PACK" >&2
+    exit 1
+  fi
   python3 "${WORK_ROOT}/tools/xllm_release_pack.py" publish \
     "$XLLM_SERVICE_APPEND_PACK" "${XLLM_PKG_DIR}/release_pack" --service "$RELEASE_DIR"
+else
+  echo "[service-pack] No complete xLLM release pack was selected; keep independent artifacts only."
 fi

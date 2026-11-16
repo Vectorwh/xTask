@@ -1038,6 +1038,26 @@ class BuildXllmServiceScriptTests(unittest.TestCase):
         self.assertIn('mv -Tf "${TMP_LINK}" "${CURRENT_LINK}"', self.inner_script)
         self.assertIn("xllm_submodule_commit", self.inner_script)
 
+    def test_service_pack_append_controls_are_passed_and_default_safe(self):
+        self.assertIn(
+            '-e XLLM_SERVICE_APPEND_PACK="${XLLM_SERVICE_APPEND_PACK:-}"',
+            self.outer_script,
+        )
+        self.assertIn(
+            '-e XLLM_SERVICE_AUTO_APPEND_PACK="${XLLM_SERVICE_AUTO_APPEND_PACK:-1}"',
+            self.outer_script,
+        )
+        self.assertIn(
+            'XLLM_SERVICE_AUTO_APPEND_PACK="${XLLM_SERVICE_AUTO_APPEND_PACK:-1}"',
+            self.inner_script,
+        )
+        self.assertIn(
+            'RELEASE_PACK_CURRENT="${XLLM_PKG_DIR}/release_pack/current/xllm_pack.tar.gz"',
+            self.inner_script,
+        )
+        self.assertIn("Auto-appending Service", self.inner_script)
+        self.assertIn("keep independent artifacts only", self.inner_script)
+
     def test_service_does_not_claim_to_build_etcd(self):
         self.assertIn("etcd/etcdctl", self.inner_script)
         self.assertIn("independent", self.inner_script)
