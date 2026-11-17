@@ -3,7 +3,7 @@ engine_type: xllm
 external_service: true
 model_path: /export/home/models/Qwen3-8B
 served_model_name: Qwen3-8B
-metrics: swebench
+metrics: acc
 dataset_name: swebench
 dataset_path: ''
 dataset_format: json
@@ -15,8 +15,8 @@ userid: 1048
 # 日常端到端请用 28_single_aisbench_swebench.yaml，不要把主路径拆成两次 xTask。
 benchmark:
   benchmark_type: aisbench
-  swebench:
-    case_type: swebench
+  acc:
+    case_type: accuracy
     mode: all
     dataset: verified_mini
     dataset_path: ''

@@ -2,7 +2,7 @@ case_name: 28_single_aisbench_swebench
 engine_type: xllm
 model_path: /export/home/models/Qwen3-8B
 served_model_name: Qwen3-8B
-metrics: swebench
+metrics: acc
 dataset_name: swebench
 dataset_path: ''
 dataset_format: json
@@ -16,8 +16,8 @@ serving_wait_time: 10
 # AISBench / mini-swe-agent / SWE-bench harness。x86 只需 Docker 可用。
 benchmark:
   benchmark_type: aisbench
-  swebench:
-    case_type: swebench
+  acc:
+    case_type: accuracy
     mode: all                 # infer | eval | all；默认 all=推理+打分一次做完
     dataset: verified_mini    # verified_mini / lite / verified / full / multilingual
     dataset_path: ${HOME}/xtask_swe/runtime/datasets/swebench_verified_mini

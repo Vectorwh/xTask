@@ -30,7 +30,7 @@ class _ResourceTree:
             "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl",
             "wheel",
         )
-        self._write("evalscope-1.5.0-py3-none-any.whl", "wheel")
+        self._write("evalscope_offline/evalscope-1.14.0-py3-none-any.whl", "wheel")
         self._write("benchmark/setup.py", "setup")
         self._write("benchmark/ais_bench/benchmark/cli/main.py", "main")
         self._write(
@@ -159,7 +159,7 @@ class ResourceRequirementTests(unittest.TestCase):
             [
                 "numactl-2.0.16-9.vo2203sp4.aarch64.rpm",
                 "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl",
-                "evalscope-1.5.0-py3-none-any.whl",
+                "evalscope_offline",
                 "datasets/mmmu",
             ],
         )
@@ -229,10 +229,36 @@ class ResourceRequirementTests(unittest.TestCase):
             [
                 "numactl-2.0.16-9.vo2203sp4.aarch64.rpm",
                 "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl",
-                "evalscope-1.5.0-py3-none-any.whl",
+                "evalscope_offline",
                 "datasets/mmmu",
             ],
         )
+
+    def test_image_edit_runner_gets_evalscope_offline_component(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _ResourceTree(temporary_directory)
+            requirements = build_host_requirements(
+                {
+                    "benchmark": {"benchmark_type": "image_edit"},
+                    "dataset_name": "gedit",
+                },
+                [_plan("11.0.0.2", runner=True)],
+                temporary_directory,
+            )
+
+        paths = [item.relative_path for item in requirements["11.0.0.2"]]
+        self.assertEqual(
+            paths,
+            [
+                "numactl-2.0.16-9.vo2203sp4.aarch64.rpm",
+                "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl",
+                "evalscope_offline",
+            ],
+        )
+        probes = next(
+            item for item in requirements["11.0.0.2"] if item.name == "evalscope-offline"
+        ).probes
+        self.assertIn("evalscope_offline/evalscope-1.14.0-py3-none-any.whl", probes)
 
     def test_host_style_dataset_path_is_synced_to_remote_aisbench_runner(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

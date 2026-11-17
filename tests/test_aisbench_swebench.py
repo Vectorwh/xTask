@@ -16,6 +16,8 @@ from xtask.benchmarks.aisbench.swebench import (
     is_aisbench_swebench_task,
     is_swebench_eval_only,
     swebench_agent_container_timeout,
+    swebench_config,
+    swebench_config_key,
     validate_aisbench_swebench_task,
 )
 from xtask.core import result_processor, scheduler
@@ -47,16 +49,19 @@ def _ok_setup(bin_path="/usr/local/bin/ais_bench"):
 
 
 def _swe_task(**overrides):
+    """New-format SWE YAML: metrics: acc + SWE-shaped benchmark.acc."""
     task = {
         "case_name": "swe_case",
         "external_service": True,
         "served_model_name": "Qwen3-8B",
-        "metrics": "swebench",
+        "metrics": "acc",
+        "dataset_name": "swebench",
         "host_addr": "11.87.191.75",
         "port": 8800,
         "benchmark": {
             "benchmark_type": "aisbench",
-            "swebench": {
+            "acc": {
+                "case_type": "accuracy",
                 "mode": "all",
                 "dataset": "verified_mini",
                 "reuse": True,
@@ -73,9 +78,94 @@ def _swe_task(**overrides):
     }
     swe = overrides.pop("swebench", None)
     if swe is not None:
-        task["benchmark"]["swebench"].update(swe)
+        task["benchmark"]["acc"].update(swe)
     task.update(overrides)
     return task
+
+
+def _swe_task_legacy(**overrides):
+    """Legacy SWE YAML: metrics: swebench + benchmark.swebench."""
+    task = _swe_task(**overrides)
+    task["metrics"] = "swebench"
+    task["benchmark"]["swebench"] = task["benchmark"].pop("acc")
+    return task
+
+
+def _plain_acc_task(extra_acc=None):
+    """Plain accuracy shape (gpqa): no SWE traits in benchmark.acc."""
+    acc = {
+        "case_type": "accuracy",
+        "api_type": "vllm_api_general_chat",
+        "dataset_conf": "gpqa_gen_0_shot_cot_chat_prompt",
+        "dataset_path": None,
+        "num_prompts": 20,
+        "batch_size": 4,
+        "output_len": 32768,
+        "request_rate": 0,
+        "baseline": 30.0,
+        "threshold": 0.20,
+        "generation_kwargs": {"temperature": 0, "ignore_eos": False},
+    }
+    if extra_acc:
+        acc.update(extra_acc)
+    return {
+        "case_name": "gpqa_case",
+        "metrics": "acc",
+        "dataset_name": "gpqa",
+        "benchmark": {"benchmark_type": "aisbench", "acc": acc},
+    }
+
+
+def _gedit_acc_task():
+    """GEdit accuracy shape: acc block without mode/runner."""
+    return {
+        "case_name": "gedit_case",
+        "metrics": "acc",
+        "dataset_name": "gedit",
+        "benchmark": {
+            "benchmark_type": "aisbench",
+            "acc": {
+                "case_type": "accuracy",
+                "api_type": "gedit_image_edit",
+                "dataset_conf": "gedit_gen_0_shot_llmjudge",
+                "num_prompts": 20,
+                "batch_size": 1,
+                "output_len": 512,
+                "request_rate": 0,
+                "judge_endpoint": "127.0.0.1:18008",
+                "baseline": 3.925,
+                "threshold": 0.20,
+                "generation_kwargs": {"temperature": 0.01, "ignore_eos": False},
+            },
+        },
+    }
+
+
+def _aisbench_perf_task(benchmark_type="aisbench"):
+    """Perf shape (01/26 aisbench, 02 evalscope): no runner/mode anywhere."""
+    return {
+        "case_name": "perf_case",
+        "metrics": "perf",
+        "dataset_name": "gsm8k",
+        "benchmark": {
+            "benchmark_type": benchmark_type,
+            "perf": {
+                "case_type": "performance",
+                "api_type": "vllm_api_general_stream",
+                "dataset_conf": "gsm8k_gen_0_shot_cot_str_perf",
+                "input_len": 1024,
+                "output_len": 1024,
+                "max_out_len": 1024,
+                "batch_size": 1,
+                "request_rate": 1,
+                "num_prompts": 6,
+                "num_warmups": 20,
+                "baseline": 110.6873,
+                "threshold": 0.10,
+                "generation_kwargs": {"temperature": 0, "ignore_eos": True},
+            },
+        },
+    }
 
 
 def _perf_task():
@@ -92,11 +182,30 @@ def _perf_task():
 
 
 class SwebenchGateTests(unittest.TestCase):
-    def test_perf_yaml_is_not_a_swe_task_even_with_swebench_block(self):
-        self.assertFalse(is_aisbench_swebench_task(_perf_task()))
-        self.assertFalse(is_swebench_eval_only(_perf_task()))
+    def test_new_format_metrics_acc_is_a_swe_task(self):
+        self.assertTrue(is_aisbench_swebench_task(_swe_task()))
+        self.assertEqual(swebench_config_key(_swe_task()), "acc")
+        self.assertEqual(
+            swebench_config(_swe_task()).get("dataset"), "verified_mini"
+        )
+        self.assertEqual(
+            swebench_config(_swe_task()).get("runner"), {"host": "127.0.0.1"}
+        )
 
-    def test_acc_yaml_is_not_a_swe_task(self):
+    def test_legacy_format_is_still_a_swe_task(self):
+        task = _swe_task_legacy()
+        self.assertTrue(is_aisbench_swebench_task(task))
+        self.assertEqual(swebench_config_key(task), "swebench")
+        self.assertEqual(swebench_config(task).get("dataset"), "verified_mini")
+        self.assertTrue(is_swebench_eval_only(_swe_task_legacy(swebench={"mode": "eval"})))
+
+    def test_plain_gpqa_acc_yaml_is_not_a_swe_task(self):
+        task = _plain_acc_task()
+        self.assertFalse(is_aisbench_swebench_task(task))
+        self.assertIsNone(swebench_config_key(task))
+        self.assertEqual(swebench_config(task), {})
+
+    def test_plain_acc_yaml_with_baseline_only_is_not_a_swe_task(self):
         task = {
             "metrics": "acc",
             "dataset_name": "swebench",
@@ -107,14 +216,55 @@ class SwebenchGateTests(unittest.TestCase):
         }
         self.assertFalse(is_aisbench_swebench_task(task))
 
-    def test_swe_requires_metric_type_and_block(self):
+    def test_gedit_acc_yaml_is_not_a_swe_task(self):
+        task = _gedit_acc_task()
+        self.assertFalse(is_aisbench_swebench_task(task))
+        self.assertIsNone(swebench_config_key(task))
+
+    def test_aisbench_perf_yaml_is_not_a_swe_task(self):
+        # 01/26 shape: metrics: perf + benchmark.perf without runner/mode.
+        task = _aisbench_perf_task()
+        self.assertFalse(is_aisbench_swebench_task(task))
+        self.assertIsNone(swebench_config_key(task))
+        self.assertEqual(swebench_config(task), {})
+
+    def test_evalscope_perf_yaml_is_not_a_swe_task(self):
+        # 02 shape: benchmark_type evalscope keeps every block out of SWE.
+        task = _aisbench_perf_task(benchmark_type="evalscope")
+        task["benchmark"]["perf"].update(
+            {"min_prompt_length": 760, "warmup_paras": {"request_rate": 10}}
+        )
+        self.assertFalse(is_aisbench_swebench_task(task))
+        self.assertIsNone(swebench_config_key(task))
+
+    def test_acc_yaml_with_leftover_swebench_block_stays_out(self):
+        task = _plain_acc_task()
+        task["benchmark"]["swebench"] = {"dataset": "verified_mini"}
+        self.assertFalse(is_aisbench_swebench_task(task))
+        self.assertIsNone(swebench_config_key(task))
+
+    def test_perf_yaml_is_not_a_swe_task_even_with_swebench_block(self):
+        self.assertFalse(is_aisbench_swebench_task(_perf_task()))
+        self.assertFalse(is_swebench_eval_only(_perf_task()))
+
+    def test_swe_requires_block_and_aisbench_type(self):
         self.assertTrue(is_aisbench_swebench_task(_swe_task()))
         missing_block = _swe_task()
-        missing_block["benchmark"].pop("swebench")
+        missing_block["benchmark"].pop("acc")
         self.assertFalse(is_aisbench_swebench_task(missing_block))
         wrong_type = _swe_task()
         wrong_type["benchmark"]["benchmark_type"] = "evalscope"
         self.assertFalse(is_aisbench_swebench_task(wrong_type))
+
+    def test_swe_block_without_runner_or_mode_is_not_detected(self):
+        task = _swe_task()
+        task["benchmark"]["acc"].pop("runner")
+        task["benchmark"]["acc"].pop("mode")
+        self.assertFalse(is_aisbench_swebench_task(task))
+
+    def test_validate_error_message_mentions_both_formats(self):
+        with self.assertRaisesRegex(ValueError, "benchmark\\.acc.*benchmark\\.swebench"):
+            validate_aisbench_swebench_task(_plain_acc_task())
 
     def test_eval_only_is_gated(self):
         self.assertTrue(is_swebench_eval_only(_swe_task(swebench={"mode": "eval"})))
@@ -145,7 +295,7 @@ class SwebenchScriptTests(unittest.TestCase):
             self.assertIn("XTASK_SWEBENCH_AGENT_CONTAINER_TIMEOUT=4h", shell)
             self.assertTrue((Path(tmp) / ".xtask_swe_copy_fallback/sitecustomize.py").is_file())
         for bad in ("0h", "4 hours", "1h; echo bad", True):
-            task["benchmark"]["swebench"]["runner"]["agent_container_timeout"] = bad
+            task["benchmark"]["acc"]["runner"]["agent_container_timeout"] = bad
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "positive duration"):
                 swebench_agent_container_timeout(task)
 
@@ -1037,8 +1187,35 @@ class SwebenchVerifyTests(unittest.TestCase):
         result["benchmark_swebench_result"]["resolved_rate"] = 0.20
         self.assertFalse(result_processor.verify_result(result, config))
 
+    def test_configured_baseline_reads_swe_block_in_both_formats(self):
+        new = _swe_task(swebench={"baseline": 0.40, "threshold": 0.10})
+        self.assertEqual(
+            result_processor._configured_baseline(new),
+            ("swebench", 0.40, 0.10),
+        )
+        legacy = _swe_task_legacy(swebench={"baseline": 0.40, "threshold": 0.10})
+        self.assertEqual(
+            result_processor._configured_baseline(legacy),
+            ("swebench", 0.40, 0.10),
+        )
+
+    def test_configured_baseline_keeps_plain_acc_and_perf_paths(self):
+        # Plain acc (gpqa) still resolves through the generic acc branch.
+        acc = _plain_acc_task()
+        self.assertEqual(
+            result_processor._configured_baseline(acc), ("acc", 30.0, 0.20)
+        )
+        # Perf (01/26 shape) still resolves through the perf baseline gate.
+        perf = _aisbench_perf_task()
+        self.assertEqual(
+            result_processor._configured_baseline(perf),
+            ("perf", 110.6873, 0.10),
+        )
+
     def test_harness_failure_classification_requires_explicit_swe_route(self):
-        task = _swe_task()
+        # Legacy format: metrics: swebench but benchmark_type is not aisbench,
+        # so the SWE harness failure must not be reported for this task.
+        task = _swe_task_legacy()
         task["benchmark"]["benchmark_type"] = "evalscope"
         result = {
             "success": False,
@@ -1051,6 +1228,14 @@ class SwebenchVerifyTests(unittest.TestCase):
         }
         category, reason = result_processor._classify_failure(result, task)
         self.assertEqual(category, result_processor.FAILURE_OTHER)
+        self.assertNotIn("harness_exit_code", reason)
+
+        # New format: metrics: acc with a SWE-shaped benchmark.acc block is
+        # also ignored for non-aisbench benchmark types.
+        task = _swe_task()
+        task["benchmark"]["benchmark_type"] = "evalscope"
+        category, reason = result_processor._classify_failure(result, task)
+        self.assertNotEqual(category, result_processor.FAILURE_BENCHMARK)
         self.assertNotIn("harness_exit_code", reason)
 
     def test_perf_failure_classification_ignores_leftover_swe_report(self):

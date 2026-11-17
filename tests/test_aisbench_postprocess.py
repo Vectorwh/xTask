@@ -91,6 +91,60 @@ class AisbenchOutputDiscoveryTests(unittest.TestCase):
         self.assertEqual((actual_csv, actual_json), ("", ""))
 
 
+class AisbenchAccPostProcessTests(unittest.TestCase):
+    def _build_task_config(self, api_type="gedit_image_edit"):
+        return {
+            "case_name": "demo_acc",
+            "benchmark": {
+                "benchmark_type": "aisbench",
+                "acc": {"api_type": api_type},
+            },
+        }
+
+    def test_multi_metric_rows_return_composite_average(self):
+        from xtask.benchmarks.aisbench.aisbench_postprocess import (
+            aisbench_acc_post_process,
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            stamp_dir = Path(root) / "20261027_110902" / "summary"
+            stamp_dir.mkdir(parents=True)
+            (stamp_dir / "summary.csv").write_text(
+                "dataset,version,metric,mode,gedit-image-edit\n"
+                "gedit-SC_judge,6c769c,SC,gen,0.45\n"
+                "gedit-PQ_judge,6c769c,PQ,gen,7.15\n",
+                encoding="utf-8",
+            )
+
+            result, output_dir = aisbench_acc_post_process(
+                self._build_task_config(), root, []
+            )
+
+        self.assertAlmostEqual(result, 3.8)
+        self.assertEqual(output_dir, str(Path(root) / "20261027_110902"))
+
+    def test_single_metric_row_keeps_original_value(self):
+        from xtask.benchmarks.aisbench.aisbench_postprocess import (
+            aisbench_acc_post_process,
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            stamp_dir = Path(root) / "20261027_110902" / "summary"
+            stamp_dir.mkdir(parents=True)
+            (stamp_dir / "summary.csv").write_text(
+                "dataset,version,metric,mode,gedit-image-edit\n"
+                "gedit-SC_judge,6c769c,SC,gen,0.45\n",
+                encoding="utf-8",
+            )
+
+            result, output_dir = aisbench_acc_post_process(
+                self._build_task_config(), root, []
+            )
+
+        self.assertAlmostEqual(float(result), 0.45)
+        self.assertEqual(output_dir, str(Path(root) / "20261027_110902"))
+
+
 class AisbenchResultParserTests(unittest.TestCase):
     def test_summary_json_total_values_and_units_are_normalized(self):
         csv_content = """Performance Parameters,Stage,Average,Min,Max,Median,P75,P90,P99,N

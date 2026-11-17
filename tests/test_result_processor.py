@@ -868,7 +868,8 @@ class WriteResultTests(unittest.TestCase):
             result_processor.os, "getcwd", return_value=root
         ):
             source = self._source_case(root)
-            config = self._config("case-vbench", metrics="vbench")
+            # New-format VBench YAML: metrics: acc + benchmark.vbench.
+            config = self._config("case-vbench", metrics="acc")
             config["benchmark"] = {
                 "benchmark_type": "vbench",
                 "vbench": {"mode": "generate_and_evaluate"},
@@ -965,6 +966,8 @@ class WriteResultTests(unittest.TestCase):
             workbook.save(workbook_path)
             workbook.close()
 
+            # Legacy-format VBench YAML (metrics: vbench) must keep the same
+            # VBench-specific workbook columns.
             vbench_config = self._config("case-b", metrics="vbench")
             vbench_config["benchmark"] = {
                 "benchmark_type": "vbench",

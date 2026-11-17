@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
-from xtask.benchmarks.aisbench.swebench import swebench_mode
+from xtask.benchmarks.aisbench.swebench import swebench_config, swebench_mode
 
 
 _DATE_DIR = re.compile(r"^\d{8}_\d{6}$")
@@ -237,9 +237,7 @@ def aisbench_swe_post_process(
     result: Dict[str, Any] = {
         "mode": mode,
         "dataset": str(
-            ((task_config.get("benchmark") or {}).get("swebench") or {}).get(
-                "dataset", "verified_mini"
-            )
+            swebench_config(task_config).get("dataset", "verified_mini")
         ),
         "result_file": str(result_file) if result_file else None,
         "predictions_file": str(predictions_file) if predictions_file else None,

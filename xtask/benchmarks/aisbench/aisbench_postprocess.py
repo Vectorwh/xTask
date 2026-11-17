@@ -464,13 +464,28 @@ def aisbench_acc_post_process(task_config, output_path, init_entries):
         result_value = get_column_values(csv_rows, api_type)
         if result_value and len(result_value) == 1:
             return result_value[0], (os.path.join(output_path, aisbench_output_dir))
+        elif result_value and len(result_value) > 1:
+            # 多指标结果（如 gedit 的 SC/PQ 两行）：取算术平均作为综合精度分，
+            # 保持与单指标用例一致的返回契约（单个数值, 输出目录）。
+            try:
+                scores = [float(v) for v in result_value]
+                composite_score = sum(scores) / len(scores)
+                logging.info(
+                    f"aisbench acc multi-metric result: {result_value}, "
+                    f"composite score (avg): {composite_score}"
+                )
+                return composite_score, (os.path.join(output_path, aisbench_output_dir))
+            except (TypeError, ValueError):
+                logging.error(f"aisbench acc multi-metric values are not numeric: {result_value}")
+                return None, (os.path.join(output_path, aisbench_output_dir))
         else:
             logging.error("")
-            return
+            return None, (os.path.join(output_path, aisbench_output_dir))
     else:
         logging.error(f"aisbench csv: {aisbench_csv} is not exist.")
         result = None
     return result, (os.path.join(output_path, aisbench_output_dir))
+
 
 
 def find_aisbench_directory(directory_path=".", init_entries=list(), aisbench_type="perf"):

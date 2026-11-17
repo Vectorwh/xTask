@@ -10,6 +10,11 @@
 
 运行前至少检查 `model_path`、各节点 IP、`device_ids`、端口和 SSH 配置。新用例建议复制最接近的示例后改名，不要直接修改历史用例。
 
+ASR 的准备、YAML 配置、评分/门禁、归档和搜索说明统一维护在
+`docs/xllm_yaml_authoring_guide.md` 第 3 节“JoyAI-ASR 原始评测”。
+TP2 自部署基础用例位于 `tests/e2e/xllm/joyai/joyai_asr/`；40/41 是同一实现的
+单轮/两轮外部服务示例，不存在 YAML 继承关系。
+
 文件对应关系：
 
 | 文件 | 用途 |
@@ -36,6 +41,10 @@
 | `27` | 外部已有 Wan2.2 + 独立 VBench runner 质量评测（不启动 xLLM） |
 | `28` | `startup_environment`：按逻辑实例继承、按 node 整段替换的启动脚本 shell 行 |
 | `34_glm5.3_pd_split_service_reuse_containers_perf.yaml` | GLM5.3 2048/1024、bs1、1P1D，显式 Coordinator/Router 复用对应引擎节点容器 |
+| `40` | 外部 JoyaiASR 服务 + 原始客户端：完整 1162 条精度与性能评测（multipart/SSE，并发 2，不管理服务生命周期） |
+| `41` | 外部 JoyaiASR 服务 + 两轮完整 1162 条评测：验证日期归档、多轮 CSV/统计和全局/用例组 Excel（并发 2） |
+| `43` | 外部已有服务 + AISBench GPQA 精度，endpoint 用**域名**（验证 external_service 走 AISBench `url` 字段） |
+| `42` | Qwen3.6-35B-A3B 普通 LLM perf 回归抽测：复制现有 BS1 用例到本机 `.75`，保持 AISBench 请求、预热、MTP 和基线不变 |
 
 ## PD 的 Coordinator / Router 配置
 

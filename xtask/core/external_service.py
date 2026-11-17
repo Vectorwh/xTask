@@ -10,6 +10,7 @@ This module must not import the scheduler. Callers gate every behavior on
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
@@ -209,6 +210,44 @@ def resolve_external_origin(task_config: Dict[str, Any]) -> str:
 def resolve_openai_api_base(task_config: Dict[str, Any]) -> str:
     location = resolve_external_location(task_config)
     return location.origin + location.base_path
+
+
+def _aisbench_url_required(location: ExternalServiceLocation) -> bool:
+    """Whether AISBench's ``host_ip`` field can express this endpoint.
+
+    AISBench validates ``host_ip`` with ``ipaddress.ip_address()`` and only
+    whitelists ``localhost``, so a hostname / https / sub-path endpoint cannot
+    be expressed through ``host_ip``. Those must go through AISBench's ``url``
+    field instead (which makes AISBench ignore host_ip/host_port).
+    """
+    if location.base_path or location.scheme != "http":
+        return True
+    try:
+        ipaddress.ip_address(location.host)
+    except ValueError:
+        return True
+    return False
+
+
+def resolve_aisbench_url_override(task_config: Dict[str, Any]) -> str:
+    """Return the AISBench ``url`` value, or "" to keep using ``host_ip``.
+
+    Returns "" (historical behaviour, byte-identical scripts) whenever the
+    endpoint is expressible as ``host_ip`` + ``host_port``: plain IPv4/IPv6
+    over http with no path. Empty means "keep writing host_ip".
+
+    Non-empty values are always forced to end with "/": AISBench joins the
+    endpoint with ``urllib.parse.urljoin(base_url, "v1/chat/completions")``,
+    which *replaces* the last path segment when the base has no trailing
+    slash (``https://gw/a/b`` -> ``https://gw/a/v1/...``), silently dropping
+    a gateway sub-path.
+    """
+    if not is_external_service_enabled(task_config):
+        return ""
+    location = resolve_external_location(task_config)
+    if not _aisbench_url_required(location):
+        return ""
+    return location.origin + location.base_path + "/"
 
 
 def topology_fields_ignored(task_config: Dict[str, Any]) -> List[str]:

@@ -3,9 +3,9 @@
 写一个用例时，按下面四步拼起来即可：
 
 1. 先写模型和数据集。
-2. 再选一个 benchmark：AISBench、EvalScope 或 VBench。
-3. 再选一种测试：性能 `perf`、精度 `acc`、视频质量 `vbench`，或 SWE-bench `swebench`。
-4. 最后选部署：单机、普通多机、普通实例统一路由，或者 PD 分离；需要搜索时再加搜索段。
+2. 再选一个 benchmark：AISBench、EvalScope、VBench、GEdit 图片编辑（`image_edit` 性能 / AISBench gedit 精度），或 ASR 原始评测（`asr` / `legacy_infer`）。
+3. 再选一种测试：性能 `perf`，或精度 `acc`（VBench 视频质量与 AISBench SWE-bench 也写 `acc`，由 `benchmark.benchmark_type` 区分）；ASR 原始评测推荐 `metrics: acc,perf`，一次请求同时产出质量和性能结果。
+4. 最后选部署：单机、普通多机、普通实例统一路由、PD 分离，或用 `external_service` 对接已有服务；需要搜索时再加搜索段。
 
 ## 1. 可参考示例
 
@@ -40,8 +40,26 @@
 | 外部已有 Wan2.2 + VBench | `27_external_vbench_wan_i2v.yaml` |
 | 单机起 xLLM + AISBench SWE-bench（x86 Agent/打分） | `28_single_aisbench_swebench.yaml` |
 | 外部已有服务 + AISBench SWE-bench | `29_external_aisbench_swebench.yaml` |
+| 单机 Wan2.2 I2V + VBench mini 子集（107 条采样） | `30_single_vbench_wan_i2v_mini.yaml` |
+| DeepSeek V4 + AISBench SWE-bench（verified_mini 单条 filter） | `31_single_aisbench_swebench_dsv4.yaml` |
+| DeepSeek V4 + AISBench SWE-bench（3 条 Django filter，含代理/重试开关） | `32_single_aisbench_swebench_dsv4_django3.yaml` |
+| DeepSeek V4 + AISBench SWE-bench（verified_mini 全量） | `33_single_aisbench_swebench_dsv4_verified_mini.yaml` |
+| DeepSeek V4 + AISBench SWE-bench（verified_mini 10 条快集） | `35_single_aisbench_swebench_dsv4_verified_mini10.yaml` |
+| 单机 Qwen-Image-Edit gedit 性能（`image_edit` + 自服务 DiT/Encoder） | `36_single_image_edit_gedit_perf.yaml` |
+| 单机 Qwen-Image-Edit gedit 精度（AISBench LLM-judge + 自服务三服务） | `37_single_aisbench_gedit_acc.yaml` |
+| 单机 JoyAI-Image-Edit-Plus gedit 性能（`image_edit`，4 卡 DiT sp2*cfg2） | `38_single_image_edit_joyai_perf.yaml` |
+| 单机 JoyAI-Image-Edit-Plus gedit 精度（AISBench LLM-judge + 自服务三服务） | `39_single_aisbench_joyai_acc.yaml` |
+| 外部 JoyaiASR + 原始客户端，完整数据单轮精度/性能 | `40_external_joyai_asr_legacy_acc_perf.yaml` |
+| 外部 JoyaiASR 两轮重复评测，验证日期归档和报表 | `41_external_joyai_asr_legacy_repeats.yaml` |
+| 普通 Qwen3.6-35B-A3B AISBench perf 回归抽测 | `42_single_qwen36_35b_a3b_perf_regression.yaml` |
+| 外部已有服务 + AISBench GPQA 精度，endpoint 用**域名**（验证走 AISBench `url` 字段） | `43_external_aisbench_gpqa_acc_domain.yaml` |
+| PD 场景 `startup_environment` 启动环境注入示例（字段演示，非新场景） | `28_startup_environment.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
+
+ASR 自部署基础用例另放在 `tests/e2e/xllm/joyai/joyai_asr/`：
+`joyai_asr_xllm_tp2_legacy.yaml` 由 xTask 部署 TP2 服务；对接已有服务可参考
+40/41。三个 ASR 用例的区别与配置见第 3 节“JoyAI-ASR 原始评测”。
 
 ## 2. 顶层公共字段
 
@@ -50,7 +68,7 @@ case_name: qwen3_8b_xllm_perf_i1024_o1024_bs1
 engine_type: xllm
 model_path: /export/home/models/Qwen3-8B
 served_model_name: Qwen3-8B
-metrics: perf                 # perf=性能，acc=精度，vbench=视频质量，swebench=SWE-bench
+metrics: perf                 # perf=性能，acc=精度；VBench、SWE-bench 新格式也写 acc，由 benchmark 块区分
 dataset_name: gsm8k
 dataset_path: ''
 dataset_format: json
@@ -67,19 +85,20 @@ deployment: {}
 | --- | --- | --- | --- |
 | `case_name` | 是 | 用例的唯一名字 | 建议与 YAML 文件名相同，只使用字母、数字、下划线和短横线。搜参生成的子用例会在它后面追加 `_sg1`、`_sg2`。 |
 | `engine_type` | 是 | 要启动哪个推理引擎 | 本文只讲 `xllm`。写成其他值会走其他引擎流程。 |
-| `model_path` | 是 | 模型权重在宿主机上的目录 | 所有参与启动 xLLM 的服务器都要有这个目录。工程不会自动同步整个模型目录；容器内会通过路径映射访问它。 |
+| `model_path` | 自部署时是 | 模型权重在宿主机上的目录 | 所有参与启动 xLLM 的服务器都要有这个目录。工程不会自动同步整个模型目录；容器内会通过路径映射访问它。外部 ASR `legacy_infer` 客户端不加载模型权重或 tokenizer，可不填。 |
 | `served_model_name` | 是 | 请求接口里传给 `model` 的名字 | AISBench 和 EvalScope 都会使用它。它可以与目录名不同，但必须是当前 xLLM 服务接受的模型名。 |
-| `metrics` | 是 | 选择性能、精度、视频质量或 SWE-bench | `perf` 表示性能，`acc` 表示精度，`vbench` 表示视频质量，`swebench` 表示 AISBench SWE-bench。真正决定执行分支的是这个字段，不是 `case_type`。当前用例建议一次只写一种。 |
+| `metrics` | 是 | 选择性能还是精度大类 | `perf` 表示性能，`acc` 表示精度。VBench 视频质量用例与 AISBench SWE-bench 新格式同样写 `acc`，实际执行分支由 `benchmark.benchmark_type`（路由依据）和 `benchmark` 下的配置块共同决定（见第 3、8 节）。`swebench` 只作为旧写法兼容保留。普通用例建议一次只写一种；ASR `legacy_infer` 推荐 `acc,perf`，联合结果放在 `benchmark.asr`，见第 3 节。 |
 | `dataset_name` | 是 | benchmark 使用的数据集或数据生成器名称 | AISBench 性能常用 `gsm8k`、`syn`、`sharegpt`；EvalScope 精度直接把它传给 `--datasets`，性能传给 `--dataset`。 |
-| `dataset_path` | 按数据集需要 | 顶层数据集路径 | AISBench 配置了本地路径时会生成用例级数据集配置，优先使用 `benchmark.perf/acc.dataset_path`，否则使用此处路径；EvalScope 精度更常在 `dataset_args` 中指定。多机资源同步建议填写 `/xllm_test_060/...` 容器路径。 |
+| `dataset_path` | 按数据集需要 | 顶层数据集路径 | AISBench 配置了本地路径时会生成用例级数据集配置，优先使用 `benchmark.perf/acc.dataset_path`，否则使用此处路径；EvalScope 精度更常在 `dataset_args` 中指定。gedit 用例（36/37）不写 `dataset_path` 时使用内置默认数据集路径，见第 3 节 GEdit 小节。多机资源同步建议填写 `/xllm_test_060/...` 容器路径。 |
 | `dataset_format` | 建议 | 数据文件格式说明 | 常写 `json`。它主要作为任务元数据保留，具体解析方式仍由 benchmark 和数据集配置决定。 |
 | `communication_backend` | 多卡建议 | 多卡通信后端 | NPU 多卡通常写 `hccl`。 |
 | `hccl_if_port` | 端口冲突时填写 | HCCL 通信使用的基础端口 | xLLM 启动模板会导出为 `HCCL_IF_BASE_PORT`，默认 43439。它是物理 runtime/node 级配置：同一 host 上的多个 runtime 必须不同，不同 host 可以复用。顶层值只是默认值，可在普通 `instances[]` 或 PD `nodes[]` 中覆盖。 |
 | `progress_conn_port` | 端口冲突时填写 | xLLM 多进程主节点协调端口 | 启动模板用它组成 `MASTER_NODE_ADDR`，默认 9590。它是逻辑实例级配置：普通部署整组共享；统一路由和 PD 分别在各 `service_instances[]`、`pd_instances[]` 配置，同组所有 node 必须一致；多个逻辑组的主节点在同一 host 时必须使用不同值。 |
 | `userid` | 建议 | 结果文件归属用户的历史配置 | 常沿用环境中的 UID，例如 `1048`。部分当前流程直接取实际运行用户 UID，因此不要把它当作容器权限问题的唯一控制项。 |
 | `serving_wait_time` | 建议 | 服务启动命令发出后额外等待多少秒 | 它不是完整的服务启动超时。多机还会做实例 readiness 和统一 endpoint 健康检查。 |
-| `benchmark` | 是 | benchmark 类型及性能/精度/视频质量参数 | 详见第 3、8 节。 |
-| `deployment` | 是 | xLLM 用哪些服务器、卡和端口启动 | 详见第 4 节。`external_service` 开启时拓扑被忽略，见第 10 节。 |
+| `benchmark_timeout` | 长评测按需 | 单次 benchmark 执行的容器内超时秒数 | 未写时沿用引擎配置默认（当前 7200 秒）。VBench 全量/mini 等长评测用例可显式调大，例如 30 号用例的 `benchmark_timeout: 86400`。 |
+| `benchmark` | 是 | benchmark 类型及性能/精度/ASR/视频质量参数 | 详见第 3、4、8 节。 |
+| `deployment` | 自部署时是 | xLLM 用哪些服务器、卡和端口启动 | 详见第 4 节。`external_service` 开启时拓扑被忽略，可不填，见第 9 节。 |
 | `external_service` | 否 | 是否对接已有服务、不由 xTask 启动 xLLM | 默认关闭。`true` 或带 `endpoint` 的 mapping 进入外部模式；不写或 `false` 保持现有端到端路径。 |
 | `assess_test_param` | 仅搜参 | 哪些字段需要搜索，以及每个字段有哪些候选值 | 只在 `--assess_test_type para_set` 下使用。 |
 | `assess_search` | 搜参建议 | 选择 exhaustive 或 TPE，并配置目标与约束 | 不写时，`para_set` 默认按 exhaustive 全量组合执行。 |
@@ -104,10 +123,23 @@ deployment: {}
 
 ## 3. Benchmark 部分
 
-`benchmark.benchmark_type` 决定使用哪个测试工具，目前本文覆盖 `aisbench`、`evalscope` 和
-`vbench`。`metrics: perf` 时必须提供 `benchmark.perf`，`metrics: acc` 时必须提供
-`benchmark.acc`，`metrics: vbench` 时必须提供 `benchmark.vbench`，`metrics: swebench`
-时必须提供 `benchmark.swebench`，且 `benchmark_type` 仍为 `aisbench`。
+`benchmark.benchmark_type` 决定使用哪个测试工具，目前本文覆盖 `aisbench`、`evalscope`、
+`vbench`、`image_edit`（gedit 图片编辑性能）和 `asr`（ASR 原始客户端/评分）。
+`benchmark_type` 是执行路由依据；
+`metrics` 只决定性能/精度大类：
+
+- `metrics: perf` 时提供 `benchmark.perf`（普通 `aisbench`/`evalscope` 性能，以及
+  `benchmark_type: image_edit` 的 gedit 性能都用它）。
+- `metrics: acc` 时提供 `benchmark.acc`——普通精度和 SWE-bench 新格式都用它：
+  `benchmark.acc` 内含 `mode`/`runner` 等 SWE 特征字段时按 AISBench SWE-bench 处理，
+  否则按普通 AISBench 精度（含 gedit）处理。
+- ASR 例外：`benchmark_type: asr`、`metrics: acc,perf`，全部评测配置放在
+  `benchmark.asr`；不额外填写 `benchmark.acc` / `benchmark.perf`，不套用 LLM
+  token/s、TTFT/TPOT 门禁。当前只支持 `backend: legacy_infer`，详见下方 ASR 小节。
+- VBench 例外：`metrics: acc`（旧写法 `metrics: vbench` 兼容）但配置块是
+  `benchmark.vbench`，见第 8 节；判定入口是 `xtask/benchmarks/vbench/task_gate.py`。
+- 旧写法 `metrics: swebench` + `benchmark.swebench` 仍兼容保留；
+  顶层 `dataset_name: swebench` 也是有效的旧格式兼容信号。
 
 `benchmark.perf/acc.case_type` 建议分别写成 `performance`、`accuracy`，便于阅读和结果归类；但切换执行流程的仍是顶层 `metrics`。
 
@@ -327,22 +359,30 @@ GPQA Diamond 可以直接复用 AISBench 内置的 `gpqa_gen_0_shot_cot_chat_pro
 
 ### AISBench SWE-bench
 
-SWE-bench 是独立评测类型，不能写成 `metrics: acc` 的 GSM8K 精度。必须同时设置
-`metrics: swebench`、`benchmark.benchmark_type: aisbench` 和 `benchmark.swebench`，
-现有性能/精度 YAML 不会进入这条路径。
+SWE-bench 是独立评测类型，不能写成 `metrics: acc` 的 GSM8K 精度。新写法与普通精度
+格式一致：`metrics: acc`、`benchmark.benchmark_type: aisbench` 和 `benchmark.acc`，
+并在 `benchmark.acc` 中携带 SWE 特征字段（`mode`、`dataset`、`runner` 等）和
+`case_type: accuracy`。旧写法 `metrics: swebench` + `benchmark.swebench` 仍兼容保留。
+判定入口是 `xtask/benchmarks/aisbench/swebench.py` 的 `is_aisbench_swebench_task`：
+要求 `benchmark_type: aisbench` 且 SWE 块有效——新格式看 `benchmark.acc` 的
+`mode`（`infer`/`eval`/`all`）或 `runner` 字段，旧格式看 `benchmark.swebench`（配合
+`metrics: swebench` 或 `dataset_name: swebench`）；普通 GPQA/gedit 精度和性能用例
+不会进入这条路径。
 
 **不需要拆成两份 xTask。** 主路径就是一份 YAML、一次执行：
 
 1. xTask 按 `deployment.instances` 在 NPU 机器启动 xLLM（启动参数写法和 `01_single_aisbench_perf.yaml` 一样）。
 2. 同一轮调度把 AISBench SWE（mini-swe-agent infer + 官方 harness 打分）派到
-   `benchmark.swebench.runner.host` 这台 **x86** 机器。
+   `benchmark.acc.runner.host` 这台 **x86** 机器。
 3. NPU 容器不安装 AISBench，也不跑 SWE 镜像。x86 需要能访问 xLLM 的 HTTP 地址。
 
 ```yaml
-metrics: swebench
+metrics: acc
+dataset_name: swebench
 benchmark:
   benchmark_type: aisbench
-  swebench:
+  acc:
+    case_type: accuracy
     mode: all                 # infer | eval | all；默认一次做完，不必拆两次
     dataset: verified_mini
     step_limit: 200
@@ -388,7 +428,7 @@ x86 评测结果回传时先下载到用例目录外的临时目录，再合并 
 
 ```yaml
 benchmark:
-  swebench:
+  acc:
     runner:
       host: 11.87.48.253
       runtime_container:
@@ -431,13 +471,58 @@ mini-swe-agent 容器，再开始下一个实例。上述开关均不影响其�
 全量数据集中的复杂实例可能超过 mini-swe-agent 默认的 2 小时 Docker 容器生命周期，
 导致 `Environment stopped before agent finished`。可为这类 SWE 用例显式设置
 `runner.agent_container_timeout: 4h`，仅延长该用例 Agent 实例容器的寿命；
-它不改变整轮 `swebench.timeout`、Agent 的 `step_limit` 或其他类型评测。
+它不改变整轮 SWE 超时（`benchmark.acc.timeout`，旧写法 `benchmark.swebench.timeout`）、Agent 的 `step_limit` 或其他类型评测。
 评测结果若有 `error_instances > 0` 或 `harness_exit_code != 0`，即使
 `baseline: null` 也会判为失败；真正的未解决实例仍按解决率统计，正式回归应设置基线。
 
 只有服务已经在跑时，才用 `external_service` 写法，见 `29_external_aisbench_swebench.yaml`，
 语义和 `26_external_aisbench_perf.yaml` 相同。`mode: infer` / `mode: eval` 也可以拆开做，
 那是可选的断点续跑，不是默认要求。
+
+### AISBench GEdit 图片编辑精度（LLM-judge）
+
+GEdit（Qwen-Image-Edit）精度走 AISBench 精度分支，但使用 xTask 内置的两段式图片编辑
+API：`metrics: acc`、`benchmark.benchmark_type: aisbench`、`benchmark.acc`，关键字段是
+`api_type: gedit_image_edit` 和 `dataset_conf: gedit_gen_0_shot_llmjudge`。它的
+`benchmark.acc` 不含 `mode`/`runner` 字段，因此不会进入 SWE-bench 路径；
+`benchmark_type` 仍是 `aisbench`，也不会命中 VBench 判定。
+
+```yaml
+metrics: acc
+dataset_name: gedit
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: gedit_image_edit            # xtask 内置两段式 API（encoder + DiT）
+    dataset_conf: gedit_gen_0_shot_llmjudge
+    num_prompts: 20                       # 调试样例条数；删除后按 GEdit-Bench 全量（1212）
+    batch_size: 1
+    output_len: 512
+    request_rate: 0
+    judge_endpoint: 127.0.0.1:18008       # LLM-judge 端点（host:port）
+    baseline: 3.925                       # SC/PQ 两维综合分（0-10），替换为实测值
+    threshold: 0.20
+    generation_kwargs:
+      temperature: 0.01
+      ignore_eos: false
+```
+
+要点：
+
+- 数据集是 GEdit-Bench（load_from_disk 格式），默认放在
+  `<DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/GEdit-Bench`；YAML 不写
+  `dataset_path`，需要覆盖时才显式指定 `benchmark.acc.dataset_path`（默认值见
+  `xtask/benchmarks/aisbench/generate_aisbench_script.py` 的
+  `default_gedit_acc_dataset_path`）。
+- `judge_endpoint` 留空时，自服务模式由调度器按 `deployment.judge` 注入
+  `127.0.0.1:18008`。
+- 打分是 LLM-as-Judge（SC/PQ 两维，0-10），`baseline` 写两维的算术平均。
+- 两段式协议与自服务部署（encoder/dit/judge 三服务）见第 4 节
+  “GEdit 自服务多服务部署”；完整示例 `37_single_aisbench_gedit_acc.yaml`。
+- JoyAI-Image-Edit-Plus：`api_type: gedit_image_edit` 的模型配置按 model/path 含
+  `joyai` 自动检测模型族（skip 34 / `input.media_sources` 多图，见上文 image_edit 小节）；
+  DiT 4 卡 `sp2*cfg2`；完整示例 `39_single_aisbench_joyai_acc.yaml`。
 
 ### EvalScope 性能
 
@@ -533,12 +618,351 @@ EvalScope 精度字段如下：
 
 路径以 `/xllm_test_060` 开头时，多机资源同步会按需检查和补齐相应关键资源。`generation_config`、`dataset_args` 由当前代码转换成命令行字典字符串；值中含复杂引号时应先用小用例验证生成的 `run_evalscope_test.sh`。
 
+### GEdit 图片编辑性能（benchmark_type: image_edit）
+
+图片编辑性能是独立的 `benchmark_type: image_edit`，不经过 `evalscope`/`aisbench` 的
+普通分支：`xtask/benchmarks/evalscope/generate_image_edit_script.py` 生成脚本，调用
+`xtask/plugins/evalscope/run_gedit_perf.py`（先注册 `gedit_image_gen` API 插件再跑
+evalscope perf）压测 `/v1/image/generation`。指标量纲是 MPx/s（产出兆像素每秒）：
+结果解析里的 `output_tps_avg` 实际是 MPx/s，`baseline` 直接填 MPx/s 数值。
+
+```yaml
+metrics: perf
+dataset_name: gedit
+benchmark:
+  benchmark_type: image_edit
+  perf:
+    case_type: performance
+    num_prompts: 20
+    batch_size: 1
+    request_rate: -1
+    warmup_num: 2
+    seed: 42
+    timeout: 3600               # 单请求超时（秒）：出图较慢，给足余量
+    size: "1328*1328"
+    num_inference_steps: 50
+    guidance_scale: 3.5
+    encoder_url: http://127.0.0.1:18007   # 留空则由调度器按 deployment.encoder 注入
+    baseline: 0.0973            # 量纲 MPx/s
+    threshold: 0.10
+```
+
+- 数据集默认 `<DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/gedit_perf/gedit_perf.jsonl`
+  （由 `tools/convert_gedit_to_perf.py` 从 GEdit-Bench 转换生成，`images` 字段存绝对
+  路径而非 base64）；YAML 不写 `dataset_path`，需要覆盖时才显式指定
+  `benchmark.perf.dataset_path`。
+- `encoder_url` 优先级：`benchmark.perf.encoder_url` > 环境变量 `GEDIT_ENCODER_URL` >
+  `http://127.0.0.1:18007`。
+- `size`/`num_inference_steps`/`guidance_scale` 等经 `--extra-args` 透传为请求体参数；
+  数据集行内有同名字段时以行为为准。
+- 自服务部署（encoder/dit 服务键、端口约定）见第 4 节；完整示例
+  `36_single_image_edit_gedit_perf.yaml`。
+
+**JoyAI-Image-Edit-Plus 模型族差异**（示例 `38_single_image_edit_joyai_perf.yaml`）：
+
+- 插件按 `served_model_name`/`model_path` 含 `joyai`/`joyimageeditplus` 自动检测模型族
+  （数据集行/`generation_kwargs` 也可显式传 `model_family: joyai|qwen` 覆盖；缺省 `qwen`
+  保持既有 Qwen 用例行为零变化）。
+- 两段式协议差异：encoder skip tokens 为 34（Qwen 为 64），system prompt 用 Qwen3-VL
+  官方描述式模板；DiT 参考图走 `input.media_sources` 多图（Qwen 走 `input.image` 单图）。
+- DiT 并行约束：JoyAI MMDiT 32 头（Qwen 24 头），`sp_size` 必须整除 32，36 号的
+  6 卡 `sp3*cfg2` 不适用（32 % 3 != 0）；38/39 号取 4 卡 `sp2*cfg2`（NPU 0-3）。
+- 出图分辨率：请求传 `parameters.size`（缺省 `1328*1328`，数据集行自带 `size` 时以行为准）。
+  实测（20261103）不给 `size` 走 bucket 机制会退化为 `512*512` 出图，judge 打分崩塌
+  （SC/PQ 2.45/6.95 -> 0.85/5.05），故两模型族统一显式传 size。
+- 生成参数官方推荐 `num_inference_steps: 30` / `guidance_scale: 4.0`。
+
+<a id="asr-legacy-benchmark"></a>
+
+### JoyAI-ASR 原始评测（benchmark_type: asr，第一阶段）
+
+#### 范围与原始材料
+
+`benchmark_type: asr`、`benchmark.asr.backend: legacy_infer` 使用
+`asr_doc/infer.zip` 中的 **原始 `infer_dataset.py` 和 `compute-wer.py`**。
+原压缩包不修改；执行前安全解压到本轮输出目录。不是另写一个识别客户端，
+也不是已经完成 AISBench 原生适配。当前仅接入原始执行器；AISBench 第二阶段
+暂缓实施，后续若接入应沿用数据、评分 profile 和统一结果门禁。
+
+不运行原 `infer.sh` 的自动 pip 安装、固定输出路径和固定 IP；由 xTask 生成
+可复现配置后调用原 Python 客户端。仍保留原始并发执行、context 构造、
+请求格式、采样参数、编辑距离和归一化规则。
+
+#### 准备与运行
+
+1. 本机准备 `asr_doc/infer.zip`、`asr_doc/data.zip`。或通过 `infer_archive`、
+   `dataset_archive` 指定替代路径。压缩包将暂存到用例 `asr_inputs/`，随
+   用例同步到 benchmark runner，不需要在所有服务主机单独部署数据集。
+2. 测试容器准备 `httpx`（测试验证版本 0.28.1）；缺失会失败，不在线自动安装。
+   核心评分仅使用 Python 标准库；`wer_analys.py` 可在有 `kaldialign` 的环境
+   对输出 `wer` 离线运行，不是核心执行依赖。
+3. TP2 示例：修改模型路径、host、`device_ids`、userid，并确保真实 CTC 权重、
+   模型 chat template 和音频前处理完整。环境版本由部署镜像负责。
+
+```bash
+python main.py --case_name joyai_asr_xllm_tp2_legacy
+# 或先手工部署服务，只测试接口（不管理外部服务生命周期）：
+python main.py --case_name 40_external_joyai_asr_legacy_acc_perf
+```
+
+TP2 示例与新性能复现 PDF 对齐：CTC、Suffix/6 tokens、schedule overlap=false、
+并发 `[1,2,5,10]`、context 和 SSE 开启。不是旧 9 月 Rotary 报告的逐项复现。
+不执行 PDF 的 `pkill -9 xllm`，服务生命周期走 xTask 的既有调度/清理。
+
+**当前三个 ASR 用例都是独立 YAML，不存在继承、包含或互相调用。**它们共享同一套
+`legacy_infer` 客户端、数据集、评分和归档代码，只是部署模式和运行参数不同。
+
+| 用例 | 服务生命周期 | 并发 × repeats | 正式请求数 | 数值门禁 |
+| --- | --- | --- | ---: | --- |
+| `40_external_joyai_asr_legacy_acc_perf.yaml` | `.101:8018` 外部服务单轮实测示例 | `[2]` × 1 | 1162 | 错误率 ≤5%，失败请求=0；无性能基线 |
+| `41_external_joyai_asr_legacy_repeats.yaml` | 同一外部服务的重复统计、日期归档/报表验证示例 | `[2]` × 2 | 2324 | 同 40，各轮分别检查 |
+| `joyai_asr_xllm_tp2_legacy.yaml` | xTask 在配置节点启动 TP2 + CTC + Suffix 服务并清理 | `[1,2,5,10]` × 1 | 4648 | `gates: []` |
+
+表中请求数不含整场开始前的 3 条合成音频预热。所有用例都使用日期归档和报表，
+41 不是专门开启归档的开关。`gates: []` 仍检查请求完整性、失败数、评分有效性
+和并发/轮次覆盖。40/41 的 5% 是临时质量上限，不是正式验收基线。
+
+外部服务用例不会强制服务器使用 TP2/CTC/Suffix；`provenance` 只是来源记录，
+不能代替实际部署证据。自部署 TP2 模板默认也指向 `.101:8018`，执行前必须
+确认服务归属、空闲设备和端口，避免
+与已有外部模型服务冲突。40/41 的 HTTP 实测不等于自部署 TP2 链路已验证。
+
+#### 配置
+
+```yaml
+metrics: acc,perf
+benchmark:
+  benchmark_type: asr
+  asr:
+    backend: legacy_infer
+    # 默认路径均为 <xTask>/asr_doc/；可指定绝对路径。
+    # infer_archive: /path/to/infer.zip
+    # dataset_archive: /path/to/data.zip
+    dataset_name: ta3_test0925_quiet
+    expected_samples: 1162   # 校验原始清单数量；limit 不改变此校验
+    limit: 0                # 0=全部；调试时可设 2
+    api: audio              # audio=multipart；chat=audio_url JSON
+    concurrency: [1,2,5,10]
+    repeats: 1
+    stream: true            # 仅文字 SSE，不是输入音频实时流式
+    use_context: true
+    timeout: 300             # httpx/urllib 原超时语义，不是独立整请求 watchdog
+    max_audio_seconds: 30   # 越界失败，不能静默过滤或用截断音频夸大吞吐
+    cache_condition: service_lifetime
+    scoring_profile: joyai_legacy
+    warmup:
+      synthetic_requests: 3 # 可选 0..3，包内 w2/w8/w20，整场开始前一次
+      api: audio            # 对齐原 Shell，亦可设 chat
+      exclude_first: 0      # 按索引排除性能统计；精度仍包含全部样本
+    generation:
+      temperature: 0
+      repetition_penalty: 1.05
+      language: zh
+      # hotwords: 订单、物流  # 全局回退值；优先使用清单中的逐条值
+      # top_p: 1             # audio 专用
+      # top_k: -1            # audio 专用
+      # max_completion_tokens: 3000  # audio 专用，默认不发送
+      # max_tokens: 256      # chat 专用，默认 256
+      # max_context_chars: 450 # chat 专用，保持原客户端处理
+      # chat_prompt: 请转写音频为文字，并给出正确的标点符号。
+    # 单位：错误率=百分数(4.03 而非 0.0403)，延迟=ms，吞吐=req/s 或 audio s/s。
+    gates:
+      - metric: error_rate_pct
+        compare: lte
+        baseline: 4.5
+        threshold: 0.05      # 单边相对容忍，实际 <= 4.5*(1+0.05)
+      - metric: e2el_p99_ms
+        compare: lte
+        baseline: 1000
+      - metric: failed_requests
+        compare: lte
+        baseline: 0
+```
+
+ASR 数据来源由 `benchmark.asr.dataset_archive` 和 `dataset_name` 决定，
+不是普通 AISBench 的 `benchmark.perf.dataset_path`。`concurrency` 是 ASR
+客户端并发，不使用 `batch_size`；`repeats` 表示每个并发档位的完整数据集重复次数。
+
+以上门禁数值仅示范，**不代表验收基线**。每个并发、每个 repeat 的所有门禁
+采用 AND；改善不会因越出下界失败；0% 错误率合法；缺失结果不能用 0 替代。
+所有运行必须请求完整且无请求失败，即使未配置 gates 也会校验。
+
+不支持 `seed` 配置：原 audio 客户端不发送，原 chat 客户端固定为 4419。
+chat 的 temperature 固定 0；对不生效的 audio-only 参数会拒绝配置，防止误记。
+模型识别 ID、参考文本、context 每条对应；参考答案不送给模型。
+
+#### 缓存、预热和重复
+
+每个用例内部并发扫描和 repeats 共用同一服务生命周期，客户端不重启 xLLM。
+`enable_prefix_cache=false`、`speculative_suffix_max_cached_requests=0` 不代表音频
+编码缓存关闭。后续重复音频可能命中缓存。禁止把配置命名为 `cold` 而未真正
+保证冷缓存。若需要每轮重启，使用独立正常 xTask 用例，各用例只测一个并发
+及一个 repeat；外部服务模式由外部操作者负责重启。
+
+初始预热调用若 HTTP 失败立即失败。预热得到空文本允许，因为它是合成音频；
+正式集参考非空的空预测判请求失败。`exclude_first` 只排除性能，不隐藏失败。
+
+#### 评分与指标口径
+
+* `joyai_legacy` 原命令：`compute-wer.py --char=1 --v=1`；中文按字、拉丁片段
+  按段，保留原大小写/标点/标签规则。指标名为 `error_rate_pct`，**不伪称纯 CER
+  或标准英文 WER**。语料级 `(S+D+I)/N`，记录 S/D/I/N、脚本 SHA256。
+* 同一份包内历史预测可复算：N=14080，S=312，D=99，I=156，错误率约 4.027%。
+  追加 `--cer=1` 会改变计数，不能与原 profile 混用；标准评分属于第二阶段。
+* `e2el_*_ms`：保持原客户端计时边界；chat 在读取/Base64 编码后计时；
+  multipart 包含音频上传。分位数为原脚本线性插值。
+* `legacy_ttft_*`：原 choices-bearing 分片计时，并不保证首个文本或首 token。
+* `first_text_*`：新增首个**非空文本 SSE**时延；同步响应不伪造首文本指标。
+* `legacy_rtf`：总请求延迟 / 总音频时长，不是并发整场耗时。
+* `request_throughput` / `audio_throughput`：测量窗口内成功请求数 / 成功音频秒数
+  除以窗口墙钟秒数；窗口为首个被统计请求开始到最后结束。
+* `simulate_realtime=true` 沿用原数据分片+休眠策略，不等于输入流式 ASR；
+  尾部休眠不包括在新增吞吐窗口中。
+* 推测解码 Prometheus 计数若可用，仍保存在原 `latency_summary.txt`。
+
+客户端保持原请求，但额外观测 SSE：无正常结束标记、错误事件、无效 JSON、
+非空标注对应空转写均判失败。失败结果原 scorer 按空转写计漏字，同时测试
+失败；不重试，不隐式过滤。参考/预测 ID 必须完整一致，不沿用评分器的交集
+静默跳过行为。
+
+#### 输出与溯源
+
+```text
+outputs/<case>/
+├── run_asr_test.sh
+├── asr_inputs/                    # 用例暂存原压缩包，runner_config.json 权限 600
+└── YYYYMMDD_HHMMSS/               # 每次调用独立，不覆盖上一轮
+    ├── config.json                # 参数、服务配置、归档哈希、Python/httpx 信息
+    ├── asr_result.json            # 所有并发/repeat 摘要和最终门禁，原子更新
+    ├── execution_result.json      # xTask 最终状态、退出码、耗时、归档主机、报表是否生成
+    ├── runs.csv                   # 每个并发/repeat 的计数、错误率和性能
+    ├── summary_by_concurrency.json # 各并发的有效轮次、均值、中位数、标准差
+    ├── task.yaml / source_task.yaml # 实际配置与源 YAML（认证信息打码）
+    ├── runner_config.json        # 本轮客户端参数，不再依赖下一轮覆盖的配置
+    ├── run_asr_test.sh / commands.json # 本轮执行脚本及服务/测试命令
+    ├── benchmark_stdout.log / benchmark_stderr.log
+    ├── xllm_log/                 # 仅自部署模型：本轮推理日志、启动/清理材料
+    ├── assets/                    # 原客户端、评分脚本和解压数据
+    ├── c1_r1/
+    │   ├── samples.json           # ID、音频路径、时长、逐文件哈希
+    │   ├── requests.jsonl         # 实际请求配置(音频 Base64省略)、原预测、状态、时延
+    │   ├── summary.json           # S/D/I/N、性能、完整性、文件路径
+    │   ├── text.hyp / text.ref / text.ctc / err.log / wer
+    │   └── latency.tsv / latency_summary.txt
+    └── c2_r1/ ...
+```
+
+认证 key 在归档配置中打码；原 client 代码/数据 SHA256 自动记录。模型权重和
+服务 commit 无法通过客户端可靠自动证明，可在 `benchmark.asr.provenance` 明确
+填写并随配置归档；服务日志与启动命令走 xTask 已有归档。
+Excel 为各并发/repeat 展开错误率、S/D/I/N、P99、RTF、吞吐；不把样本文本或音频
+塞进单元格。注意数据及 requests.jsonl 含业务内容，使用合适的归档权限。
+
+##### 日期归档规则
+
+单用例执行在 `outputs/<case>/YYYYMMDD_HHMMSS/` 独立归档；使用 `--case_group`
+时为 `outputs/<group>/<case>/YYYYMMDD_HHMMSS/`。若 group 名与 case 名相同，
+相邻同名目录是既有布局，不是重复的日期层。同一用例重复执行不覆盖历史日期目录。同秒运行发生冲突时选取下一个可用秒级目录。用例内的并发及
+repeat 分别存入 `c<N>_r<M>/`。不额外增加一层日期目录，也不改变既有 Excel 汇总。
+
+* 成功、请求失败、评分失败、预热失败都保留日期目录；服务就绪失败也会创建
+  失败归档。中途被终止时读取已落盘请求，补 `state: interrupted` 的失败摘要，
+  不补造评分，不把部分数据标成完整成功。若整个 xTask 控制进程也被强杀，
+  原子更新的 runner 初始/中间摘要仍在；控制端最终摘要需要恢复后处理才能生成。
+  损坏的顶层 JSON 保存为 `asr_result.corrupt.json`；已完成 repeat 的独立摘要可以
+  恢复，但整场仍标记 interrupted/failed，不把缺失请求或损坏结果判通过。
+* 清理容器前，将本轮容器创建的日期目录所有权交还调用者，再归档命令、日志。
+  不通过全员可写权限解决业务数据归档。自部署服务额外归档模型推理日志；外部
+  服务只归档客户端证据，不能凭客户端抓取远端服务日志。
+* JSON 的 `config_file`、各轮 `files` 相对于所在摘要目录保存；后处理仅在内存
+  中解析为宿主绝对路径。旧 `/workspace/outputs/...` 引用可兼容读取。原始执行
+  命令和 samples 中的源路径保留为溯源信息，不保证可跨环境重新执行。
+* `execution_result.json` 分开记录 `artifact_host/artifact_path` 和 `service_endpoint`。
+  Excel 结果位置用归档所在主机，不再把外部模型服务 IP 当作文件所在主机。
+* 归档内脚本和配置首次写入后不再被下一轮替换；执行状态和耗时在 xTask
+  finalize 时更新。`asr_result.json` 表示 benchmark 结果；`execution_result.json`
+  表示包含准备/归档的完整 xTask 执行状态，归档失败会标明失败。
+
+
+#### 轮次汇总、搜参与可选看板
+
+* `runs.csv` 保留每个并发/repeat 的计数、错误率、延迟和吞吐；失败轮次不删除。
+  `summary_by_concurrency.json` 按并发分别列 total/valid/invalid 轮次及有限数值的
+  mean/median/min/max/stddev。不同并发不混算，失败/不完整轮次不参与有效统计。
+  统计中的 P99 中位数是“各轮 P99 的中位数”，不是合并全部请求后重新计算的 P99。
+* Excel 同时展开原始各轮指标和各并发重复统计。每轮门禁仍单独 AND 检查，不能
+  用平均数掩盖一个失败轮次。0% 错误率合法，缺失/NaN 不算 0。
+* 远端初次和复用 session 都只回传本次新增的日期目录，不下载覆盖整个用例根目录；
+  后续 trial 只刷新执行脚本和 `asr_inputs/`，不会删除远端上次日期目录或控制端
+  其他服务节点的启动、清理日志。
+* Excel 写入失败或抛异常会在本轮 `execution_result.json` 写
+  `report_generated: false` 和失败原因，不能仅有 benchmark 成功就宣称报表成功。
+* `para_set` exhaustive/TPE 读取 ASR 原生指标：单并发可直接使用
+  `audio_throughput`、`error_rate_pct`、`e2el_p99_ms`；多并发需明确
+  `c2.audio_throughput` 等带并发前缀的指标。重复执行取有效轮中位数。
+  默认 objective 是 `audio_throughput` maximize，不使用 token throughput。
+  ASR 用例失败时不能作为最优可行候选。
+
+##### 自动并发摸高（可选）
+
+ASR 不套用 LLM 的 TTFT/TPOT 目标。若运行 `--assess_test_type auto_assess`，需要
+明确一个 ASR 延迟上限；每个 trial 只允许一个并发。例子（值仅示范）：
+
+```yaml
+benchmark:
+  benchmark_type: asr
+  asr:
+    concurrency: [2]
+    auto_assess:
+      metric: e2el_p99_ms
+      max: 1000          # ms，不代表已验收基线
+      low: 0
+      high: 16
+```
+
+生成 YAML 时修改 `benchmark.asr.concurrency`，不是无效的 `benchmark.perf.batch_size`。
+缺失 ASR target、缺失指标、请求/质量失败时明确停止，不无条件循环。
+摸高报告增加 `selected_concurrency`（兼容保留旧报告的 selected_batch_size）。重复 trial
+使用同一服务 session，缓存条件仍是 service_lifetime，不是冷缓存；穷举并发更适合
+延迟不单调或容易受缓存影响的测试。
+
+##### bench-reporter（可选）
+
+`XTASK_BENCH_REPORT=1` 时走 ASR 专用适配：一个并发/repeat 一条 payload。
+通用字段只发送真正存在的 E2E/请求吞吐；S/D/I/N、错误率、音频吞吐、RTF、
+首文本等放在 `toolSpecificConfig.asr`。不把错误率转换成 accuracy，不编造
+TPOT/token/s，不套用 LLM SLA。归档保存 `dashboard_payloads.json`，发送失败沿用
+可选 reporter 的本地 spool。服务端是否支持显示 ASR 扩展字段需另行验证；本次
+只验证构造与 transport 调用，不声明远端 UI 已完成 ASR 接入。硬件数、server
+版本未知就保留未知，不从报告文档推断已验证 TP。
+
+#### 验证和第二阶段
+
+```bash
+python -m pytest -q tests/test_asr_benchmark.py tests/test_asr_reporting.py
+```
+
+测试使用本地模拟 HTTP/SSE 服务和包内原 client/scorer，覆盖同步/audio/chat、
+并发/repeat、断流、HTTP 错误、空结果、评分 ID 对齐、门禁及 Excel 展开。
+它验证客户端/工程接入，不代表真实 NPU 模型精度或性能验收。
+AISBench API/Dataset/Evaluator 是暂缓的第二阶段工作，当前没有实现。后续可替换
+执行器而保留数据、profile 和结果契约。阶段一会明确拒绝 `backend: aisbench`，
+不虚报实现。
+
 ### Benchmark 基线校验规则
+
+以下普通 LLM/图像编辑规则不适用于 `benchmark_type: asr`；ASR 使用
+`benchmark.asr.gates`，并对每个并发/repeat 检查完整性与所有门禁，详见上方 ASR 小节。
 
 - 性能：比较 `benchmark_perf_result.summary.output_tps_avg`。不配置有效 `baseline` 时，只要性能结果成功解析，基线步骤直接通过。
 - 精度：比较解析出的 `benchmark_acc_result`。缺少有效 `baseline` 时，当前代码不会把精度用例判定为通过。
 - `threshold` 是比例。`baseline: 100`、`threshold: 0.05` 的合法范围是 95 到 105。
 - 因此，不同 benchmark 或数据集之间复制精度 baseline 前，先确认结果量纲是“百分数”还是“0 到 1”。
+- 图像编辑 gedit（LLM-judge 0-10 分制）：baseline 为 SC/PQ 两维综合分（算术平均），
+  如 36 号 `0.0973`（吞吐量纲，另见上文）、37 号 `3.925`、39 号 `4.56`（两次干净轮
+  20261103_010342=4.70、20261103_132652=4.425 的均值，threshold 0.20）。gedit judge 打分
+  波动较大（20 样本 + judge 非零温度），回填时以多次无外部干扰干净轮均值为准，避开与
+  其他任务共卡的时间窗。
 
 ## 4. deployment 部分
 
@@ -998,9 +1422,75 @@ ranktable 以逻辑实例为组分别处理。一个逻辑组内即使多个 nod
 
 `startup_policy` 虽然在部分历史 YAML 中出现，但当前调度代码始终并行启动所有实例，它暂时不能真正切换串行/并行策略。新用例不需要依赖这个字段。
 
+### GEdit 自服务多服务部署（deployment.encoder / dit / judge）
+
+gedit（Qwen-Image-Edit）两段式协议需要 Text Encoder、DiT（精度用例还需要 LLM judge）
+等多个独立 xLLM 服务。自服务模式把这些服务键写在 `deployment` 下，与
+`deployment.benchmark` 同级（调度器自动拉起各服务容器，评测结束后自动回收；
+benchmark 默认在 DiT 服务容器内执行）：
+
+```yaml
+deployment:
+  encoder:
+    device_ids: [7]
+    port: 18007                       # Text Encoder 单卡固定端口
+    master_node_addr: 127.0.0.1:29798
+    health_path: /health
+    hccl_if_port: 43438
+    serving_extensiable_param:
+      task: embed
+      enable_return_mm_full_embeddings: 1
+      # ...其余参数见 36/37 号用例
+  dit:
+    device_ids: [0, 1, 2, 3, 4, 5]
+    port: 19000                       # 起始端口；每卡一个进程，按 rank 连续自增
+    master_node_addr: 127.0.0.1:19757
+    health_path: /health
+    hccl_if_port: 43432
+    readiness_timeout: 1800           # DiT 6 卡加载较慢（默认 900s）
+    serving_extensiable_param:
+      backend: dit
+      cfg_size: 2
+      sp_size: 3
+      # ...
+  judge:                              # 仅精度用例（37）需要
+    device_ids: [12]
+    port: 18008
+    master_node_addr: 127.0.0.1:29810
+    model_path: /export/home/models/Qwen2.5-VL-7B-Instruct
+    hccl_if_port: 43500
+    serving_extensiable_param:
+      model_id: Qwen2.5-VL-7B-Instruct
+      # ...
+```
+
+生效条件（`xtask/core/gedit_service.py`，对其他用例零影响）：
+
+- `benchmark_type: image_edit`（36 号性能用例），或 `benchmark_type: aisbench` 且
+  `benchmark.acc.api_type` 以 `gedit` 开头（37 号精度用例）；其他 `benchmark_type`
+  即使出现这些键也不会被消费。
+- `deployment` 至少出现 encoder/dit/judge 中的一个。
+- `external_service` 关闭；外部模式沿用旧的仅探测路径，不自启服务。
+
+端口与挂载约定：
+
+- 端口按“每卡一个 xLLM 进程、端口 = `port` + rank”连续自增：DiT 写 `port: 19000`
+  即占用 19000-19005，无需逐卡列举；encoder 固定 18007，judge 固定 18008。
+- 容器自动挂载 `/etc/hccn.conf`、Ascend driver、add-ons、`npu-smi` 和
+  `pkg/xllm/vendors/custom_xllm_math`（缺一会出现 aclInit 507008 core dump），
+  YAML `volumes` 可在此基础上追加。
+- `hccl_if_port`（`HCCL_IF_BASE_PORT`）经验规则：同一 host 上多个服务的 base 间隔
+  至少 60，避免一个服务的 base 落进另一个服务的 NIC 通道窗口。已验证组合是
+  DiT 43432 / encoder 43438 / judge 43500；judge 曾用 43442 落进 DiT 的窗口，
+  导致 DiT 首次 allreduce 报 aicpu ERR02005 / acl 507018。
+
 ## 5. 搜索写法
 
 ### auto_assess：只摸高 batch_size
+
+本小节描述普通 LLM 的 TTFT/TPOT 与 `benchmark.perf.batch_size`。ASR 改用
+`benchmark.asr.auto_assess` 的显式延迟上限和 `concurrency`，不套用这些参数；
+配置见第 3 节“JoyAI-ASR 原始评测”的“自动并发摸高”。
 
 ```yaml
 benchmark:
@@ -1181,7 +1671,12 @@ P/D 实例个数、每个实例的 node 数、每个 node 的卡数可以搜索�
 
 ### 搜索目标和约束可用指标
 
-`objective.metric` 和 `constraints` 的键必须来自 benchmark 性能结果的 `ResultSummary`。当前可用字段为：
+普通 LLM 的 `objective.metric` 和 `constraints` 的键来自 benchmark 性能结果的
+`ResultSummary`。ASR 使用原生 `audio_throughput`、`error_rate_pct`、`e2el_p99_ms`
+等指标，单并发重复轮取有效中位数，多并发需 `c2.audio_throughput` 等前缀；默认
+最大化 `audio_throughput`，不是 `output_tps_total`。ASR 的详细规则见第 3 节。
+
+普通 LLM 当前可用字段为：
 
 | 指标 | 含义 |
 | --- | --- |
@@ -1242,6 +1737,8 @@ P/D 实例个数、每个实例的 node 数、每个 node 的卡数可以搜索�
 - AISBench 精度的 `ignore_eos`、思考模式等生成参数应放在 `generation_kwargs`，不要依赖 `acc` 下的同名直接字段。
 - `benchmark.perf/acc.dump_eval_details` 仅保留；当前 AISBench 精度如需明细，应使用顶层 `dump_eval_details: true`。
 - EvalScope 性能当前固定 `ignore_eos: true`。
+- ASR 当前仅支持 `benchmark.asr.backend: legacy_infer` / `scoring_profile: joyai_legacy`；
+  AISBench ASR 后端和标准 CER/WER profile 尚未实现，不把文字 SSE 当成输入流式 ASR。
 - 多实例当前始终并行启动，服务 endpoint 始终由部署拓扑自动推导。
 
 搜参不支持 `nodes[0]`、`device_ids[0]` 等任意深度列表路径，这属于搜索路径规则，详见第 5 节。
@@ -1482,14 +1979,23 @@ bash tools/install_crontab.sh --uninstall
 ## 8. VBench Wan2.2 I2V
 
 VBench 是独立的视频生成质量评测类型，不能把它写成 AISBench 的
-`api_type`。VBench 用例应设置 `metrics: vbench` 和
-`benchmark.benchmark_type: vbench`，xTask 会为它创建独立的 runner 容器：
+`api_type`。VBench 用例应设置 `metrics: acc`（与普通精度用例一致，旧写法
+`metrics: vbench` 仍兼容）和 `benchmark.benchmark_type: vbench`，并配上
+`benchmark.vbench` 配置块，xTask 会为它创建独立的 runner 容器：
 
 - xLLM 容器只负责启动 Wan2.2 I2V 推理服务并占用 NPU。
 - VBench runner 只负责读取输入、调用 `/v1/video/generation`、保存 MP4 和执行质量评测。
 - 普通 AISBench、EvalScope、文本/视觉精度和性能用例不会创建这个 runner，也不会走 VBench 分支。
 
-可复制的完整示例是 `tests/e2e/xllm/examples/yaml_authoring/25_single_vbench_wan_i2v.yaml`。
+结果分支判定在 `xtask/benchmarks/vbench/task_gate.py` 的 `is_vbench_task`：要求
+`benchmark.benchmark_type: vbench` 且 `benchmark.vbench` 是映射块；`metrics` 本身
+不参与判定，因此新写法 `metrics: acc` 和旧写法 `metrics: vbench` 都能被识别，
+而普通精度/SWE-bench/性能用例因 `benchmark_type` 不同不会被误判。
+
+可复制的完整示例是 `tests/e2e/xllm/examples/yaml_authoring/25_single_vbench_wan_i2v.yaml`；
+107 条 mini 子集示例是 `30_single_vbench_wan_i2v_mini.yaml`（显式把 `full_info` 指向
+mini JSON，不再设 `generation.limit`，并用顶层 `benchmark_timeout: 86400` 放大
+docker exec 超时）。
 VBench 工具、评测脚本及模型权重必须提前装入 runner 镜像或通过挂载提供；xTask 不会在测试期间
 下载 VBench 数据集和权重。`camera_motion` 等维度还可能使用 Torch Hub 缓存，离线环境也应提前准备。
 未配置 `image_home`/`image_name` 时，runner 默认使用
@@ -1538,7 +2044,7 @@ outputs/<case_name>/
 ### 8.2 VBench 配置字段
 
 ```yaml
-metrics: vbench
+metrics: acc
 benchmark:
   benchmark_type: vbench
   vbench:
@@ -1647,8 +2153,11 @@ external_service:
   enabled: true
   endpoint: https://gateway.example/inference/svc-x
   health_path: /v1/models      # 空字符串表示跳过探测
-  api_key: EMPTY               # 仅 EvalScope 使用
+  api_key: EMPTY               # EvalScope / ASR 客户端使用；AISBench 路径暂不透传
 ```
+
+> AISBench 路径用域名 / https / 带子路径的 endpoint 见下文「AISBench / EvalScope」一段；
+> 其中 `api_key` 目前未写入 AISBench 模型配置，网关要求鉴权时需另行处理。
 
 | 字段 | 说明 |
 | --- | --- |
@@ -1657,13 +2166,33 @@ external_service:
 | `health_path` | 拼在 **origin**（不含 API path）后探测。默认 `/health`；HTTP 2xx 即通过。空 = 跳过。 |
 | `deployment.instances` / `xllm_service` 等 | 开启后忽略并打 warning，不会去那些 host 起服务容器。 |
 
-**AISBench / EvalScope：** 仍起一台 engine 镜像作为 client，并下载对应 bench 工具；不执行 `download_xllm.sh`。AISBench 使用 `host_ip`/`host_port`，网关 URL 里的 path 不会写入 AISBench 配置。EvalScope 使用 origin + path 作为 `--api-url` 前缀。
+**AISBench / EvalScope：** 仍起一台 engine 镜像作为 client，并下载对应 bench 工具；不执行 `download_xllm.sh`。EvalScope 使用 origin + path 作为 `--api-url` 前缀。AISBench 分两种写法：
+
+- endpoint 是**纯 IP + http + 无子路径**（如 `http://11.87.191.75:8800`）时，沿用 `host_ip`/`host_port`，网关 path 不写入配置，脚本与旧版本逐字节一致。
+- endpoint 是**域名、https 或带子路径**（如 `http://glm53-flash-test.jd.local:8800`、`https://gw.jd.local/inference/svc`）时，改写 AISBench 模型配置的 `url` 字段，`host_ip` 保持模板默认 `localhost`。原因是 AISBench 只用 `ipaddress.ip_address()` 校验 `host_ip`、仅额外放行 `localhost`，域名会在 build model 阶段以 `UTILS-CFG-002` 失败；而 `url` 非空时 AISBench 会忽略 `host_ip`/`host_port`，域名、https、子路径都可表达。该模式要求 `served_model_name` 非空（否则 AISBench 会去探测 `v1/models`）。
+
+注意 `url` 模式下的已知限制：https 仅解决 scheme 拼接，内网私有 CA 仍需在 client 容器注入 `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`；若 https 网关必须经代理，AISBench 推理路径的 aiohttp session 未开 `trust_env`，需要另行处理。
+
+**ASR / legacy_infer：** 只起客户端容器，不安装/启动 xLLM，不加载服务端模型权重
+或 tokenizer；使用归档中的原客户端和评分器。`api: audio` 请求
+`/v1/audio/transcriptions`，`api: chat` 请求 `/v1/chat/completions`；endpoint 经
+解析为保留路径前缀的 `/v1` 基址，`external_service.api_key` 可传给客户端。
+本地日期归档与 Excel 链接指向客户端归档主机，不能据此外部模式获取远端模型
+启动日志或独立证明其 TP/CTC/Suffix 配置。完整参数、缓存与评分口径见第 3 节 ASR 小节。
 
 **VBench / Wan2.2：** 只起 `benchmark.vbench.image_home` / `image_name` 指定的独立 runner，不创建 dummy xLLM 容器。默认请求 `http://<origin>/v1/video/generation`；若 `endpoint` 已带 path，则原样作为视频 API。`mode: evaluate` 不要求活服务、不做健康探测。NPU watchdog 在外部模式关闭。
 
-搜 `serving_extensiable_param`、卡号、PD 拓扑会被拒绝；只允许搜 benchmark 请求参数（如 `batch_size`）。
+**GEdit / image_edit：** 外部模式不自启 encoder/dit/judge 自服务容器；图像生成端点由
+`endpoint` 解析结果追加 `/image/generation` 得到（见
+`xtask/benchmarks/evalscope/generate_image_edit_script.py` 的 `_image_edit_endpoint`），
+encoder 地址仍按 `benchmark.perf.encoder_url` / 环境变量 `GEDIT_ENCODER_URL` /
+默认 `http://127.0.0.1:18007` 解析。
 
-完整示例：`26_external_aisbench_perf.yaml`、`27_external_vbench_wan_i2v.yaml`。
+搜 `serving_extensiable_param`、卡号、PD 拓扑会被拒绝；只允许搜 benchmark 请求参数
+（普通 LLM 如 `batch_size`，ASR 如 `concurrency`）。
+
+完整示例：`26_external_aisbench_perf.yaml`、`27_external_vbench_wan_i2v.yaml`、
+`40_external_joyai_asr_legacy_acc_perf.yaml`、`41_external_joyai_asr_legacy_repeats.yaml`。
 
 ## 10. 常用执行命令
 
@@ -1672,6 +2201,15 @@ external_service:
 ```bash
 python main.py --case_name 01_single_aisbench_perf --host_addr 11.87.191.75
 ```
+
+ASR 外部服务单轮及两轮归档验证（先修改 YAML 中 endpoint 为可用服务）：
+
+```bash
+python main.py --case_name 40_external_joyai_asr_legacy_acc_perf
+python main.py --case_group 41_external_joyai_asr_legacy_repeats
+```
+
+第二条命令同时生成全局和用例组 Excel。ASR 自部署入口及准备条件见第 3 节。
 
 多机普通用例的 IP 已经写在 YAML 中、需要编译yaml修改，不要用 `--host_addr` 试图整体替换多机拓扑：
 
@@ -1696,8 +2234,16 @@ python main.py --case_group 11_single_para_set_tpe \
 
 ## 11. 写完后的检查清单
 
-- 先确认 `metrics`、`benchmark_type` 和对应的 `perf/acc` 块一致。
-- 确认模型路径在所有服务节点存在，数据资源路径在 benchmark runner 可见。
+- 先确认 `metrics`、`benchmark_type` 和对应的配置块一致：`metrics: perf` 配
+  `benchmark.perf`（`benchmark_type: image_edit` 的 gedit 性能同样如此）；普通精度
+  与 SWE-bench 新格式配 `benchmark.acc`；VBench 配 `benchmark.vbench`；ASR
+  `metrics: acc,perf` 配 `benchmark.asr`（不拆成 acc/perf 配置块）。执行路由只看
+  `benchmark_type`，`metrics: acc` 下是否走 SWE 分支由 `benchmark.acc` 的
+  `mode`/`runner` 字段决定。
+- 确认模型路径在所有自部署服务节点存在，数据资源路径在 benchmark runner 可见。
+- ASR 确认原客户端/数据归档、清单数量、context、评分 profile、音频时长上限、
+  并发/重复和门禁单位正确；不把 `joyai_legacy` 错误率冒充纯 CER/标准 WER，
+  不将服务生命周期内重复音频的性能宣称为冷缓存。
 - 单机通常只有一个 instance；普通部署用 `instances`，可跨 host 或在同一 host 拆成多个小 runtime；PD 只用 `pd_instances`。
 - 多机每个 host 的 SSH、容器运行环境、NPU 卡号和端口都可用。
 - 同一 host 上检查 `device_ids`、`local_port` 端口段、HCCL/协调端口和 PD transfer 端口没有冲突。
