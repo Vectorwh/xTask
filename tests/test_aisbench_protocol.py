@@ -1058,8 +1058,23 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
             for row in rows:
                 f.write(json.dumps(row) + "\n")
 
+    def test_load_accepts_path_kwarg(self):
+        """load(path=...) must read from the path kwarg — this is how
+        AISBench CustomDataset.__init__ passes the data file path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl = os.path.join(tmpdir, "data.jsonl")
+            self._write_jsonl(jsonl, [
+                {"question": "q1", "extra_params": {"tools": []},
+                 "ground_truth": {"answer": "a1"}},
+            ])
+            ds = self.ProtocolConstrainedDataset(path="unused")
+            data = ds.load(path=jsonl, meta_path="", abbr="test", type=None)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["question"], "q1")
+            self.assertIsInstance(data[0]["extra_params"], dict)
+
     def test_load_accepts_meta_path_kwarg(self):
-        """load(meta_path=...) must read from meta_path, not crash."""
+        """load(meta_path=...) must read from meta_path when path is absent."""
         with tempfile.TemporaryDirectory() as tmpdir:
             jsonl = os.path.join(tmpdir, "data.jsonl")
             self._write_jsonl(jsonl, [
@@ -1081,26 +1096,26 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
             ])
             ds = self.ProtocolConstrainedDataset(path=jsonl)
             data = ds.load(
-                meta_path="", reader_cfg={}, infer_cfg={}, eval_cfg={},
-                abbr="test", type=None,
+                path=jsonl, meta_path="", reader_cfg={}, infer_cfg={},
+                eval_cfg={}, abbr="test", type=None,
             )
             self.assertEqual(len(data), 1)
 
     def test_load_falls_back_to_self_path(self):
-        """When meta_path is empty/None, load() falls back to self.path."""
+        """When path and meta_path are empty/None, load() falls back to self.path."""
         with tempfile.TemporaryDirectory() as tmpdir:
             jsonl = os.path.join(tmpdir, "data.jsonl")
             self._write_jsonl(jsonl, [
                 {"question": "q1", "extra_params": {}, "ground_truth": {}},
             ])
             ds = self.ProtocolConstrainedDataset(path=jsonl)
-            data = ds.load(meta_path="")
+            data = ds.load(path="", meta_path="")
             self.assertEqual(len(data), 1)
 
     def test_load_raises_without_path(self):
         ds = self.ProtocolConstrainedDataset(path="")
         with self.assertRaises(ValueError):
-            ds.load(meta_path=None)
+            ds.load(path=None, meta_path=None)
 
     def test_load_preserves_dict_types(self):
         """extra_params and ground_truth must stay as dicts."""
@@ -1112,7 +1127,7 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
                 {"question": "q2"},  # missing extra_params/ground_truth
             ])
             ds = self.ProtocolConstrainedDataset(path="")
-            data = ds.load(meta_path=jsonl)
+            data = ds.load(path=jsonl)
             self.assertIsInstance(data[0]["extra_params"], dict)
             self.assertIsInstance(data[0]["ground_truth"], dict)
             self.assertEqual(data[1]["extra_params"], {})

@@ -20,19 +20,21 @@ class ProtocolConstrainedDataset(CustomDataset):
     re-parses them from the raw line to guarantee the dict structure.
     """
 
-    def load(self, meta_path=None, **kwargs):
+    def load(self, path=None, meta_path=None, **kwargs):
         """Load JSONL and ensure extra_params / ground_truth stay as dicts.
 
         AISBench's CustomDataset.__init__ calls ``self.load(**kwargs)`` with
-        all dataset-config dict keys (path, meta_path, reader_cfg, ...).
-        The base class signature accepts ``meta_path`` so we must too.
+        all dataset-config dict keys (path, meta_path, abbr, reader_cfg, ...).
+        The actual JSONL data path is the ``path`` key; ``meta_path`` may be
+        an empty string.  Both are accepted explicitly so they don't get
+        swallowed by **kwargs.
         """
         import json as _json
-        file_path = meta_path or getattr(self, "path", None)
+        file_path = path or meta_path or getattr(self, "path", None)
         if not file_path:
             raise ValueError(
                 "ProtocolConstrainedDataset.load() requires a non-empty "
-                "meta_path or self.path"
+                "path, meta_path, or self.path"
             )
         data = []
         with open(file_path, "r", encoding="utf-8") as f:
