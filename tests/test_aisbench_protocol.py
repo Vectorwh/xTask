@@ -391,6 +391,58 @@ class TestEvaluatorWrapper(unittest.TestCase):
         self.assertEqual(result["Protocol_Pass_Rate"], 100.0)
 
 
+class TestEvaluatorEvaluateMethod(unittest.TestCase):
+    """Tests for ProtocolAndConstrainedEvaluator.evaluate (AISBench entry point).
+
+    AISBench's openicl_eval.py calls:
+        evaluator.evaluate(k, n, test_set, **preds)
+    where k is the dataset abbr, test_set items have 'gold' (renamed from
+    output_column), and preds maps dataset abbr to prediction strings.
+    """
+
+    def test_evaluate_with_gold_key(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
+            ProtocolAndConstrainedEvaluator,
+        )
+
+        full_msg = {"content": '{"answer": 42}', "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"}
+        test_set = [{"gold": {"schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}, "answer": 42}}]
+        evaluator = ProtocolAndConstrainedEvaluator()
+        result = evaluator.evaluate("protocol_constrained", 1, test_set, protocol_constrained=[json.dumps(full_msg)])
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["Protocol_Pass_Rate"], 100.0)
+        self.assertEqual(result["Semantic_Accuracy"], 100.0)
+
+    def test_evaluate_with_ground_truth_key_fallback(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
+            ProtocolAndConstrainedEvaluator,
+        )
+
+        full_msg = {"content": "plain answer", "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"}
+        test_set = [{"ground_truth": {"answer_regex": "plain"}}]
+        evaluator = ProtocolAndConstrainedEvaluator()
+        result = evaluator.evaluate("protocol_constrained", 1, test_set, protocol_constrained=[json.dumps(full_msg)])
+        self.assertEqual(result["Protocol_Pass_Rate"], 100.0)
+
+    def test_evaluate_multiple_samples(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
+            ProtocolAndConstrainedEvaluator,
+        )
+
+        preds = [
+            json.dumps({"content": '{"answer": 6000}', "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"}),
+            json.dumps({"content": "invalid json", "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"}),
+        ]
+        test_set = [
+            {"gold": {"id": "c1", "schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}, "answer": 6000}},
+            {"gold": {"id": "c2", "schema": {"type": "object"}}},
+        ]
+        evaluator = ProtocolAndConstrainedEvaluator()
+        result = evaluator.evaluate("protocol_constrained", 2, test_set, protocol_constrained=preds)
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["Syntax_Valid_Rate"], 50.0)
+
+
 class TestProtocolPostprocess(unittest.TestCase):
     """Tests for A/B comparison and CI gate."""
 

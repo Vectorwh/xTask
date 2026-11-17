@@ -316,11 +316,54 @@ class ProtocolAndConstrainedEvaluator:
     Registered in dataset config's eval_cfg as::
         evaluator=dict(type=ProtocolAndConstrainedEvaluator)
 
-    The AISBench evaluation pipeline calls ``score()`` with the predictions
-    and references produced by the inferencer. Predictions are expected to
-    be full message dicts (content + reasoning_content + tool_calls +
-    finish_reason) as preserved by ProtocolAwareAPIChat.
+    AISBench's openicl_eval.py calls ``evaluate(k, n, test_set, **preds)``
+    where ``k`` is the dataset abbreviation, ``n`` the sample count,
+    ``test_set`` the list of test samples (output_column renamed to 'gold'
+    by the reader), and ``**preds`` maps dataset abbr to prediction strings.
+
+    Predictions are expected to be full message dicts serialized as JSON
+    strings (content + reasoning_content + tool_calls + finish_reason) as
+    produced by ProtocolAwareAPIChat._parse_response.
     """
+
+    def evaluate(self, k, n, test_set, **preds) -> Dict[str, Any]:
+        """AISBench evaluation entry point.
+
+        Args:
+            k: dataset abbreviation (e.g. 'protocol_constrained').
+            n: number of samples.
+            test_set: list of test samples; each item is a dict whose
+                output_column ('ground_truth') value is stored under key
+                'gold' (AISBench reader convention) or 'ground_truth'.
+            **preds: {dataset_abbr: [prediction_strings]}.
+
+        Returns:
+            Dict of metric name -> value.
+        """
+        # Extract predictions for this dataset abbr.
+        predictions = preds.get(k, [])
+        if not predictions and len(preds) == 1:
+            predictions = next(iter(preds.values()))
+        if not predictions:
+            logger.warning(
+                "ProtocolAndConstrainedEvaluator: no predictions for %r "
+                "(available keys: %r)", k, list(preds.keys()),
+            )
+
+        # Extract references: AISBench reader renames output_column to 'gold'.
+        references = []
+        for item in test_set:
+            if isinstance(item, dict):
+                gold = item.get("gold")
+                if gold is None:
+                    gold = item.get("ground_truth")
+                if gold is None:
+                    gold = item.get("answer")
+                references.append(gold if gold is not None else {})
+            else:
+                references.append({"answer": item})
+
+        return self.score(predictions, references)
 
     def score(self, predictions, references) -> Dict[str, Any]:
         """Score predictions against references.
