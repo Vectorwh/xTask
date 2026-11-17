@@ -316,52 +316,65 @@ class ProtocolAndConstrainedEvaluator:
     Registered in dataset config's eval_cfg as::
         evaluator=dict(type=ProtocolAndConstrainedEvaluator)
 
-    AISBench's openicl_eval.py calls ``evaluate(k, n, test_set, **preds)``
-    where ``k`` is the dataset abbreviation, ``n`` the sample count,
-    ``test_set`` the list of test samples (output_column renamed to 'gold'
-    by the reader), and ``**preds`` maps dataset abbr to prediction strings.
+    AISBench's openicl_eval.py ``_score()`` builds a ``preds`` dict from the
+    prediction file, then **filters it by the ``score()`` method's signature
+    parameters** before calling::
+
+        icl_evaluator.evaluate(k, n, copy.deepcopy(test_set), **preds)
+
+    where ``k``/``n`` are integers (num_return_sequences, NOT dataset abbr),
+    and the filtered ``preds`` contains only keys matching ``score()`` params:
+    ``predictions`` (list of prediction strings) and ``references`` (list of
+    ``test_set[output_column]`` values).
 
     Predictions are expected to be full message dicts serialized as JSON
     strings (content + reasoning_content + tool_calls + finish_reason) as
     produced by ProtocolAwareAPIChat._parse_response.
     """
 
-    def evaluate(self, k, n, test_set, **preds) -> Dict[str, Any]:
+    def evaluate(self, k, n, test_set, predictions=None, references=None,
+                 **kwargs) -> Dict[str, Any]:
         """AISBench evaluation entry point.
 
         Args:
-            k: dataset abbreviation (e.g. 'protocol_constrained').
-            n: number of samples.
-            test_set: list of test samples; each item is a dict whose
-                output_column ('ground_truth') value is stored under key
-                'gold' (AISBench reader convention) or 'ground_truth'.
-            **preds: {dataset_abbr: [prediction_strings]}.
+            k: number of return sequences per sample (int, not dataset abbr).
+            n: number of samples for pass@k (int).
+            test_set: HuggingFace Dataset of test samples (kept for
+                compatibility; references are extracted from it only as
+                fallback).
+            predictions: list of prediction strings (JSON-serialized message
+                dicts), passed as kwarg matching ``score()`` param name.
+            references: list of ground_truth values from
+                ``test_set[output_column]``, passed as kwarg matching
+                ``score()`` param name.
+            **kwargs: catches any extra filtered keys (ignored).
 
         Returns:
             Dict of metric name -> value.
         """
-        # Extract predictions for this dataset abbr.
-        predictions = preds.get(k, [])
-        if not predictions and len(preds) == 1:
-            predictions = next(iter(preds.values()))
-        if not predictions:
-            logger.warning(
-                "ProtocolAndConstrainedEvaluator: no predictions for %r "
-                "(available keys: %r)", k, list(preds.keys()),
-            )
+        # AISBench filters preds by score() signature, so predictions and
+        # references arrive as keyword arguments.  Fall back to kwargs and
+        # then to test_set extraction for robustness.
+        if predictions is None:
+            predictions = kwargs.get('predictions', [])
+        if not isinstance(predictions, list):
+            predictions = list(predictions) if predictions is not None else []
 
-        # Extract references: AISBench reader renames output_column to 'gold'.
-        references = []
-        for item in test_set:
-            if isinstance(item, dict):
-                gold = item.get("gold")
-                if gold is None:
-                    gold = item.get("ground_truth")
-                if gold is None:
-                    gold = item.get("answer")
-                references.append(gold if gold is not None else {})
-            else:
-                references.append({"answer": item})
+        if references is None:
+            references = kwargs.get('references')
+        if references is None:
+            # Fallback: extract references from test_set.
+            references = []
+            for item in test_set:
+                if isinstance(item, dict):
+                    gold = item.get("gold")
+                    if gold is None:
+                        gold = item.get("ground_truth")
+                    if gold is None:
+                        gold = item.get("answer")
+                    references.append(gold if gold is not None else {})
+                else:
+                    references.append({"answer": item})
 
         return self.score(predictions, references)
 

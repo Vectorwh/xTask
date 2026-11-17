@@ -394,34 +394,43 @@ class TestEvaluatorWrapper(unittest.TestCase):
 class TestEvaluatorEvaluateMethod(unittest.TestCase):
     """Tests for ProtocolAndConstrainedEvaluator.evaluate (AISBench entry point).
 
-    AISBench's openicl_eval.py calls:
-        evaluator.evaluate(k, n, test_set, **preds)
-    where k is the dataset abbr, test_set items have 'gold' (renamed from
-    output_column), and preds maps dataset abbr to prediction strings.
+    AISBench's openicl_eval.py ``_score()`` filters the preds dict by the
+    ``score()`` method's signature parameters, then calls:
+        evaluator.evaluate(k, n, test_set, predictions=pred_strs, references=refs)
+    where k/n are integers (num_return_sequences), predictions is a list of
+    prediction strings, and references is test_set[output_column].
     """
 
-    def test_evaluate_with_gold_key(self):
+    def _full_msg(self, content, finish_reason="stop"):
+        return json.dumps({
+            "content": content,
+            "reasoning_content": "",
+            "tool_calls": [],
+            "finish_reason": finish_reason,
+        })
+
+    def test_evaluate_with_predictions_and_references_kwargs(self):
         from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
             ProtocolAndConstrainedEvaluator,
         )
 
-        full_msg = {"content": '{"answer": 42}', "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"}
-        test_set = [{"gold": {"schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}, "answer": 42}}]
+        pred_str = self._full_msg('{"answer": 42}')
+        references = [{"schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}, "answer": 42}]
         evaluator = ProtocolAndConstrainedEvaluator()
-        result = evaluator.evaluate("protocol_constrained", 1, test_set, protocol_constrained=[json.dumps(full_msg)])
+        result = evaluator.evaluate(1, 1, test_set=[], predictions=[pred_str], references=references)
         self.assertEqual(result["total"], 1)
         self.assertEqual(result["Protocol_Pass_Rate"], 100.0)
         self.assertEqual(result["Semantic_Accuracy"], 100.0)
 
-    def test_evaluate_with_ground_truth_key_fallback(self):
+    def test_evaluate_fallback_references_from_test_set(self):
         from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
             ProtocolAndConstrainedEvaluator,
         )
 
-        full_msg = {"content": "plain answer", "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"}
+        pred_str = self._full_msg("plain answer")
         test_set = [{"ground_truth": {"answer_regex": "plain"}}]
         evaluator = ProtocolAndConstrainedEvaluator()
-        result = evaluator.evaluate("protocol_constrained", 1, test_set, protocol_constrained=[json.dumps(full_msg)])
+        result = evaluator.evaluate(1, 1, test_set=test_set, predictions=[pred_str])
         self.assertEqual(result["Protocol_Pass_Rate"], 100.0)
 
     def test_evaluate_multiple_samples(self):
@@ -430,17 +439,41 @@ class TestEvaluatorEvaluateMethod(unittest.TestCase):
         )
 
         preds = [
-            json.dumps({"content": '{"answer": 6000}', "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"}),
-            json.dumps({"content": "invalid json", "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"}),
+            self._full_msg('{"answer": 6000}'),
+            self._full_msg("invalid json"),
         ]
-        test_set = [
-            {"gold": {"id": "c1", "schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}, "answer": 6000}},
-            {"gold": {"id": "c2", "schema": {"type": "object"}}},
+        references = [
+            {"id": "c1", "schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}, "answer": 6000},
+            {"id": "c2", "schema": {"type": "object"}},
         ]
         evaluator = ProtocolAndConstrainedEvaluator()
-        result = evaluator.evaluate("protocol_constrained", 2, test_set, protocol_constrained=preds)
+        result = evaluator.evaluate(1, 2, test_set=[], predictions=preds, references=references)
         self.assertEqual(result["total"], 2)
         self.assertEqual(result["Syntax_Valid_Rate"], 50.0)
+
+    def test_evaluate_simulates_aisbench_score_signature_filter(self):
+        """Simulate the full AISBench flow: filter preds by score() signature."""
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
+            ProtocolAndConstrainedEvaluator,
+        )
+        from inspect import signature
+
+        evaluator = ProtocolAndConstrainedEvaluator()
+
+        # Simulate what openicl_eval.py does: build preds dict then filter
+        # by score() signature parameters.
+        pred_strs = [self._full_msg('{"answer": 7}')]
+        refs = [{"schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}, "answer": 7}]
+        preds = {
+            "predictions": pred_strs,
+            "references": refs,
+            "test_set": [{"ground_truth": refs[0]}],
+            "origin_prompt": [None],
+        }
+        filtered = {k: preds[k] for k in signature(evaluator.score).parameters}
+        result = evaluator.evaluate(1, 1, test_set=preds["test_set"], **filtered)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["Semantic_Accuracy"], 100.0)
 
 
 class TestProtocolPostprocess(unittest.TestCase):
