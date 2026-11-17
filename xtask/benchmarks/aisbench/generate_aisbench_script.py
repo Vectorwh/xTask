@@ -956,7 +956,7 @@ def generate_aisbench_script(
                     f'--models {protocol_model_name} '
                     f'--datasets {protocol_dataset_conf} '
                     f'{protocol_num_prompts_str}'
-                    f'--mode eval '
+                    f'--mode all '
                     f'--work-dir {protocol_work_dir}'
                 )
                 shell_content.append(f'echo "执行协议测试命令：{protocol_cmd}"')

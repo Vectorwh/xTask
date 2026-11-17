@@ -3670,15 +3670,15 @@ def _run_benchmark_and_process(context):
                 )
                 if output_dir:
                     context.result["benchmark_output_path"] = output_dir
-                _post_process_benchmark_rst(
-                    container_manager,
-                    container_config,
-                    task_config,
-                    context.output_file_path,
-                    output_dir,
-                    service_runtimes=state.get("service_runtimes"),
-                )
-                _record_service_group_archive_path(state, output_dir)
+                    _post_process_benchmark_rst(
+                        container_manager,
+                        container_config,
+                        task_config,
+                        context.output_file_path,
+                        output_dir,
+                        service_runtimes=state.get("service_runtimes"),
+                    )
+                    _record_service_group_archive_path(state, output_dir)
             else:
                 logging.debug(
                     "metrics is %s, skip accuracy task.",
