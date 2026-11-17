@@ -1073,6 +1073,22 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
             self.assertEqual(data[0]["question"], "q1")
             self.assertIsInstance(data[0]["extra_params"], dict)
 
+    def test_load_returns_hf_dataset(self):
+        """load() must return a HuggingFace datasets.Dataset, not a list —
+        AISBench check_dataset() rejects plain lists."""
+        from datasets import Dataset as HFDataset
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl = os.path.join(tmpdir, "data.jsonl")
+            self._write_jsonl(jsonl, [
+                {"question": "q1", "extra_params": {"response_format": "json"},
+                 "ground_truth": {"expected_finish_reason": "stop"}},
+            ])
+            ds = self.ProtocolConstrainedDataset(path="unused")
+            data = ds.load(path=jsonl)
+            self.assertIsInstance(data, HFDataset)
+            self.assertNotIsInstance(data, list)
+
     def test_load_accepts_meta_path_kwarg(self):
         """load(meta_path=...) must read from meta_path when path is absent."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1130,8 +1146,10 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
             data = ds.load(path=jsonl)
             self.assertIsInstance(data[0]["extra_params"], dict)
             self.assertIsInstance(data[0]["ground_truth"], dict)
-            self.assertEqual(data[1]["extra_params"], {})
-            self.assertEqual(data[1]["ground_truth"], {})
+            # Row 2: HFDataset/Arrow fills missing keys from the inferred
+            # schema with None, so the field is still a dict (not None/str).
+            self.assertIsInstance(data[1]["extra_params"], dict)
+            self.assertIsInstance(data[1]["ground_truth"], dict)
 
 
 if __name__ == "__main__":

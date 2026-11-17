@@ -28,8 +28,13 @@ class ProtocolConstrainedDataset(CustomDataset):
         The actual JSONL data path is the ``path`` key; ``meta_path`` may be
         an empty string.  Both are accepted explicitly so they don't get
         swallowed by **kwargs.
+
+        Returns a HuggingFace ``datasets.Dataset`` (required by AISBench's
+        ``check_dataset``), NOT a plain Python list.
         """
         import json as _json
+        from datasets import Dataset as _HFDataset
+
         file_path = path or meta_path or getattr(self, "path", None)
         if not file_path:
             raise ValueError(
@@ -54,4 +59,4 @@ class ProtocolConstrainedDataset(CustomDataset):
                 if "ground_truth" not in row or not isinstance(row["ground_truth"], dict):
                     row["ground_truth"] = row.get("ground_truth") or {}
                 data.append(row)
-        return data
+        return _HFDataset.from_list(data)
