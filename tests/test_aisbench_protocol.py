@@ -570,5 +570,66 @@ class TestGenerateScriptProtocolSection(unittest.TestCase):
             self.assertNotIn("xtask_protocol_", content)
 
 
+class TestProtocolAwareAPIChatWrapper(unittest.TestCase):
+    """Tests for the ProtocolAwareAPIChat wrapper class (lazy composition)."""
+
+    def _import_wrapper(self):
+        from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareAPIChat
+        return ProtocolAwareAPIChat
+
+    def test_wrapper_exists_and_is_class(self):
+        cls = self._import_wrapper()
+        self.assertTrue(isinstance(cls, type))
+
+    def test_new_delegates_to_factory(self):
+        """__new__ should call create_protocol_aware_chat with stream_verify=False."""
+        cls = self._import_wrapper()
+
+        class _FakeComposed:
+            def __init__(self, *a, **kw):
+                pass
+
+        with patch(
+            "xtask.benchmarks.aisbench.protocol_api.create_protocol_aware_chat"
+        ) as mock_factory:
+            mock_factory.return_value = _FakeComposed
+            instance = cls.__new__(cls)
+            mock_factory.assert_called_once_with(stream_verify=False)
+            self.assertIsInstance(instance, _FakeComposed)
+
+    def test_new_stream_verify_true(self):
+        """Passing stream_verify=True should forward to the factory."""
+        cls = self._import_wrapper()
+
+        class _FakeComposed:
+            def __init__(self, *a, **kw):
+                pass
+
+        with patch(
+            "xtask.benchmarks.aisbench.protocol_api.create_protocol_aware_chat"
+        ) as mock_factory:
+            mock_factory.return_value = _FakeComposed
+            cls.__new__(cls, stream_verify=True)
+            mock_factory.assert_called_once_with(stream_verify=True)
+
+    def test_instance_proxies_attributes(self):
+        """The returned instance should be of the composed class."""
+        cls = self._import_wrapper()
+
+        class _FakeImpl:
+            answer = 42
+
+            def greet(self):
+                return "hello"
+
+        with patch(
+            "xtask.benchmarks.aisbench.protocol_api.create_protocol_aware_chat"
+        ) as mock_factory:
+            mock_factory.return_value = _FakeImpl
+            instance = cls.__new__(cls)
+            self.assertEqual(instance.answer, 42)
+            self.assertEqual(instance.greet(), "hello")
+
+
 if __name__ == "__main__":
     unittest.main()

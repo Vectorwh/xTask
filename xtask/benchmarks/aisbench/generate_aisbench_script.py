@@ -234,10 +234,11 @@ def _add_last_inferencer_import(tree):
 
 class _ProtocolModelTypeOverride(ast.NodeTransformer):
     """Replace VLLMCustomAPIChat/VLLMCustomAPIChatStream with ProtocolAwareAPIChat
-    in an AISBench model config, and inject the xtask import."""
+    in an AISBench model config, inject stream_verify, and update generation_kwargs."""
 
-    def __init__(self, stream_verify=False):
+    def __init__(self, stream_verify=False, generation_kwargs=None):
         self.stream_verify = stream_verify
+        self.generation_kwargs = generation_kwargs or {}
         self.replacements = 0
 
     def _replace_type(self, type_node):
@@ -246,6 +247,26 @@ class _ProtocolModelTypeOverride(ast.NodeTransformer):
             self.replacements += 1
             return ast.Name(id="ProtocolAwareAPIChat", ctx=ast.Load())
         return type_node
+
+    @staticmethod
+    def _value_to_ast(value):
+        """Convert a Python value to an AST node."""
+        if isinstance(value, (int, float, bool, str, type(None))):
+            return ast.Constant(value=value)
+        try:
+            return ast.parse(repr(value), mode="eval").body
+        except SyntaxError:
+            return ast.Constant(value=str(value))
+
+    def _update_generation_kwargs(self, gk_call_node):
+        """Update keywords inside generation_kwargs=dict(...) AST node."""
+        if not self.generation_kwargs:
+            return gk_call_node
+        existing = {kw.arg: kw for kw in gk_call_node.keywords if kw.arg}
+        for key, value in self.generation_kwargs.items():
+            existing[key] = ast.keyword(arg=key, value=self._value_to_ast(value))
+        gk_call_node.keywords = list(existing.values())
+        return gk_call_node
 
     def visit_Call(self, node):
         self.generic_visit(node)
@@ -259,6 +280,15 @@ class _ProtocolModelTypeOverride(ast.NodeTransformer):
             node.keywords.append(
                 ast.keyword(arg="stream_verify", value=ast.Constant(value=self.stream_verify))
             )
+        # Update generation_kwargs values baked into the AST.
+        if "generation_kwargs" in keywords:
+            gk_value = keywords["generation_kwargs"].value
+            if (
+                isinstance(gk_value, ast.Call)
+                and isinstance(gk_value.func, ast.Name)
+                and gk_value.func.id == "dict"
+            ):
+                self._update_generation_kwargs(gk_value)
         return node
 
     def visit_Dict(self, node):
@@ -274,22 +304,16 @@ class _ProtocolModelTypeOverride(ast.NodeTransformer):
 
 
 def _add_protocol_import(tree):
-    """Insert the ProtocolAwareAPIChat import after existing imports."""
+    """Insert the ProtocolAwareAPIChat import after existing imports.
+
+    Imports the wrapper class directly (NOT the factory function) because
+    mmengine's _parse_lazy_import forbids calling imported names at module
+    level. ProtocolAwareAPIChat defers composition to __new__.
+    """
     import_node = ast.ImportFrom(
         module="xtask.benchmarks.aisbench.protocol_api",
-        names=[ast.alias(name="create_protocol_aware_chat")],
+        names=[ast.alias(name="ProtocolAwareAPIChat")],
         level=0,
-    )
-    # Also insert the factory call wrapper: type=create_protocol_aware_chat(stream_verify=...)
-    # But AST-level function call in dict(type=...) is complex; instead we
-    # inject a module-level assignment and reference it.
-    assign_node = ast.Assign(
-        targets=[ast.Name(id="ProtocolAwareAPIChat", ctx=ast.Store())],
-        value=ast.Call(
-            func=ast.Name(id="create_protocol_aware_chat", ctx=ast.Load()),
-            args=[],
-            keywords=[],
-        ),
     )
     insert_index = 0
     if (
@@ -305,7 +329,6 @@ def _add_protocol_import(tree):
     ):
         insert_index += 1
     tree.body.insert(insert_index, import_node)
-    tree.body.insert(insert_index + 1, assign_node)
 
 
 def create_protocol_model_config(
@@ -313,11 +336,14 @@ def create_protocol_model_config(
     output_file_path,
     stream_verify=False,
     config_dir_name="aisbench_configs",
+    generation_kwargs=None,
 ):
     """Create a protocol-aware AISBench model config from a base api_type config.
 
     Copies the base vllm_api config, replaces the model class with
-    ProtocolAwareAPIChat, and injects the xtask import + factory call.
+    ProtocolAwareAPIChat, injects stream_verify + generation_kwargs, and
+    adds the xtask import. All parameter overrides are baked into the AST
+    so no sed-based post-editing is needed for generation_kwargs.
     """
     _validate_config_name(api_type, "api_type")
     # Model configs live under configs/models/vllm_api/, not configs/datasets/.
@@ -337,7 +363,10 @@ def create_protocol_model_config(
         )
 
     tree = ast.parse(source_path.read_text(encoding="utf-8"), str(source_path))
-    transformer = _ProtocolModelTypeOverride(stream_verify=stream_verify)
+    transformer = _ProtocolModelTypeOverride(
+        stream_verify=stream_verify,
+        generation_kwargs=generation_kwargs,
+    )
     tree = transformer.visit(tree)
     if transformer.replacements == 0:
         raise ValueError(
@@ -846,12 +875,16 @@ def generate_aisbench_script(
             protocol_api_type = protocol_cfg.get("api_type", "vllm_api_general_chat")
 
             # 6.1 生成协议感知模型配置（替换 VLLMCustomAPIChat → ProtocolAwareAPIChat）
+            # generation_kwargs 在 AST 阶段直接烘焙进配置，避免 sed 行号替换在
+            # AST unparse 单行格式上失效。
+            protocol_generation_kwargs = protocol_cfg.get("generation_kwargs", {})
             try:
                 protocol_model_name = create_protocol_model_config(
                     protocol_api_type,
                     output_file_path,
                     stream_verify=stream_verify,
                     config_dir_name=config_dir_name,
+                    generation_kwargs=protocol_generation_kwargs,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 shell_content.append(f'echo "错误：生成协议模型配置失败 - {exc}" >&2')
@@ -894,11 +927,7 @@ def generate_aisbench_script(
                     f'sed -i "s/temperature\\s*=\\s*.*,/temperature={protocol_temperature},/g" {protocol_model_file}'
                 )
 
-                # 6.3 透传 generation_kwargs（同 acc/perf 逻辑）
-                protocol_generation_kwargs = protocol_cfg.get("generation_kwargs", {})
-                if protocol_generation_kwargs:
-                    update_cmd = update_generation_kwargs(protocol_generation_kwargs, protocol_model_file)
-                    shell_content.extend(update_cmd)
+                # 6.3 generation_kwargs 已在 AST 阶段烘焙进配置文件，无需 sed 替换
 
                 # 6.4 数据集配置（protocol_constrained_gen + 路径覆写）
                 protocol_dataset_path = protocol_cfg.get("dataset_path") or task_config.get(

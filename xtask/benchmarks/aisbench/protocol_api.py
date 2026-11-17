@@ -271,7 +271,7 @@ def create_protocol_aware_chat(stream_verify: bool = False):
 
         return ProtocolAwareAPIChatStream
 
-    class ProtocolAwareAPIChat(ProtocolAwareMixin, VLLMCustomAPIChat):
+    class _ProtocolAwareAPIChatImpl(ProtocolAwareMixin, VLLMCustomAPIChat):
         """Non-stream adapter with per-sample protocol field injection and
         full-message preservation."""
 
@@ -301,4 +301,22 @@ def create_protocol_aware_chat(stream_verify: bool = False):
             self._store_full_message(request_id, full_msg)
             return json.dumps(full_msg, ensure_ascii=False)
 
-    return ProtocolAwareAPIChat
+    return _ProtocolAwareAPIChatImpl
+
+
+class ProtocolAwareAPIChat:
+    """Config-safe entry point for protocol-aware chat models.
+
+    mmengine config files are parsed via ``_parse_lazy_import`` which treats
+    imported names as lazy objects — calling them at module level raises
+    RuntimeError. This wrapper defers mixin composition to instantiation
+    time via ``__new__``, so generated config files can safely reference
+    ``type=ProtocolAwareAPIChat`` as a plain name.
+
+    The ``stream_verify`` field in the model config dict selects the stream
+    adapter (SSE assembly + consistency verification) vs the non-stream one.
+    """
+
+    def __new__(cls, *args, stream_verify: bool = False, **kwargs):
+        composed_cls = create_protocol_aware_chat(stream_verify=stream_verify)
+        return composed_cls(*args, **kwargs)
