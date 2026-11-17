@@ -36,6 +36,22 @@ PROTOCOL_FIELDS = frozenset({
 REASONING_LEAK_TAGS = ("</think>", "<think>", "<|begin_of_thought|>", "<|end_of_thought|>")
 
 
+# Parameters that belong in generation_kwargs / request payloads, NOT in the
+# model constructor.  If they appear as top-level model dict keys, they are
+# popped defensively in ProtocolAwareAPIChat.__new__ to avoid
+# ``VLLMCustomAPIChat.__init__() got an unexpected keyword argument`` and
+# later merged into each request payload in _build_payload.
+_GENERATION_ONLY_PARAMS = frozenset({
+    "temperature",
+    "top_p",
+    "top_k",
+    "frequency_penalty",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+})
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers (unit-testable without ais_bench)
 # ---------------------------------------------------------------------------
@@ -205,8 +221,17 @@ class ProtocolAwareMixin:
         return self._current_extra_params
 
     def _inject_current(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Inject the captured extra_params into the payload."""
-        return inject_protocol_fields(payload, getattr(self, "_current_extra_params", None))
+        """Inject the captured extra_params and generation-only overrides
+        into the payload."""
+        payload = inject_protocol_fields(
+            payload, getattr(self, "_current_extra_params", None)
+        )
+        # Apply generation-only params (temperature etc.) captured at
+        # construction time; use setdefault so per-request kwargs win.
+        overrides = getattr(self, "_generation_overrides", {})
+        for key, value in overrides.items():
+            payload.setdefault(key, value)
+        return payload
 
     def _store_full_message(self, request_id: str, message: Dict[str, Any]):
         """Store the full message for later retrieval by the evaluator."""
@@ -318,5 +343,15 @@ class ProtocolAwareAPIChat:
     """
 
     def __new__(cls, *args, stream_verify: bool = False, **kwargs):
+        # Pop generation-only params that the base constructor doesn't
+        # accept (temperature, top_p, ...).  They are stored on the instance
+        # and merged into each request payload by _inject_current.
+        captured: Dict[str, Any] = {}
+        for key in _GENERATION_ONLY_PARAMS:
+            if key in kwargs:
+                captured[key] = kwargs.pop(key)
         composed_cls = create_protocol_aware_chat(stream_verify=stream_verify)
-        return composed_cls(*args, **kwargs)
+        instance = composed_cls(*args, **kwargs)
+        if captured:
+            instance._generation_overrides = captured
+        return instance

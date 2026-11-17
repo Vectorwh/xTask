@@ -232,15 +232,27 @@ def _add_last_inferencer_import(tree):
     tree.body.insert(insert_index, import_node)
 
 
+# Top-level model dict keys that belong in generation_kwargs, NOT in the
+# model constructor.  Removed defensively from the generated model dict so
+# that VLLMCustomAPIChat.__init__ never receives them (TypeError: got an
+# unexpected keyword argument 'temperature').
+_MODEL_DICT_GENERATION_ONLY_KEYS = frozenset({
+    "temperature", "top_p", "top_k", "frequency_penalty",
+    "presence_penalty", "repetition_penalty", "seed",
+})
+
+
 class _ProtocolModelTypeOverride(ast.NodeTransformer):
     """Replace VLLMCustomAPIChat/VLLMCustomAPIChatStream with ProtocolAwareAPIChat
     in an AISBench model config, inject stream_verify, bake connection params,
     and update generation_kwargs.
 
     Why overrides: ast.unparse() produces single-line output where sed's greedy
-    ``.*`` patterns destroy fields after host_ip. Baking all connection params
-    (host_ip, host_port, model, path, max_out_len, batch_size, request_rate,
-    temperature) directly into the AST eliminates the need for sed entirely.
+    ``.*`` patterns destroy fields after host_ip. Baking connection params
+    (host_ip, host_port, model, path, max_out_len, batch_size, request_rate)
+    directly into the AST eliminates the need for sed entirely. temperature
+    is NOT baked here — it belongs in generation_kwargs, and passing it as a
+    top-level model dict key crashes VLLMCustomAPIChat.__init__.
     """
 
     def __init__(self, stream_verify=False, generation_kwargs=None, overrides=None):
@@ -301,6 +313,12 @@ class _ProtocolModelTypeOverride(ast.NodeTransformer):
             self._set_keyword(
                 node, "stream_verify", ast.Constant(value=self.stream_verify)
             )
+            # Remove generation-only keys that VLLMCustomAPIChat.__init__
+            # doesn't accept; they belong in generation_kwargs instead.
+            node.keywords = [
+                kw for kw in node.keywords
+                if not (kw.arg and kw.arg in _MODEL_DICT_GENERATION_ONLY_KEYS)
+            ]
         # Update generation_kwargs values baked into the AST.
         if "generation_kwargs" in keywords:
             gk_value = keywords["generation_kwargs"].value
@@ -899,15 +917,17 @@ def generate_aisbench_script(
             protocol_api_type = protocol_cfg.get("api_type", "vllm_api_general_chat")
 
             # 6.1 生成协议感知模型配置（替换 VLLMCustomAPIChat → ProtocolAwareAPIChat）
-            # 所有参数（host_ip/host_port/model/path/max_out_len/batch_size/
-            # request_rate/temperature/generation_kwargs/stream_verify）在 AST
-            # 阶段直接烘焙进配置。ast.unparse() 生成单行格式，sed 的贪婪 .* 匹配
-            # 会把 host_ip 之后的所有字段吃掉，因此协议模型配置完全不使用 sed。
+            # 连接参数（host_ip/host_port/model/path/max_out_len/batch_size/
+            # request_rate）在 AST 阶段直接烘焙进配置；temperature 属于
+            # generation_kwargs（由 YAML protocol.generation_kwargs 提供），
+            # 不能作为模型 dict 顶层键，否则 VLLMCustomAPIChat.__init__ 报
+            # unexpected keyword argument。
+            # ast.unparse() 生成单行格式，sed 的贪婪 .* 匹配会把 host_ip 之后
+            # 的所有字段吃掉，因此协议模型配置完全不使用 sed。
             protocol_generation_kwargs = protocol_cfg.get("generation_kwargs", {})
             protocol_output_len = protocol_cfg.get("output_len", 4096)
             protocol_batch_size = protocol_cfg.get("batch_size", 8)
             protocol_request_rate = protocol_cfg.get("request_rate", 0)
-            protocol_temperature = protocol_cfg.get("temperature", 0)
             protocol_overrides = {
                 "host_ip": api_address,
                 "host_port": api_port,
@@ -916,7 +936,6 @@ def generate_aisbench_script(
                 "max_out_len": protocol_output_len,
                 "batch_size": protocol_batch_size,
                 "request_rate": protocol_request_rate,
-                "temperature": protocol_temperature,
             }
             try:
                 protocol_model_name = create_protocol_model_config(

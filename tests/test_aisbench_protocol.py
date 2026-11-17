@@ -588,7 +588,9 @@ class TestGenerateScriptProtocolSection(unittest.TestCase):
             self.assertEqual(ov["max_out_len"], 2048)
             self.assertEqual(ov["batch_size"], 4)
             self.assertEqual(ov["request_rate"], 0)
-            self.assertEqual(ov["temperature"], 0)
+            # temperature must NOT be in overrides — it belongs in
+            # generation_kwargs, not as a top-level model dict key.
+            self.assertNotIn("temperature", ov)
 
             # No sed commands targeting the protocol model config file
             self.assertNotIn("sed -i", content.split("# 6.2")[1].split("# 6.4")[0]
@@ -704,7 +706,6 @@ models = [
                 "max_out_len": 4096,
                 "batch_size": 8,
                 "request_rate": 0,
-                "temperature": 0,
             }
             with mock.patch.object(
                 generator,
@@ -731,7 +732,9 @@ models = [
             self.assertEqual(model_dict["max_out_len"], 4096)
             self.assertEqual(model_dict["batch_size"], 8)
             self.assertEqual(model_dict["request_rate"], 0)
-            self.assertEqual(model_dict["temperature"], 0)
+            # temperature from the source config (0.6) must be REMOVED —
+            # it's a generation-only key that crashes VLLMCustomAPIChat.__init__.
+            self.assertNotIn("temperature", model_dict)
             self.assertTrue(model_dict["stream_verify"])
             self.assertEqual(model_dict["generation_kwargs"]["top_k"], 50)
             self.assertEqual(model_dict["generation_kwargs"]["do_sample"], True)
@@ -796,6 +799,31 @@ class TestProtocolAwareAPIChatWrapper(unittest.TestCase):
             instance = cls.__new__(cls)
             self.assertEqual(instance.answer, 42)
             self.assertEqual(instance.greet(), "hello")
+
+    def test_new_pops_generation_only_params(self):
+        """temperature/top_p etc. must be popped before base __init__ and
+        stored as _generation_overrides on the instance."""
+        cls = self._import_wrapper()
+        received_kwargs = {}
+
+        class _FakeComposed:
+            def __init__(self, *a, **kw):
+                received_kwargs.update(kw)
+
+        with patch(
+            "xtask.benchmarks.aisbench.protocol_api.create_protocol_aware_chat"
+        ) as mock_factory:
+            mock_factory.return_value = _FakeComposed
+            instance = cls.__new__(
+                cls, host_ip="1.2.3.4", temperature=0.7, top_p=0.9
+            )
+            # Base constructor must NOT receive generation-only params.
+            self.assertNotIn("temperature", received_kwargs)
+            self.assertNotIn("top_p", received_kwargs)
+            self.assertEqual(received_kwargs["host_ip"], "1.2.3.4")
+            # They are stored on the instance for payload injection.
+            self.assertEqual(instance._generation_overrides["temperature"], 0.7)
+            self.assertEqual(instance._generation_overrides["top_p"], 0.9)
 
 
 class TestProtocolResultPostProcess(unittest.TestCase):
@@ -961,6 +989,134 @@ class TestVerifyResultProtocolBranch(unittest.TestCase):
         result = self._make_result(semantic=50.0)
         task_config = self._make_task_config(baseline=96.0, threshold=0.04)
         self.assertFalse(verify_result(result, task_config))
+
+
+class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
+    """Tests that ProtocolConstrainedDataset.load() accepts meta_path kwarg.
+
+    AISBench's CustomDataset.__init__ calls ``self.load(**kwargs)`` passing
+    all dataset-config dict keys (path, meta_path, reader_cfg, ...).  The
+    override must accept these without TypeError.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Inject a fake ais_bench.benchmark.datasets module so the import
+        succeeds on the host without ais_bench installed."""
+        import sys
+        import types
+
+        fake_pkg = types.ModuleType("ais_bench")
+        fake_bench = types.ModuleType("ais_bench.benchmark")
+        fake_datasets = types.ModuleType("ais_bench.benchmark.datasets")
+
+        class _FakeCustomDataset:
+            def __init__(self, **kwargs):
+                self.path = kwargs.get("path", "")
+
+        fake_datasets.CustomDataset = _FakeCustomDataset
+        fake_pkg.benchmark = fake_bench
+        fake_bench.datasets = fake_datasets
+
+        cls._saved_modules = {}
+        for name, mod in [
+            ("ais_bench", fake_pkg),
+            ("ais_bench.benchmark", fake_bench),
+            ("ais_bench.benchmark.datasets", fake_datasets),
+        ]:
+            cls._saved_modules[name] = sys.modules.get(name)
+            sys.modules[name] = mod
+
+        # Force re-import of protocol_dataset with the fake base class.
+        cls._saved_protocol_dataset = sys.modules.pop(
+            "xtask.benchmarks.aisbench.protocol_dataset", None
+        )
+        from xtask.benchmarks.aisbench.protocol_dataset import (
+            ProtocolConstrainedDataset,
+        )
+
+        cls.ProtocolConstrainedDataset = ProtocolConstrainedDataset
+
+    @classmethod
+    def tearDownClass(cls):
+        import sys
+
+        for name, mod in cls._saved_modules.items():
+            if mod is not None:
+                sys.modules[name] = mod
+            else:
+                sys.modules.pop(name, None)
+        if cls._saved_protocol_dataset is not None:
+            sys.modules["xtask.benchmarks.aisbench.protocol_dataset"] = (
+                cls._saved_protocol_dataset
+            )
+        else:
+            sys.modules.pop("xtask.benchmarks.aisbench.protocol_dataset", None)
+
+    def _write_jsonl(self, path, rows):
+        with open(path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row) + "\n")
+
+    def test_load_accepts_meta_path_kwarg(self):
+        """load(meta_path=...) must read from meta_path, not crash."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl = os.path.join(tmpdir, "data.jsonl")
+            self._write_jsonl(jsonl, [
+                {"question": "q1", "extra_params": {"tools": []},
+                 "ground_truth": {"answer": "a1"}},
+            ])
+            ds = self.ProtocolConstrainedDataset(path="unused")
+            data = ds.load(meta_path=jsonl)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["question"], "q1")
+            self.assertIsInstance(data[0]["extra_params"], dict)
+
+    def test_load_accepts_extra_kwargs(self):
+        """load() must tolerate arbitrary kwargs from the config dict."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl = os.path.join(tmpdir, "data.jsonl")
+            self._write_jsonl(jsonl, [
+                {"question": "q1", "extra_params": {}, "ground_truth": {}},
+            ])
+            ds = self.ProtocolConstrainedDataset(path=jsonl)
+            data = ds.load(
+                meta_path="", reader_cfg={}, infer_cfg={}, eval_cfg={},
+                abbr="test", type=None,
+            )
+            self.assertEqual(len(data), 1)
+
+    def test_load_falls_back_to_self_path(self):
+        """When meta_path is empty/None, load() falls back to self.path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl = os.path.join(tmpdir, "data.jsonl")
+            self._write_jsonl(jsonl, [
+                {"question": "q1", "extra_params": {}, "ground_truth": {}},
+            ])
+            ds = self.ProtocolConstrainedDataset(path=jsonl)
+            data = ds.load(meta_path="")
+            self.assertEqual(len(data), 1)
+
+    def test_load_raises_without_path(self):
+        ds = self.ProtocolConstrainedDataset(path="")
+        with self.assertRaises(ValueError):
+            ds.load(meta_path=None)
+
+    def test_load_preserves_dict_types(self):
+        """extra_params and ground_truth must stay as dicts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl = os.path.join(tmpdir, "data.jsonl")
+            self._write_jsonl(jsonl, [
+                {"question": "q1", "extra_params": {"response_format": "json"},
+                 "ground_truth": {"expected_finish_reason": "stop"}},
+                {"question": "q2"},  # missing extra_params/ground_truth
+            ])
+            ds = self.ProtocolConstrainedDataset(path="")
+            data = ds.load(meta_path=jsonl)
+            self.assertIsInstance(data[0]["extra_params"], dict)
+            self.assertIsInstance(data[0]["ground_truth"], dict)
+            self.assertEqual(data[1]["extra_params"], {})
+            self.assertEqual(data[1]["ground_truth"], {})
 
 
 if __name__ == "__main__":

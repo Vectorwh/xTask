@@ -27,13 +27,13 @@ served_model_name: Qwen3-8B
 userid: 1048
 serving_wait_time: 10
 deployment:
-  master_host: 11.87.191.101
+  master_host: 0.0.0.0
   benchmark:
     runner_instance: master-0
     health_path: /health
   instances:
   - name: master-0
-    host: 11.87.191.101
+    host: 0.0.0.0
     role: master
     rank_start: 0
     device_ids: [0, 1]
