@@ -631,5 +631,170 @@ class TestProtocolAwareAPIChatWrapper(unittest.TestCase):
             self.assertEqual(instance.greet(), "hello")
 
 
+class TestProtocolResultPostProcess(unittest.TestCase):
+    """Tests for aisbench_postprocess.protocol_result_post_process."""
+
+    def _make_result_dir(self, tmpdir, date_dir_name="20261117_210000"):
+        """Create a protocol_results/<date>/ structure with a summary JSON."""
+        result_dir = os.path.join(tmpdir, "protocol_results", date_dir_name)
+        os.makedirs(result_dir, exist_ok=True)
+        return result_dir
+
+    def test_finds_flat_protocol_scores(self):
+        from xtask.benchmarks.aisbench.aisbench_postprocess import (
+            protocol_result_post_process,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_dir = self._make_result_dir(tmpdir)
+            summary = {
+                "Protocol_Pass_Rate": 100.0,
+                "Syntax_Valid_Rate": 100.0,
+                "Semantic_Accuracy": 87.5,
+            }
+            with open(os.path.join(result_dir, "summary.json"), "w") as f:
+                json.dump(summary, f)
+
+            result, output_dir = protocol_result_post_process(
+                {}, tmpdir, []
+            )
+            self.assertIsNotNone(result)
+            self.assertEqual(result["Protocol_Pass_Rate"], 100.0)
+            self.assertEqual(result["Semantic_Accuracy"], 87.5)
+            self.assertIn("20261117_210000", output_dir)
+
+    def test_finds_nested_protocol_scores(self):
+        from xtask.benchmarks.aisbench.aisbench_postprocess import (
+            protocol_result_post_process,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_dir = self._make_result_dir(tmpdir)
+            # ais_bench may nest: {dataset: {model: scores}}
+            nested = {
+                "protocol_constrained": {
+                    "xtask_protocol_vllm_api_general_chat": {
+                        "Protocol_Pass_Rate": 75.0,
+                        "Syntax_Valid_Rate": 90.0,
+                        "Semantic_Accuracy": 50.0,
+                    }
+                }
+            }
+            with open(os.path.join(result_dir, "result.json"), "w") as f:
+                json.dump(nested, f)
+
+            result, _ = protocol_result_post_process({}, tmpdir, [])
+            self.assertIsNotNone(result)
+            self.assertEqual(result["Protocol_Pass_Rate"], 75.0)
+
+    def test_missing_protocol_results_dir(self):
+        from xtask.benchmarks.aisbench.aisbench_postprocess import (
+            protocol_result_post_process,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, output_dir = protocol_result_post_process({}, tmpdir, [])
+            self.assertIsNone(result)
+            self.assertEqual(output_dir, "")
+
+    def test_no_scores_in_result_dir(self):
+        from xtask.benchmarks.aisbench.aisbench_postprocess import (
+            protocol_result_post_process,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._make_result_dir(tmpdir)
+            with open(
+                os.path.join(tmpdir, "protocol_results", "20261117_210000", "other.json"),
+                "w",
+            ) as f:
+                json.dump({"foo": "bar"}, f)
+
+            result, output_dir = protocol_result_post_process({}, tmpdir, [])
+            self.assertIsNone(result)
+            self.assertEqual(output_dir, "")
+
+
+class TestVerifyResultProtocolBranch(unittest.TestCase):
+    """Tests for result_processor.verify_result with metrics=protocol."""
+
+    def _make_task_config(self, baseline=None, threshold=0.04,
+                          protocol_tolerance=None, syntax_tolerance=None):
+        protocol_cfg = {
+            "case_type": "protocol",
+            "api_type": "vllm_api_general_chat",
+        }
+        if baseline is not None:
+            protocol_cfg["baseline"] = baseline
+            protocol_cfg["threshold"] = threshold
+        if protocol_tolerance is not None:
+            protocol_cfg["protocol_tolerance"] = protocol_tolerance
+        if syntax_tolerance is not None:
+            protocol_cfg["syntax_tolerance"] = syntax_tolerance
+        return {
+            "metrics": ["protocol"],
+            "benchmark": {"benchmark_type": "aisbench", "protocol": protocol_cfg},
+        }
+
+    def _make_result(self, protocol_pass=100.0, syntax=100.0, semantic=100.0):
+        return {
+            "benchmark_success": True,
+            "benchmark_protocol_result": {
+                "Protocol_Pass_Rate": protocol_pass,
+                "Syntax_Valid_Rate": syntax,
+                "Semantic_Accuracy": semantic,
+            },
+        }
+
+    def test_all_pass_returns_true(self):
+        from xtask.core.result_processor import verify_result
+
+        result = self._make_result()
+        task_config = self._make_task_config()
+        self.assertTrue(verify_result(result, task_config))
+
+    def test_missing_protocol_result_returns_false(self):
+        from xtask.core.result_processor import verify_result
+
+        result = {"benchmark_success": True}
+        task_config = self._make_task_config()
+        self.assertFalse(verify_result(result, task_config))
+
+    def test_low_protocol_rate_returns_false(self):
+        from xtask.core.result_processor import verify_result
+
+        result = self._make_result(protocol_pass=50.0)
+        task_config = self._make_task_config()
+        self.assertFalse(verify_result(result, task_config))
+
+    def test_low_syntax_rate_returns_false(self):
+        from xtask.core.result_processor import verify_result
+
+        result = self._make_result(syntax=80.0)
+        task_config = self._make_task_config()
+        self.assertFalse(verify_result(result, task_config))
+
+    def test_protocol_tolerance_allows_below_100(self):
+        from xtask.core.result_processor import verify_result
+
+        result = self._make_result(protocol_pass=95.0)
+        task_config = self._make_task_config(protocol_tolerance=5.0)
+        self.assertTrue(verify_result(result, task_config))
+
+    def test_baseline_check_passes(self):
+        from xtask.core.result_processor import verify_result
+
+        result = self._make_result(semantic=96.0)
+        task_config = self._make_task_config(baseline=96.0, threshold=0.04)
+        self.assertTrue(verify_result(result, task_config))
+
+    def test_baseline_check_fails(self):
+        from xtask.core.result_processor import verify_result
+
+        result = self._make_result(semantic=50.0)
+        task_config = self._make_task_config(baseline=96.0, threshold=0.04)
+        self.assertFalse(verify_result(result, task_config))
+
+
 if __name__ == "__main__":
     unittest.main()

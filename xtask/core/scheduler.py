@@ -3657,6 +3657,28 @@ def _run_benchmark_and_process(context):
                     service_runtimes=state.get("service_runtimes"),
                 )
                 _record_service_group_archive_path(state, output_dir)
+            elif "protocol" in task_config.get("metrics"):
+                logging.info("Start to process protocol benchmark result.")
+                from xtask.benchmarks.aisbench.aisbench_postprocess import (
+                    protocol_result_post_process,
+                )
+
+                context.result["benchmark_protocol_result"], output_dir = (
+                    protocol_result_post_process(
+                        task_config, context.output_file_path, init_entries
+                    )
+                )
+                if output_dir:
+                    context.result["benchmark_output_path"] = output_dir
+                _post_process_benchmark_rst(
+                    container_manager,
+                    container_config,
+                    task_config,
+                    context.output_file_path,
+                    output_dir,
+                    service_runtimes=state.get("service_runtimes"),
+                )
+                _record_service_group_archive_path(state, output_dir)
             else:
                 logging.debug(
                     "metrics is %s, skip accuracy task.",
