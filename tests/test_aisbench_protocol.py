@@ -10,11 +10,13 @@ Covers:
 - generate_aisbench_script.py: protocol section generation (switch on/off).
 """
 
+import ast
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 # Ensure generate_aisbench_script is loaded as a package attribute so that
@@ -554,6 +556,44 @@ class TestGenerateScriptProtocolSection(unittest.TestCase):
             self.assertIn("xtask_protocol_constrained_gen", content)
             self.assertIn("protocol_results", content)
 
+    @patch("xtask.benchmarks.aisbench.generate_aisbench_script.is_protocol_test_enabled", return_value=True)
+    @patch("xtask.benchmarks.aisbench.generate_aisbench_script.create_protocol_model_config")
+    @patch("xtask.benchmarks.aisbench.generate_aisbench_script.create_dataset_config_override")
+    def test_protocol_overrides_passed_and_no_sed(
+        self, _mock_dataset, mock_model, _mock_switch
+    ):
+        """Connection params are baked via overrides kwarg; no sed for protocol model."""
+        from xtask.benchmarks.aisbench.generate_aisbench_script import generate_aisbench_script
+
+        mock_model.return_value = "xtask_protocol_vllm_api_general_chat"
+        _mock_dataset.return_value = "xtask_protocol_constrained_gen"
+
+        config = self._make_task_config()
+        config["benchmark"]["protocol"]["output_len"] = 2048
+        config["benchmark"]["protocol"]["batch_size"] = 4
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generate_aisbench_script(config, tmpdir, "test.sh")
+            with open(os.path.join(tmpdir, "test.sh"), "r") as f:
+                content = f.read()
+
+            # create_protocol_model_config must receive overrides with all params
+            _, kwargs = mock_model.call_args
+            self.assertIn("overrides", kwargs)
+            ov = kwargs["overrides"]
+            self.assertEqual(ov["host_ip"], "127.0.0.1")
+            self.assertEqual(ov["host_port"], 8000)
+            self.assertEqual(ov["model"], "test-model")
+            self.assertEqual(ov["path"], "/data/model")
+            self.assertEqual(ov["max_out_len"], 2048)
+            self.assertEqual(ov["batch_size"], 4)
+            self.assertEqual(ov["request_rate"], 0)
+            self.assertEqual(ov["temperature"], 0)
+
+            # No sed commands targeting the protocol model config file
+            self.assertNotIn("sed -i", content.split("# 6.2")[1].split("# 6.4")[0]
+                             if "# 6.2" in content and "# 6.4" in content else "no-sed")
+
     def test_no_protocol_metrics_skips(self):
         from xtask.benchmarks.aisbench.generate_aisbench_script import generate_aisbench_script
 
@@ -568,6 +608,133 @@ class TestGenerateScriptProtocolSection(unittest.TestCase):
                 content = f.read()
             self.assertNotIn("协议一致性", content)
             self.assertNotIn("xtask_protocol_", content)
+
+
+class TestCreateProtocolModelConfigOverrides(unittest.TestCase):
+    """Tests that connection params are baked into the AST, not left to sed."""
+
+    _SOURCE_CONFIG = '''\
+from ais_bench.benchmark.models.vllm_api_general_chat import VLLMCustomAPIChat
+
+models = [
+    dict(
+        abbr='vllm-api-general-chat',
+        attr='service',
+        model='placeholder-model',
+        path='/placeholder/path',
+        host_ip='localhost',
+        host_port=8080,
+        max_out_len=512,
+        batch_size=1,
+        request_rate=-1,
+        temperature=0.6,
+        type=VLLMCustomAPIChat,
+        generation_kwargs=dict(do_sample=True),
+    ),
+]
+'''
+
+    @staticmethod
+    def _extract_model_dict(file_path):
+        """Extract keyword values from the first dict() in models = [...] via AST."""
+        tree = ast.parse(Path(file_path).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if not (isinstance(target, ast.Name) and target.id == "models"):
+                    continue
+                if not isinstance(node.value, ast.List) or not node.value.elts:
+                    continue
+                call = node.value.elts[0]
+                if not isinstance(call, ast.Call):
+                    continue
+
+                def extract_value(value_node):
+                    # Nested dict(...) call → recurse into its keywords.
+                    if (
+                        isinstance(value_node, ast.Call)
+                        and isinstance(value_node.func, ast.Name)
+                        and value_node.func.id == "dict"
+                    ):
+                        nested = {}
+                        for nkw in value_node.keywords:
+                            if nkw.arg:
+                                nested[nkw.arg] = extract_value(nkw.value)
+                        return nested
+                    try:
+                        return ast.literal_eval(value_node)
+                    except (ValueError, SyntaxError):
+                        return ast.unparse(value_node)
+
+                result = {}
+                for kw in call.keywords:
+                    if kw.arg is None:
+                        continue
+                    result[kw.arg] = extract_value(kw.value)
+                return result
+        return {}
+
+    def _make_source(self, tmpdir):
+        root = Path(tmpdir) / "ais"
+        config = (
+            root
+            / "ais_bench"
+            / "benchmark"
+            / "configs"
+            / "models"
+            / "vllm_api"
+            / "vllm_api_general_chat.py"
+        )
+        config.parent.mkdir(parents=True)
+        config.write_text(self._SOURCE_CONFIG, encoding="utf-8")
+        return root
+
+    def test_overrides_baked_into_ast(self):
+        """All connection params appear in the generated config with correct values."""
+        from xtask.benchmarks.aisbench import generate_aisbench_script as generator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ais_root = self._make_source(tmpdir)
+            overrides = {
+                "host_ip": "0.0.0.0",
+                "host_port": 8800,
+                "model": "Qwen3-8B",
+                "path": "/export/home/models/Qwen3-8B",
+                "max_out_len": 4096,
+                "batch_size": 8,
+                "request_rate": 0,
+                "temperature": 0,
+            }
+            with mock.patch.object(
+                generator,
+                "_aisbench_dataset_config_roots",
+                return_value=[ais_root],
+            ):
+                name = generator.create_protocol_model_config(
+                    "vllm_api_general_chat",
+                    tmpdir,
+                    stream_verify=True,
+                    overrides=overrides,
+                    generation_kwargs={"top_k": 50},
+                )
+
+            self.assertEqual(name, "xtask_protocol_vllm_api_general_chat")
+            generated = Path(tmpdir) / "aisbench_configs" / "models" / f"{name}.py"
+            self.assertTrue(generated.exists())
+
+            model_dict = self._extract_model_dict(generated)
+            self.assertEqual(model_dict["host_ip"], "0.0.0.0")
+            self.assertEqual(model_dict["host_port"], 8800)
+            self.assertEqual(model_dict["model"], "Qwen3-8B")
+            self.assertEqual(model_dict["path"], "/export/home/models/Qwen3-8B")
+            self.assertEqual(model_dict["max_out_len"], 4096)
+            self.assertEqual(model_dict["batch_size"], 8)
+            self.assertEqual(model_dict["request_rate"], 0)
+            self.assertEqual(model_dict["temperature"], 0)
+            self.assertTrue(model_dict["stream_verify"])
+            self.assertEqual(model_dict["generation_kwargs"]["top_k"], 50)
+            self.assertEqual(model_dict["generation_kwargs"]["do_sample"], True)
 
 
 class TestProtocolAwareAPIChatWrapper(unittest.TestCase):

@@ -234,11 +234,19 @@ def _add_last_inferencer_import(tree):
 
 class _ProtocolModelTypeOverride(ast.NodeTransformer):
     """Replace VLLMCustomAPIChat/VLLMCustomAPIChatStream with ProtocolAwareAPIChat
-    in an AISBench model config, inject stream_verify, and update generation_kwargs."""
+    in an AISBench model config, inject stream_verify, bake connection params,
+    and update generation_kwargs.
 
-    def __init__(self, stream_verify=False, generation_kwargs=None):
+    Why overrides: ast.unparse() produces single-line output where sed's greedy
+    ``.*`` patterns destroy fields after host_ip. Baking all connection params
+    (host_ip, host_port, model, path, max_out_len, batch_size, request_rate,
+    temperature) directly into the AST eliminates the need for sed entirely.
+    """
+
+    def __init__(self, stream_verify=False, generation_kwargs=None, overrides=None):
         self.stream_verify = stream_verify
         self.generation_kwargs = generation_kwargs or {}
+        self.overrides = overrides or {}
         self.replacements = 0
 
     def _replace_type(self, type_node):
@@ -258,6 +266,15 @@ class _ProtocolModelTypeOverride(ast.NodeTransformer):
         except SyntaxError:
             return ast.Constant(value=str(value))
 
+    @staticmethod
+    def _set_keyword(node, arg, value_ast):
+        """Set or replace a keyword in a dict(...) Call, preserving order."""
+        for i, item in enumerate(node.keywords):
+            if item.arg == arg:
+                node.keywords[i] = ast.keyword(arg=arg, value=value_ast)
+                return
+        node.keywords.append(ast.keyword(arg=arg, value=value_ast))
+
     def _update_generation_kwargs(self, gk_call_node):
         """Update keywords inside generation_kwargs=dict(...) AST node."""
         if not self.generation_kwargs:
@@ -275,10 +292,14 @@ class _ProtocolModelTypeOverride(ast.NodeTransformer):
         keywords = {item.arg: item for item in node.keywords if item.arg}
         if "type" in keywords:
             keywords["type"].value = self._replace_type(keywords["type"].value)
-        # Inject stream_verify kwarg into the model dict.
+        # Model dict: has both abbr and type keywords.
         if "abbr" in keywords and "type" in keywords:
-            node.keywords.append(
-                ast.keyword(arg="stream_verify", value=ast.Constant(value=self.stream_verify))
+            # Bake all connection params into the model dict.
+            for key, value in self.overrides.items():
+                self._set_keyword(node, key, self._value_to_ast(value))
+            # Inject stream_verify kwarg into the model dict.
+            self._set_keyword(
+                node, "stream_verify", ast.Constant(value=self.stream_verify)
             )
         # Update generation_kwargs values baked into the AST.
         if "generation_kwargs" in keywords:
@@ -337,13 +358,15 @@ def create_protocol_model_config(
     stream_verify=False,
     config_dir_name="aisbench_configs",
     generation_kwargs=None,
+    overrides=None,
 ):
     """Create a protocol-aware AISBench model config from a base api_type config.
 
     Copies the base vllm_api config, replaces the model class with
-    ProtocolAwareAPIChat, injects stream_verify + generation_kwargs, and
-    adds the xtask import. All parameter overrides are baked into the AST
-    so no sed-based post-editing is needed for generation_kwargs.
+    ProtocolAwareAPIChat, injects stream_verify + generation_kwargs, bakes
+    connection params (host_ip, host_port, model, path, max_out_len, etc.),
+    and adds the xtask import. All parameter overrides are baked into the AST
+    so no sed-based post-editing is needed.
     """
     _validate_config_name(api_type, "api_type")
     # Model configs live under configs/models/vllm_api/, not configs/datasets/.
@@ -366,6 +389,7 @@ def create_protocol_model_config(
     transformer = _ProtocolModelTypeOverride(
         stream_verify=stream_verify,
         generation_kwargs=generation_kwargs,
+        overrides=overrides,
     )
     tree = transformer.visit(tree)
     if transformer.replacements == 0:
@@ -875,9 +899,25 @@ def generate_aisbench_script(
             protocol_api_type = protocol_cfg.get("api_type", "vllm_api_general_chat")
 
             # 6.1 生成协议感知模型配置（替换 VLLMCustomAPIChat → ProtocolAwareAPIChat）
-            # generation_kwargs 在 AST 阶段直接烘焙进配置，避免 sed 行号替换在
-            # AST unparse 单行格式上失效。
+            # 所有参数（host_ip/host_port/model/path/max_out_len/batch_size/
+            # request_rate/temperature/generation_kwargs/stream_verify）在 AST
+            # 阶段直接烘焙进配置。ast.unparse() 生成单行格式，sed 的贪婪 .* 匹配
+            # 会把 host_ip 之后的所有字段吃掉，因此协议模型配置完全不使用 sed。
             protocol_generation_kwargs = protocol_cfg.get("generation_kwargs", {})
+            protocol_output_len = protocol_cfg.get("output_len", 4096)
+            protocol_batch_size = protocol_cfg.get("batch_size", 8)
+            protocol_request_rate = protocol_cfg.get("request_rate", 0)
+            protocol_temperature = protocol_cfg.get("temperature", 0)
+            protocol_overrides = {
+                "host_ip": api_address,
+                "host_port": api_port,
+                "model": model_name,
+                "path": model_path_inside,
+                "max_out_len": protocol_output_len,
+                "batch_size": protocol_batch_size,
+                "request_rate": protocol_request_rate,
+                "temperature": protocol_temperature,
+            }
             try:
                 protocol_model_name = create_protocol_model_config(
                     protocol_api_type,
@@ -885,6 +925,7 @@ def generate_aisbench_script(
                     stream_verify=stream_verify,
                     config_dir_name=config_dir_name,
                     generation_kwargs=protocol_generation_kwargs,
+                    overrides=protocol_overrides,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 shell_content.append(f'echo "错误：生成协议模型配置失败 - {exc}" >&2')
@@ -896,38 +937,7 @@ def generate_aisbench_script(
                     f"{output_file_path_incontainer}/{config_dir_name}/models/"
                     f"{protocol_model_name}.py"
                 )
-                # 6.2 修改模型配置核心参数（同 acc/perf 的 sed 方式）
-                shell_content.append("\n# 6.2 修改协议模型配置参数")
-                shell_content.append(
-                    f'sed -i.bak "s/host_ip\\s*=\\s*.*,/host_ip=\'{api_address}\',/g" {protocol_model_file}'
-                )
-                shell_content.append(
-                    f'sed -i "s/host_port\\s*=\\s*.*,/host_port={api_port},/g" {protocol_model_file}'
-                )
-                shell_content.append(
-                    f'sed -i "s/model\\s*=\\s*.*,/model=\'{model_name}\',/g" {protocol_model_file}'
-                )
-                shell_content.append(
-                    f'''sed -i -E "s#^([[:space:]]*)path[[:space:]]*=.*,#\\1path='{model_path_inside}',#" {protocol_model_file}'''
-                )
-                protocol_output_len = protocol_cfg.get("output_len", 4096)
-                protocol_batch_size = protocol_cfg.get("batch_size", 8)
-                protocol_request_rate = protocol_cfg.get("request_rate", 0)
-                protocol_temperature = protocol_cfg.get("temperature", 0)
-                shell_content.append(
-                    f'sed -i "s/max_out_len\\s*=\\s*.*,/max_out_len={protocol_output_len},/g" {protocol_model_file}'
-                )
-                shell_content.append(
-                    f'sed -i "s/batch_size\\s*=\\s*.*,/batch_size={protocol_batch_size},/g" {protocol_model_file}'
-                )
-                shell_content.append(
-                    f'sed -i "s/request_rate\\s*=\\s*.*,/request_rate={protocol_request_rate},/g" {protocol_model_file}'
-                )
-                shell_content.append(
-                    f'sed -i "s/temperature\\s*=\\s*.*,/temperature={protocol_temperature},/g" {protocol_model_file}'
-                )
-
-                # 6.3 generation_kwargs 已在 AST 阶段烘焙进配置文件，无需 sed 替换
+                # 6.2 连接参数已在 AST 阶段烘焙进配置文件，无需 sed 替换
 
                 # 6.4 数据集配置（protocol_constrained_gen + 路径覆写）
                 protocol_dataset_path = protocol_cfg.get("dataset_path") or task_config.get(
