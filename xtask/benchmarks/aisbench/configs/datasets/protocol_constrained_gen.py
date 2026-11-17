@@ -13,13 +13,21 @@ Loads a JSONL file where each line has:
 The dataset path is overridden at runtime by xTask's
 create_dataset_config_override() to point at the user-provided JSONL.
 
-NOTE: ProtocolConstrainedDataset / ProtocolConstrainedInferencer are defined
-in xtask.benchmarks.aisbench.protocol_dataset (a regular module), NOT here.
+NOTE: ProtocolConstrainedDataset is defined in
+xtask.benchmarks.aisbench.protocol_dataset (a regular module), NOT here.
 mmengine's _parse_lazy_import forbids subclassing lazily-imported names at
 module level (class Foo(Bar) triggers LazyAttr.__call__ -> RuntimeError).
-Referencing them as type= values below is lazy-import-safe.
+Referencing it as a type= value below is lazy-import-safe.
+
+The default GenInferencer is used (no custom inferencer).  The reader_cfg
+already separates input_columns (question, max_out_len, extra_params) from
+output_column (ground_truth), so ground_truth is never sent to the model and
+extra_params flows through to model.generate() as a kwarg.  A custom
+inferencer that bypassed the status_counter / output_handler caused the
+pipeline to hang, so it was removed.
 """
 
+from ais_bench.benchmark.openicl.icl_inferencer import GenInferencer
 from ais_bench.benchmark.openicl.icl_prompt_template import PromptTemplate
 from ais_bench.benchmark.openicl.icl_retriever import ZeroRetriever
 
@@ -28,7 +36,6 @@ from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
 )
 from xtask.benchmarks.aisbench.protocol_dataset import (
     ProtocolConstrainedDataset,
-    ProtocolConstrainedInferencer,
 )
 
 protocol_constrained_reader_cfg = dict(
@@ -42,7 +49,7 @@ protocol_constrained_infer_cfg = dict(
         template='{question}',
     ),
     retriever=dict(type=ZeroRetriever),
-    inferencer=dict(type=ProtocolConstrainedInferencer),
+    inferencer=dict(type=GenInferencer),
 )
 
 protocol_constrained_eval_cfg = dict(
