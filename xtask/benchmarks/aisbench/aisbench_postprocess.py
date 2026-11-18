@@ -487,6 +487,86 @@ def aisbench_acc_post_process(task_config, output_path, init_entries):
     return result, (os.path.join(output_path, aisbench_output_dir))
 
 
+def _extract_protocol_scores(data):
+    """Recursively search a JSON-like structure for protocol evaluation scores.
+
+    ais_bench eval mode may nest the evaluator output under
+    ``{dataset_abbr: {model_abbr: scores}}`` or write it flat. This helper
+    finds the first dict containing ``Protocol_Pass_Rate``.
+    """
+    if not isinstance(data, dict):
+        return None
+    if "Protocol_Pass_Rate" in data:
+        return data
+    for value in data.values():
+        found = _extract_protocol_scores(value)
+        if found is not None:
+            return found
+    return None
+
+
+def protocol_result_post_process(task_config, output_path, init_entries):
+    """Post-process protocol test results from ais_bench eval output.
+
+    ais_bench ``--mode eval`` writes results under
+    ``<output_path>/protocol_results/<YYYYMMDD_HHMMSS>/``. This function
+    locates the newest date directory, searches for JSON files containing
+    protocol evaluation scores (Protocol_Pass_Rate, Syntax_Valid_Rate,
+    Semantic_Accuracy), and returns the parsed score dict.
+
+    Returns:
+        (result_dict, output_dir) on success; (None, "") on failure.
+    """
+    protocol_results_root = os.path.join(output_path, "protocol_results")
+    if not os.path.isdir(protocol_results_root):
+        logging.error("protocol_results directory not found: %s", protocol_results_root)
+        return None, ""
+
+    date_pattern = re.compile(r'^\d{8}_\d{6}$')
+    date_dirs = []
+    try:
+        for entry in os.listdir(protocol_results_root):
+            entry_path = os.path.join(protocol_results_root, entry)
+            if os.path.isdir(entry_path) and date_pattern.match(entry):
+                date_dirs.append(entry_path)
+    except OSError:
+        logging.error("Failed to list protocol_results directory: %s", protocol_results_root)
+        return None, ""
+
+    if not date_dirs:
+        logging.error("No date directory found under %s", protocol_results_root)
+        return None, ""
+
+    date_dirs.sort(reverse=True)
+    result_dir = date_dirs[0]
+    logging.info("protocol test result directory: %s", result_dir)
+
+    protocol_result = None
+    for root, _dirs, files in os.walk(result_dir):
+        for fname in sorted(files):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            found = _extract_protocol_scores(data)
+            if found is not None:
+                protocol_result = found
+                logging.info("Protocol scores loaded from %s", fpath)
+                break
+        if protocol_result is not None:
+            break
+
+    if protocol_result is None:
+        logging.error("No protocol evaluation scores (Protocol_Pass_Rate) found under %s", result_dir)
+        return None, ""
+
+    logging.info("Protocol test results: %s", json.dumps(protocol_result, ensure_ascii=False))
+    return protocol_result, result_dir
+
 
 def find_aisbench_directory(directory_path=".", init_entries=list(), aisbench_type="perf"):
     """
