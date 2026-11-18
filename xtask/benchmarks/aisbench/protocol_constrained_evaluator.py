@@ -35,6 +35,60 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Content extraction (reasoning may be mixed into content)
+# ---------------------------------------------------------------------------
+
+def _extract_answer_content(content: str) -> str:
+    """Best-effort extraction of the answer portion from content that may
+    include reasoning text before the actual answer.
+
+    When the serving framework does not separate ``reasoning_content`` from
+    ``content``, the model's thinking text and the final answer both land in
+    ``content``.  Syntax validation (JSON Schema, regex fullmatch) must
+    operate on the answer portion, not the reasoning preamble.
+
+    Strategies (in order):
+        1. Markdown code block: return the last ```...``` block content.
+        2. Content itself is valid JSON: return as-is.
+        3. Trailing JSON: content ends with a parseable JSON object/array
+           (common pattern: ``reasoning...\\n\\n\\n{...}``).
+        4. Otherwise: return content unchanged.
+    """
+    if not content or not content.strip():
+        return content
+
+    # Strategy 1: markdown code block (```json ... ``` or ``` ... ```)
+    fence_matches = re.findall(
+        r"```(?:[a-zA-Z0-9_+-]*)?\s*\n?(.*?)\n?\s*```", content, re.DOTALL
+    )
+    if fence_matches:
+        return fence_matches[-1].strip()
+
+    stripped = content.strip()
+
+    # Strategy 2: content itself is valid JSON
+    try:
+        json.loads(stripped)
+        return stripped
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Strategy 3: trailing JSON object/array
+    if stripped.endswith("}") or stripped.endswith("]"):
+        for i in range(len(stripped) - 1, -1, -1):
+            if stripped[i] not in "{[":
+                continue
+            candidate = stripped[i:]
+            try:
+                json.loads(candidate)
+                return candidate
+            except json.JSONDecodeError:
+                continue
+
+    return content
+
+
+# ---------------------------------------------------------------------------
 # Layer 1: Protocol compliance
 # ---------------------------------------------------------------------------
 
@@ -103,15 +157,28 @@ def _validate_json_schema(content: str, schema: Dict[str, Any]) -> Dict[str, Any
 
 
 def _validate_regex(content: str, pattern: str) -> Dict[str, Any]:
-    """Validate content against a full-match regex pattern."""
+    """Validate content against a regex pattern.
+
+    First tries ``re.fullmatch`` (strict: content must be exactly the
+    constrained string).  If that fails, falls back to ``re.search``
+    (lenient: finds the constrained string anywhere in content, useful
+    when reasoning text surrounds the actual answer).
+    """
     try:
         matched = bool(re.fullmatch(pattern, content))
     except re.error as exc:
         return {"pass": False, "errors": [f"invalid regex pattern: {exc}"], "parsed": None}
-    if not matched:
-        preview = content[:80] + "..." if len(content) > 80 else content
-        return {"pass": False, "errors": [f"regex fullmatch failed, content: {preview}"], "parsed": None}
-    return {"pass": True, "errors": [], "parsed": content}
+    if matched:
+        return {"pass": True, "errors": [], "parsed": content}
+    # Lenient fallback: search for the pattern anywhere in the content.
+    try:
+        search_match = re.search(pattern, content)
+    except re.error:
+        search_match = None
+    if search_match:
+        return {"pass": True, "errors": [], "parsed": search_match.group(0)}
+    preview = content[:80] + "..." if len(content) > 80 else content
+    return {"pass": False, "errors": [f"regex fullmatch failed, content: {preview}"], "parsed": None}
 
 
 def _validate_tool_calls(
@@ -173,20 +240,29 @@ def check_syntax(
     """Check syntax/schema validity for a single prediction.
 
     Dispatches to _validate_json_schema / _validate_regex / _validate_tool_calls
-    based on which key is present in ground_truth.
+    based on which key has a **non-null** value in ground_truth.
+
+    .. note::
+        HuggingFace ``Dataset.from_list()`` unions all dict keys across rows
+        and fills missing values with ``None``.  Therefore ``ground_truth``
+        may contain keys like ``schema``/``regex`` with ``None`` values for
+        cases that don't use them.  We must check for non-null values, not
+        mere key presence, to dispatch correctly.
 
     Returns:
         {"pass": bool, "errors": [str, ...], "parsed": Any}
     """
-    content = message.get("content") or ""
+    raw_content = message.get("content") or ""
+    # Extract the answer portion when reasoning is mixed into content.
+    content = _extract_answer_content(raw_content)
 
-    if "schema" in ground_truth:
+    if ground_truth.get("schema"):
         return _validate_json_schema(content, ground_truth["schema"])
-    if "regex" in ground_truth:
+    if ground_truth.get("regex"):
         return _validate_regex(content, ground_truth["regex"])
-    if "tool_calls" in ground_truth:
+    if ground_truth.get("tool_calls"):
         return _validate_tool_calls(message.get("tool_calls") or [], ground_truth["tool_calls"])
-    if "grammar" in ground_truth:
+    if ground_truth.get("grammar"):
         # EBNF grammar validation requires the serving engine's parser;
         # here we only verify the content is non-empty (best-effort).
         if not content.strip():
@@ -211,10 +287,15 @@ def check_semantic(
         - ground_truth["answer"]: exact match against parsed["answer"] (dict)
           or the full parsed value (non-dict).
         - ground_truth["answer_regex"]: regex search against stringified answer.
+
+    .. note::
+        Uses ``.get() is not None`` / truthy checks instead of ``in`` because
+        HuggingFace ``Dataset.from_list()`` unions all dict keys across rows,
+        filling missing values with ``None``.
     """
     errors: List[str] = []
 
-    if "answer" in ground_truth:
+    if ground_truth.get("answer") is not None:
         expected = ground_truth["answer"]
         if isinstance(parsed, dict):
             actual = parsed.get("answer")
@@ -223,7 +304,7 @@ def check_semantic(
         if actual != expected:
             errors.append(f"answer mismatch: got {actual!r}, expected {expected!r}")
 
-    if "answer_regex" in ground_truth:
+    if ground_truth.get("answer_regex"):
         pattern = ground_truth["answer_regex"]
         answer_str = str(parsed.get("answer", "") if isinstance(parsed, dict) else parsed)
         if not re.search(pattern, answer_str):

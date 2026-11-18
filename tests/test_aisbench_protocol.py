@@ -337,6 +337,200 @@ class TestCheckSemantic(unittest.TestCase):
         self.assertTrue(result["pass"])
 
 
+class TestExtractAnswerContent(unittest.TestCase):
+    """Tests for _extract_answer_content (reasoning/content separation)."""
+
+    def test_plain_content_unchanged(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _extract_answer_content
+
+        self.assertEqual(_extract_answer_content("13812345678"), "13812345678")
+
+    def test_markdown_json_code_block(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _extract_answer_content
+
+        content = '一些推理文本\n\n```json\n{"answer": 42}\n```'
+        result = _extract_answer_content(content)
+        self.assertEqual(json.loads(result), {"answer": 42})
+
+    def test_bare_code_block(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _extract_answer_content
+
+        content = '推理\n```\n1 + 2\n```'
+        result = _extract_answer_content(content)
+        self.assertEqual(result, "1 + 2")
+
+    def test_trailing_json_after_reasoning(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _extract_answer_content
+
+        content = '推理文本\n\n\n{"answer": 126}'
+        result = _extract_answer_content(content)
+        self.assertEqual(json.loads(result), {"answer": 126})
+
+    def test_content_is_json(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _extract_answer_content
+
+        result = _extract_answer_content('{"answer": 42}')
+        self.assertEqual(json.loads(result), {"answer": 42})
+
+    def test_no_extraction_possible(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _extract_answer_content
+
+        content = "just plain reasoning text with no answer"
+        self.assertEqual(_extract_answer_content(content), content)
+
+    def test_empty_content(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _extract_answer_content
+
+        self.assertEqual(_extract_answer_content(""), "")
+
+
+class TestNullKeyGroundTruth(unittest.TestCase):
+    """Tests for HuggingFace Dataset union behavior.
+
+    Dataset.from_list() unions all dict keys across rows and fills missing
+    values with None.  ground_truth dicts therefore contain ALL keys
+    (schema, regex, grammar, answer, ...) with None for unused ones.
+    check_syntax / check_semantic must dispatch on non-null values.
+    """
+
+    _ALL_KEYS = [
+        "expected_finish_reason", "schema", "answer", "regex",
+        "grammar", "answer_regex", "require_reasoning",
+    ]
+
+    def _union_gt(self, **active):
+        gt = {k: None for k in self._ALL_KEYS}
+        gt.update(active)
+        return gt
+
+    def test_syntax_regex_with_null_schema(self):
+        """Regex case must dispatch to _validate_regex even when schema=None."""
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_syntax
+
+        msg = {"content": "13812345678"}
+        gt = self._union_gt(regex="1[3-9][0-9]{9}")
+        result = check_syntax(msg, gt)
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["parsed"], "13812345678")
+
+    def test_syntax_schema_with_null_regex(self):
+        """Schema case must dispatch to _validate_json_schema even when regex=None."""
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_syntax
+
+        msg = {"content": '{"answer": 42}'}
+        gt = self._union_gt(
+            schema={"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}
+        )
+        result = check_syntax(msg, gt)
+        self.assertTrue(result["pass"])
+
+    def test_syntax_grammar_with_all_nulls(self):
+        """Grammar case must dispatch to grammar check."""
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_syntax
+
+        msg = {"content": "1 + 2"}
+        gt = self._union_gt(grammar=True)
+        result = check_syntax(msg, gt)
+        self.assertTrue(result["pass"])
+
+    def test_semantic_answer_null_skipped(self):
+        """answer=None must NOT trigger answer comparison."""
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_semantic
+
+        result = check_semantic({"answer": 42}, self._union_gt())
+        self.assertTrue(result["pass"])
+
+    def test_semantic_answer_present(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_semantic
+
+        result = check_semantic({"answer": 42}, self._union_gt(answer=42))
+        self.assertTrue(result["pass"])
+
+    def test_semantic_answer_regex_null_skipped(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_semantic
+
+        result = check_semantic("some text", self._union_gt())
+        self.assertTrue(result["pass"])
+
+    def test_score_predictions_with_union_references(self):
+        """End-to-end: unioned references (all keys, None for unused) must
+        produce correct metrics — not 0% across the board."""
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import score_predictions
+
+        preds = [
+            {"content": "13812345678", "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"},
+            {"content": '{"answer": 42}', "reasoning_content": "", "tool_calls": [], "finish_reason": "stop"},
+        ]
+        refs = [
+            self._union_gt(regex="1[3-9][0-9]{9}"),
+            self._union_gt(
+                schema={"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]},
+                answer=42,
+            ),
+        ]
+        result = score_predictions(preds, refs)
+        self.assertEqual(result["Syntax_Valid_Rate"], 100.0)
+        self.assertEqual(result["Semantic_Accuracy"], 100.0)  # regex case: no answer check → pass; schema case: answer matches
+
+
+class TestRegexSearchFallback(unittest.TestCase):
+    """Tests for _validate_regex search fallback."""
+
+    def test_fullmatch_strict(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _validate_regex
+
+        result = _validate_regex("13812345678", "1[3-9][0-9]{9}")
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["parsed"], "13812345678")
+
+    def test_search_fallback_with_surrounding_text(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _validate_regex
+
+        content = "好的，这是一个号码：13812345678，请查收。"
+        result = _validate_regex(content, "1[3-9][0-9]{9}")
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["parsed"], "13812345678")
+
+    def test_no_match_fails(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _validate_regex
+
+        result = _validate_regex("no phone here", "1[3-9][0-9]{9}")
+        self.assertFalse(result["pass"])
+
+
+class TestCheckSyntaxContentExtraction(unittest.TestCase):
+    """Tests for check_syntax with reasoning mixed into content."""
+
+    def test_json_in_code_block(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_syntax
+
+        content = '让我想想...\n\n```json\n{"answer": 42}\n```'
+        msg = {"content": content}
+        gt = {"schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}}
+        result = check_syntax(msg, gt)
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["parsed"]["answer"], 42)
+
+    def test_trailing_json_after_reasoning(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_syntax
+
+        content = '推理过程...\n\n\n{"answer": 126}'
+        msg = {"content": content}
+        gt = {"schema": {"type": "object", "properties": {"answer": {"type": "number"}}, "required": ["answer"]}}
+        result = check_syntax(msg, gt)
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["parsed"]["answer"], 126)
+
+    def test_regex_with_reasoning_prefix(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import check_syntax
+
+        content = "好的，让我生成一个号码：13812345678"
+        msg = {"content": content}
+        gt = {"regex": "1[3-9][0-9]{9}"}
+        result = check_syntax(msg, gt)
+        self.assertTrue(result["pass"])
+
+
 class TestScorePredictions(unittest.TestCase):
     """Tests for aggregate score_predictions."""
 
