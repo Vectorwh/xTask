@@ -54,7 +54,7 @@ def _strip_nulls(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _strip_nulls(v) for k, v in obj.items() if v is not None}
     if isinstance(obj, list):
-        return [_strip_nulls(item) for item in obj]
+        return [_strip_nulls(item) for item in obj if item is not None]
     return obj
 
 

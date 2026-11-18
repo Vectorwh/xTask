@@ -1602,5 +1602,437 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
             self.assertIsInstance(ep2["tool_choice"], dict)
 
 
+class TestParseExtraParams(unittest.TestCase):
+    """Tests for parse_extra_params pure helper."""
+
+    def test_dict_passthrough(self):
+        from xtask.benchmarks.aisbench.protocol_api import parse_extra_params
+
+        result = parse_extra_params({"tools": []})
+        self.assertEqual(result, {"tools": []})
+
+    def test_json_string_deserialized(self):
+        from xtask.benchmarks.aisbench.protocol_api import parse_extra_params
+
+        result = parse_extra_params('{"tool_choice": "none"}')
+        self.assertEqual(result, {"tool_choice": "none"})
+
+    def test_invalid_json_returns_none(self):
+        from xtask.benchmarks.aisbench.protocol_api import parse_extra_params
+
+        self.assertIsNone(parse_extra_params("not json"))
+
+    def test_none_returns_none(self):
+        from xtask.benchmarks.aisbench.protocol_api import parse_extra_params
+
+        self.assertIsNone(parse_extra_params(None))
+
+    def test_non_dict_returns_none(self):
+        from xtask.benchmarks.aisbench.protocol_api import parse_extra_params
+
+        self.assertIsNone(parse_extra_params(42))
+        self.assertIsNone(parse_extra_params([1, 2]))
+        # Valid JSON but not a dict
+        self.assertIsNone(parse_extra_params('"just a string"'))
+        self.assertIsNone(parse_extra_params('[1, 2, 3]'))
+
+
+class TestBuildGenerationKwargs(unittest.TestCase):
+    """Tests for ProtocolAwareMixin._build_generation_kwargs."""
+
+    def _make_adapter(self, generation_kwargs=None, overrides=None):
+        from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareMixin
+
+        class FakeAdapter(ProtocolAwareMixin):
+            pass
+
+        adapter = FakeAdapter()
+        adapter.generation_kwargs = generation_kwargs or {}
+        adapter.model = "test-model"
+        if overrides:
+            adapter._generation_overrides = overrides
+        return adapter
+
+    def test_basic_kwargs(self):
+        adapter = self._make_adapter(
+            generation_kwargs={"do_sample": True},
+            overrides={"temperature": 0.7},
+        )
+        kwargs = adapter._build_generation_kwargs(512, None)
+        self.assertEqual(kwargs["max_tokens"], 512)
+        self.assertEqual(kwargs["model"], "test-model")
+        self.assertEqual(kwargs["do_sample"], True)
+        self.assertEqual(kwargs["temperature"], 0.7)
+
+    def test_protocol_fields_injected(self):
+        adapter = self._make_adapter()
+        extra = {"tools": [{"type": "function"}], "response_format": {"type": "json"}}
+        kwargs = adapter._build_generation_kwargs(256, extra)
+        self.assertIn("tools", kwargs)
+        self.assertIn("response_format", kwargs)
+
+    def test_no_instance_mutation(self):
+        """_build_generation_kwargs must not mutate self.generation_kwargs."""
+        adapter = self._make_adapter(generation_kwargs={"do_sample": True})
+        original = dict(adapter.generation_kwargs)
+        adapter._build_generation_kwargs(512, {"tools": []})
+        self.assertEqual(adapter.generation_kwargs, original)
+
+    def test_overrides_setdefault(self):
+        """Existing per-request kwargs win over construction-time overrides."""
+        adapter = self._make_adapter(
+            generation_kwargs={"temperature": 0.5},
+            overrides={"temperature": 0.9},
+        )
+        kwargs = adapter._build_generation_kwargs(512, None)
+        # generation_kwargs value (0.5) wins over override (0.9)
+        self.assertEqual(kwargs["temperature"], 0.5)
+
+
+class TestProtocolAwareAdapterIntegration(unittest.TestCase):
+    """Integration tests for the protocol-aware adapter with fake ais_bench.
+
+    Injects fake ais_bench modules so the full _generate flow can be tested
+    on the host without ais_bench installed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        import types
+
+        class FakeMiddleData:
+            def __init__(self):
+                self.output = ""
+                self.output_reasoning = ""
+                self.data_id = -1
+
+            def get_output(self):
+                if self.output_reasoning:
+                    return self.output_reasoning + "\n\n" + self.output
+                return self.output
+
+        class FakeBaseClient:
+            def __init__(self, url, retry, **kwargs):
+                self.url = url
+                self.retry = retry
+                self.is_stream = False
+                self.middle_data = None
+                self._mock_response = None
+                self.last_request_body = None
+
+            def construct_request_body(self, inputs, parameters):
+                return {"messages": inputs, "stream": False, **parameters}
+
+            def do_request(self, request):
+                return self._mock_response
+
+            def process_response(self, response):
+                return response
+
+            def is_valid_response(self, res):
+                return isinstance(res, dict) and "choices" in res
+
+            def update_middle_data(self, res, inputs):
+                choice = res["choices"][0]
+                msg = choice.get("message") or {}
+                inputs.output = msg.get("content", "")
+                inputs.output_reasoning = msg.get("reasoning_content", "")
+
+            def request(self, inputs, parameters):
+                body = self.construct_request_body(inputs, parameters)
+                self.last_request_body = body
+                res = self.process_response(self.do_request(body))
+                if self.is_valid_response(res):
+                    self.update_middle_data(res, inputs)
+                return inputs.get_output()
+
+            def finish_count(self):
+                pass
+
+        class FakeOpenAIChatTextClient(FakeBaseClient):
+            pass
+
+        class FakeOpenAIChatStreamClient(FakeBaseClient):
+            def __init__(self, url, retry, **kwargs):
+                super().__init__(url, retry, **kwargs)
+                self.is_stream = True
+                self._stream_chunks = []
+
+            def request(self, inputs, parameters):
+                self.middle_data = inputs
+                self.last_request_body = self.construct_request_body(
+                    inputs, parameters
+                )
+                for chunk in self._stream_chunks:
+                    self.process_stream_line(chunk)
+                return inputs.get_output()
+
+            def process_stream_line(self, json_content):
+                response = self.process_response(json_content)
+                if self.is_valid_response(response):
+                    self.update_middle_data(response, self.middle_data)
+                return response
+
+            def update_middle_data(self, res, inputs):
+                choice = res["choices"][0]
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    inputs.output += delta["content"]
+                if delta.get("reasoning_content"):
+                    inputs.output_reasoning += delta["reasoning_content"]
+
+        class FakeBaseAPI:
+            def __init__(self, **kwargs):
+                self.endpoint_url = "http://localhost:8080/v1/chat/completions"
+                self.retry = 0
+                self.api_key = "EMPTY"
+                self.generation_kwargs = kwargs.get("generation_kwargs", {}) or {}
+                self.model = kwargs.get("model", "test-model")
+                self.is_multi_modal = False
+                self.client = None
+                self.init_client(kwargs.get("custom_client"))
+
+            def init_client(self, custom_client):
+                pass
+
+            def acquire(self):
+                pass
+
+            def prepare_input_data(self, messages, data_id):
+                md = FakeMiddleData()
+                md.data_id = data_id
+                return md
+
+            def set_result(self, cache_data):
+                pass
+
+        class FakeVLLMCustomAPIChat(FakeBaseAPI):
+            pass
+
+        class FakeVLLMCustomAPIChatStream(FakeBaseAPI):
+            pass
+
+        def handle_synthetic_input(func):
+            import functools
+
+            @functools.wraps(func)
+            def wrapper(self, input, max_out_len):
+                return func(self, input, max_out_len)
+
+            return wrapper
+
+        fake_prompt = types.ModuleType("ais_bench.benchmark.utils.prompt")
+        fake_prompt.is_mm_prompt = lambda x: False
+
+        fake_pkg = types.ModuleType("ais_bench")
+        fake_bench = types.ModuleType("ais_bench.benchmark")
+        fake_models = types.ModuleType("ais_bench.benchmark.models")
+        fake_clients = types.ModuleType("ais_bench.benchmark.clients")
+        fake_base_api = types.ModuleType("ais_bench.benchmark.models.base_api")
+        fake_utils = types.ModuleType("ais_bench.benchmark.utils")
+
+        fake_models.VLLMCustomAPIChat = FakeVLLMCustomAPIChat
+        fake_models.VLLMCustomAPIChatStream = FakeVLLMCustomAPIChatStream
+        fake_clients.OpenAIChatTextClient = FakeOpenAIChatTextClient
+        fake_clients.OpenAIChatStreamClient = FakeOpenAIChatStreamClient
+        fake_base_api.handle_synthetic_input = handle_synthetic_input
+
+        fake_pkg.benchmark = fake_bench
+        fake_bench.models = fake_models
+        fake_bench.clients = fake_clients
+        fake_bench.models.base_api = fake_base_api
+        fake_bench.utils = fake_utils
+        fake_utils.prompt = fake_prompt
+
+        cls._saved_modules = {}
+        for name, mod in [
+            ("ais_bench", fake_pkg),
+            ("ais_bench.benchmark", fake_bench),
+            ("ais_bench.benchmark.models", fake_models),
+            ("ais_bench.benchmark.clients", fake_clients),
+            ("ais_bench.benchmark.models.base_api", fake_base_api),
+            ("ais_bench.benchmark.utils", fake_utils),
+            ("ais_bench.benchmark.utils.prompt", fake_prompt),
+        ]:
+            cls._saved_modules[name] = sys.modules.get(name)
+            sys.modules[name] = mod
+
+        cls._saved_protocol_api = sys.modules.pop(
+            "xtask.benchmarks.aisbench.protocol_api", None
+        )
+        from xtask.benchmarks.aisbench.protocol_api import create_protocol_aware_chat
+
+        cls.create_protocol_aware_chat = staticmethod(create_protocol_aware_chat)
+
+    @classmethod
+    def tearDownClass(cls):
+        import sys
+
+        for name, mod in cls._saved_modules.items():
+            if mod is not None:
+                sys.modules[name] = mod
+            else:
+                sys.modules.pop(name, None)
+        if cls._saved_protocol_api is not None:
+            sys.modules["xtask.benchmarks.aisbench.protocol_api"] = (
+                cls._saved_protocol_api
+            )
+        else:
+            sys.modules.pop("xtask.benchmarks.aisbench.protocol_api", None)
+
+    def test_non_stream_generate_preserves_full_message(self):
+        """_generate must return the full message as JSON, not just content."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model")
+
+        full_response = {
+            "choices": [{
+                "message": {
+                    "content": "answer",
+                    "reasoning_content": "thinking",
+                    "tool_calls": [{"id": "1", "function": {"name": "f"}}],
+                    "role": "assistant",
+                },
+                "finish_reason": "stop",
+            }]
+        }
+        adapter.client._mock_response = full_response
+
+        input_dict = {"data_id": 0, "prompt": "Hello"}
+        result = adapter._generate(input_dict, 512)
+
+        parsed = json.loads(result)
+        self.assertEqual(parsed["content"], "answer")
+        self.assertEqual(parsed["reasoning_content"], "thinking")
+        self.assertEqual(parsed["finish_reason"], "stop")
+        self.assertEqual(len(parsed["tool_calls"]), 1)
+
+    def test_non_stream_generate_injects_protocol_fields(self):
+        """extra_params from input dict must be injected into the request."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model")
+
+        adapter.client._mock_response = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+        }
+
+        input_dict = {
+            "data_id": 1,
+            "prompt": "Hello",
+            "extra_params": '{"tools": [{"type": "function", "function": {"name": "f"}}], "tool_choice": "auto"}',
+        }
+        adapter._generate(input_dict, 256)
+
+        body = adapter.client.last_request_body
+        self.assertIn("tools", body)
+        self.assertEqual(body["tool_choice"], "auto")
+        self.assertEqual(body["max_tokens"], 256)
+        self.assertEqual(body["model"], "test-model")
+
+    def test_non_stream_generate_with_generation_overrides(self):
+        """Construction-time generation overrides must be merged into kwargs."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model")
+        adapter._generation_overrides = {"temperature": 0.7}
+
+        adapter.client._mock_response = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+        }
+
+        adapter._generate({"data_id": 0, "prompt": "Hi"}, 128)
+
+        body = adapter.client.last_request_body
+        self.assertEqual(body["temperature"], 0.7)
+
+    def test_non_stream_generate_string_input(self):
+        """String input (no dict wrapper) must also work."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model")
+
+        adapter.client._mock_response = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+        }
+
+        result = adapter._generate("Hello world", 64)
+        parsed = json.loads(result)
+        self.assertEqual(parsed["content"], "ok")
+
+    def test_custom_client_created(self):
+        """init_client must create a client with full-message preservation."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model")
+        self.assertIsNotNone(adapter.client)
+        # The client must have the overridden update_middle_data
+        adapter.client._mock_response = {
+            "choices": [{"message": {"content": "test"}, "finish_reason": "stop"}]
+        }
+        from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareMixin
+
+        md = type("MD", (), {"output": "", "output_reasoning": ""})()
+        adapter.client.update_middle_data(
+            {"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}]}, md
+        )
+        # Output must be JSON (full message), not just "x"
+        parsed = json.loads(md.output)
+        self.assertEqual(parsed["content"], "x")
+        self.assertEqual(parsed["finish_reason"], "stop")
+
+    def test_stream_generate_assembles_deltas(self):
+        """Stream adapter must assemble SSE deltas into a full message."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=True)
+        adapter = adapter_cls(path="/fake", model="test-model")
+        adapter._verify_enabled = False  # skip non-stream comparison
+
+        adapter.client._stream_chunks = [
+            {"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": " world"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+
+        result = adapter._generate({"data_id": 0, "prompt": "Hi"}, 64)
+
+        parsed = json.loads(result)
+        self.assertEqual(parsed["content"], "Hello world")
+        self.assertEqual(parsed["finish_reason"], "stop")
+
+    def test_stream_generate_with_reasoning_and_tool_calls(self):
+        """Stream adapter must assemble reasoning + tool_calls deltas."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=True)
+        adapter = adapter_cls(path="/fake", model="test-model")
+        adapter._verify_enabled = False
+
+        adapter.client._stream_chunks = [
+            {"choices": [{"delta": {"reasoning_content": "step1"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"reasoning_content": "step2"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_1",
+                "function": {"name": "get_weather", "arguments": ""}
+            }]}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": '{"city": "BJ"}'}
+            }]}, "finish_reason": "tool_calls"}]},
+        ]
+
+        result = adapter._generate({"data_id": 0, "prompt": "Weather?"}, 128)
+
+        parsed = json.loads(result)
+        self.assertEqual(parsed["reasoning_content"], "step1step2")
+        self.assertEqual(len(parsed["tool_calls"]), 1)
+        self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "get_weather")
+        self.assertEqual(
+            parsed["tool_calls"][0]["function"]["arguments"], '{"city": "BJ"}'
+        )
+        self.assertEqual(parsed["finish_reason"], "tool_calls")
+
+    def test_stream_adapter_creates_stream_client(self):
+        """Stream adapter's init_client must create a stream-capable client."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=True)
+        adapter = adapter_cls(path="/fake", model="test-model")
+        self.assertIsNotNone(adapter.client)
+        self.assertTrue(getattr(adapter.client, "is_stream", False))
+
+
 if __name__ == "__main__":
     unittest.main()
