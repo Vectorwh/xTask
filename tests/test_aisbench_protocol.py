@@ -672,6 +672,27 @@ class TestEvaluatorWrapper(unittest.TestCase):
         result = evaluator.score(["plain text answer"], [{"answer_regex": "plain"}])
         self.assertEqual(result["Protocol_Pass_Rate"], 100.0)
 
+    def test_json_string_reference(self):
+        """score() must deserialize JSON string references from
+        ProtocolConstrainedDataset (which serializes ground_truth to avoid
+        pyarrow ArrowInvalid on heterogeneous struct types)."""
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
+            ProtocolAndConstrainedEvaluator,
+        )
+
+        full_msg = {"content": '{"answer": 42}', "reasoning_content": "",
+                    "tool_calls": [], "finish_reason": "stop"}
+        gt_str = json.dumps({
+            "schema": {"type": "object",
+                       "properties": {"answer": {"type": "number"}},
+                       "required": ["answer"]},
+            "answer": 42,
+        })
+        evaluator = ProtocolAndConstrainedEvaluator()
+        result = evaluator.score([json.dumps(full_msg)], [gt_str])
+        self.assertEqual(result["Semantic_Accuracy"], 100.0)
+        self.assertEqual(result["Syntax_Valid_Rate"], 100.0)
+
 
 class TestEvaluatorEvaluateMethod(unittest.TestCase):
     """Tests for ProtocolAndConstrainedEvaluator.evaluate (AISBench entry point).
@@ -1114,6 +1135,28 @@ class TestProtocolAwareAPIChatWrapper(unittest.TestCase):
         from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareAPIChat
         return ProtocolAwareAPIChat
 
+    def test_capture_extra_params_from_json_string(self):
+        """_capture_extra_params must deserialize JSON string extra_params
+        from ProtocolConstrainedDataset (which serializes to avoid pyarrow
+        ArrowInvalid on heterogeneous struct types)."""
+        from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareMixin
+
+        mixin = ProtocolAwareMixin()
+        # String form (from ProtocolConstrainedDataset.load())
+        result = mixin._capture_extra_params(
+            {"extra_params": '{"tool_choice": "none"}'})
+        self.assertEqual(result, {"tool_choice": "none"})
+        # Dict form (direct call / legacy)
+        result = mixin._capture_extra_params(
+            {"extra_params": {"tool_choice": "auto"}})
+        self.assertEqual(result, {"tool_choice": "auto"})
+        # Invalid JSON string → None
+        result = mixin._capture_extra_params({"extra_params": "not json"})
+        self.assertIsNone(result)
+        # Missing → None
+        result = mixin._capture_extra_params({})
+        self.assertIsNone(result)
+
     def test_wrapper_exists_and_is_class(self):
         cls = self._import_wrapper()
         self.assertTrue(isinstance(cls, type))
@@ -1438,7 +1481,10 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
             data = ds.load(path=jsonl, meta_path="", abbr="test", type=None)
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["question"], "q1")
-            self.assertIsInstance(data[0]["extra_params"], dict)
+            # extra_params is serialized to a JSON string (see load() docstring);
+            # verify it round-trips back to the original dict.
+            self.assertIsInstance(data[0]["extra_params"], str)
+            self.assertEqual(json.loads(data[0]["extra_params"]), {"tools": []})
 
     def test_load_returns_hf_dataset(self):
         """load() must return a HuggingFace datasets.Dataset, not a list —
@@ -1468,7 +1514,8 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
             data = ds.load(meta_path=jsonl)
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["question"], "q1")
-            self.assertIsInstance(data[0]["extra_params"], dict)
+            self.assertIsInstance(data[0]["extra_params"], str)
+            self.assertEqual(json.loads(data[0]["extra_params"]), {"tools": []})
 
     def test_load_accepts_extra_kwargs(self):
         """load() must tolerate arbitrary kwargs from the config dict."""
@@ -1500,8 +1547,14 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
         with self.assertRaises(ValueError):
             ds.load(path=None, meta_path=None)
 
-    def test_load_preserves_dict_types(self):
-        """extra_params and ground_truth must stay as dicts."""
+    def test_load_serializes_complex_fields(self):
+        """extra_params and ground_truth are serialized to JSON strings.
+
+        This avoids pyarrow ArrowInvalid when the same key has different
+        value types across rows (e.g. tool_choice: "none" vs {"type": ...}).
+        Consumers deserialize via json.loads (evaluator score(), API adapter
+        _capture_extra_params()).
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             jsonl = os.path.join(tmpdir, "data.jsonl")
             self._write_jsonl(jsonl, [
@@ -1511,12 +1564,42 @@ class TestProtocolConstrainedDatasetLoad(unittest.TestCase):
             ])
             ds = self.ProtocolConstrainedDataset(path="")
             data = ds.load(path=jsonl)
-            self.assertIsInstance(data[0]["extra_params"], dict)
-            self.assertIsInstance(data[0]["ground_truth"], dict)
-            # Row 2: HFDataset/Arrow fills missing keys from the inferred
-            # schema with None, so the field is still a dict (not None/str).
-            self.assertIsInstance(data[1]["extra_params"], dict)
-            self.assertIsInstance(data[1]["ground_truth"], dict)
+            # Row 1: both fields are JSON strings that round-trip to dicts.
+            self.assertIsInstance(data[0]["extra_params"], str)
+            self.assertIsInstance(data[0]["ground_truth"], str)
+            self.assertEqual(json.loads(data[0]["extra_params"]),
+                             {"response_format": "json"})
+            self.assertEqual(json.loads(data[0]["ground_truth"]),
+                             {"expected_finish_reason": "stop"})
+            # Row 2: missing fields default to "{}" strings.
+            self.assertEqual(data[1]["extra_params"], "{}")
+            self.assertEqual(data[1]["ground_truth"], "{}")
+
+    def test_load_handles_heterogeneous_types(self):
+        """Mixed value types for the same key must not crash pyarrow.
+
+        tool_choice is "none" (string) in one row and a dict in another —
+        both valid per OpenAI API spec.  Without serialization this raises
+        ``ArrowInvalid: cannot mix struct and non-struct, non-null values``.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl = os.path.join(tmpdir, "data.jsonl")
+            self._write_jsonl(jsonl, [
+                {"question": "q1",
+                 "extra_params": {"tools": [], "tool_choice": "none"},
+                 "ground_truth": {"expected_finish_reason": "stop"}},
+                {"question": "q2",
+                 "extra_params": {"tools": [], "tool_choice": {
+                     "type": "function", "function": {"name": "f"}}},
+                 "ground_truth": {"expected_finish_reason": "tool_calls"}},
+            ])
+            ds = self.ProtocolConstrainedDataset(path="")
+            data = ds.load(path=jsonl)  # must not raise ArrowInvalid
+            self.assertEqual(len(data), 2)
+            ep1 = json.loads(data[0]["extra_params"])
+            ep2 = json.loads(data[1]["extra_params"])
+            self.assertEqual(ep1["tool_choice"], "none")
+            self.assertIsInstance(ep2["tool_choice"], dict)
 
 
 if __name__ == "__main__":

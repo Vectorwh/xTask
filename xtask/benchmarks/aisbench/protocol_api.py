@@ -215,8 +215,18 @@ class ProtocolAwareMixin:
     """
 
     def _capture_extra_params(self, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Pop extra_params from generate() kwargs and store for this request."""
+        """Pop extra_params from generate() kwargs and store for this request.
+
+        Handles both dict (direct call / legacy) and JSON-string (from
+        ProtocolConstrainedDataset, which serializes complex fields to
+        avoid pyarrow struct inference failures) representations.
+        """
         extra = kwargs.pop("extra_params", None)
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except (json.JSONDecodeError, TypeError):
+                extra = None
         self._current_extra_params = extra if isinstance(extra, dict) else None
         return self._current_extra_params
 

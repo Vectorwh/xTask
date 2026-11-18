@@ -522,6 +522,14 @@ class ProtocolAndConstrainedEvaluator:
 
         normalized_refs: List[Dict[str, Any]] = []
         for ref in references:
+            # Deserialize JSON strings from ProtocolConstrainedDataset, which
+            # serializes ground_truth to avoid pyarrow ArrowInvalid on
+            # heterogeneous struct value types (e.g. tool_choice str vs dict).
+            if isinstance(ref, str):
+                try:
+                    ref = json.loads(ref)
+                except (json.JSONDecodeError, TypeError):
+                    pass
             if isinstance(ref, dict):
                 # Strip null values introduced by HuggingFace Dataset key
                 # union (restores original ground_truth shape, including

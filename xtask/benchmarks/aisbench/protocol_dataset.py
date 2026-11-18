@@ -13,15 +13,23 @@ from ais_bench.benchmark.datasets import CustomDataset
 
 
 class ProtocolConstrainedDataset(CustomDataset):
-    """CustomDataset variant that preserves dict-typed extra_params and
-    ground_truth fields instead of stringifying them.
+    """CustomDataset variant that serializes dict-typed extra_params and
+    ground_truth into JSON strings for HuggingFace Dataset compatibility.
 
-    AISBench's base CustomDataset may coerce complex fields; this subclass
-    re-parses them from the raw line to guarantee the dict structure.
+    Rationale: ``Dataset.from_list()`` uses pyarrow struct inference, which
+    raises ``ArrowInvalid: cannot mix struct and non-struct, non-null values``
+    when the same key has different value types across rows — e.g.
+    ``tool_choice`` is the string ``"none"`` in one row and a dict
+    ``{"type": "function", ...}`` in another (both valid per OpenAI API spec).
+
+    Serializing to JSON strings sidesteps pyarrow type inference entirely.
+    Consumers deserialize back to dicts via ``_ensure_dict()``:
+      - protocol_api._capture_extra_params() for extra_params
+      - protocol_constrained_evaluator.score() for ground_truth references
     """
 
     def load(self, path=None, meta_path=None, **kwargs):
-        """Load JSONL and ensure extra_params / ground_truth stay as dicts.
+        """Load JSONL, serializing extra_params / ground_truth to JSON strings.
 
         AISBench's CustomDataset.__init__ calls ``self.load(**kwargs)`` with
         all dataset-config dict keys (path, meta_path, abbr, reader_cfg, ...).
@@ -53,10 +61,14 @@ class ProtocolConstrainedDataset(CustomDataset):
                     raise ValueError(
                         f"protocol_constrained JSONL parse error at line {line_no}: {exc}"
                     ) from exc
-                # Ensure dict types survive the pipeline.
-                if "extra_params" not in row or not isinstance(row["extra_params"], dict):
-                    row["extra_params"] = row.get("extra_params") or {}
-                if "ground_truth" not in row or not isinstance(row["ground_truth"], dict):
-                    row["ground_truth"] = row.get("ground_truth") or {}
+                # Serialize complex fields to JSON strings so pyarrow never
+                # attempts struct inference (which fails on heterogeneous
+                # value types across rows, e.g. tool_choice str vs dict).
+                for _field in ("extra_params", "ground_truth"):
+                    _val = row.get(_field)
+                    if isinstance(_val, dict):
+                        row[_field] = _json.dumps(_val, ensure_ascii=False)
+                    elif not isinstance(_val, str):
+                        row[_field] = "{}"
                 data.append(row)
         return _HFDataset.from_list(data)
