@@ -282,7 +282,9 @@ def create_protocol_aware_chat(stream_verify: bool = False):
     class _ProtocolAwareAPIChatImpl(VLLMCustomAPIChat):
         """Protocol-aware chat adapter for PyPI AISBench async architecture.
 
-        Overrides three async hooks in the BaseAPIModel call chain:
+        Overrides async hooks in the BaseAPIModel call chain:
+        - generate: convert server rejections (400) of protocol-field
+          requests into evaluable predictions (finish_reason="error")
         - get_request_body: inject per-sample protocol fields from extra_params
         - parse_text_response: store full message JSON in output.content
         - parse_stream_response + stream_infer: assemble SSE deltas into a
@@ -292,6 +294,47 @@ def create_protocol_aware_chat(stream_verify: bool = False):
         def __init__(self, *args, **kwargs):
             self._verify_enabled = kwargs.pop("stream_verify", stream_verify)
             super().__init__(*args, **kwargs)
+
+        async def generate(
+            self, input_data, max_out_len, output, session=None, **args
+        ):
+            """Override to convert server rejections into evaluable predictions.
+
+            For protocol testing, a server rejection (e.g., 400 Bad Request
+            for an unsupported response_format) IS the test result — the
+            server doesn't support that protocol feature.  The base class
+            marks these as failures (output.success=False), causing AISBench
+            to exclude them from predictions; the evaluator then sees "No
+            predictions found" and can't score anything.
+
+            This override converts failures into synthetic predictions that
+            record the server error, so the evaluator can score them as
+            protocol failures (finish_reason="error" won't match expected,
+            content="" fails syntax validation).
+
+            Only requests that carried protocol fields (extra_params) are
+            converted.  Warmup requests and requests without protocol fields
+            still report failures normally.
+            """
+            await super().generate(
+                input_data, max_out_len, output, session=session, **args
+            )
+            if not output.success and getattr(
+                output, "_has_protocol_fields", False
+            ):
+                error_msg = {
+                    "content": "",
+                    "reasoning_content": "",
+                    "tool_calls": [],
+                    "finish_reason": "error",
+                    "role": "assistant",
+                    "server_error": output.error_info or "unknown error",
+                }
+                output.content = json.dumps(error_msg, ensure_ascii=False)
+                output.reasoning_content = ""
+                output.error_info = ""
+                output.success = True
+            return output
 
         async def get_request_body(
             self, input, max_out_len, output, **args
@@ -309,6 +352,10 @@ def create_protocol_aware_chat(stream_verify: bool = False):
             # extra_params from warmup data_list entries, so during
             # warmup extra_params is None and this is a no-op.
             inject_protocol_fields(request_body, extra_params)
+            # Flag for generate(): whether this request carries protocol
+            # fields. Used to decide if a server rejection (400) should be
+            # converted to an evaluable prediction instead of a failure.
+            output._has_protocol_fields = bool(extra_params)
             return request_body
 
         async def parse_text_response(self, json_content, output):

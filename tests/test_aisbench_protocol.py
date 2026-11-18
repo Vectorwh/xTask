@@ -1669,6 +1669,7 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
                 self.content = ""
                 self.reasoning_content = ""
                 self.success = True
+                self.error_info = ""
 
             def get_prediction(self):
                 if self.reasoning_content:
@@ -1713,6 +1714,7 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
                 self.session = None
                 self._mock_response = None
                 self._mock_stream_chunks = []
+                self._mock_error = None
                 self.last_request_body = None
 
             async def get_request_body(self, input, max_out_len, output,
@@ -1726,6 +1728,12 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
 
             async def text_infer(self, request_body, output):
                 self.last_request_body = request_body
+                if self._mock_error:
+                    # Simulate real AISBench text_infer: non-200 sets
+                    # output.success=False, output.error_info=reason
+                    output.success = False
+                    output.error_info = self._mock_error
+                    return
                 await self.parse_text_response(self._mock_response, output)
 
             async def parse_text_response(self, json_content, output):
@@ -1737,6 +1745,10 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
 
             async def stream_infer(self, request_body, output):
                 self.last_request_body = request_body
+                if self._mock_error:
+                    output.success = False
+                    output.error_info = self._mock_error
+                    return
                 for chunk in self._mock_stream_chunks:
                     await self.parse_stream_response(chunk, output)
 
@@ -1982,6 +1994,92 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
         parsed = json.loads(output.content)
         self.assertEqual(parsed["content"], "Stream says A")
         self.assertTrue(any("mismatch" in msg.lower() for msg in cm.output))
+
+    # -----------------------------------------------------------------
+    # generate() error-to-prediction conversion (protocol field requests)
+    # -----------------------------------------------------------------
+
+    def test_generate_converts_protocol_error_to_prediction(self):
+        """Server 400 on a protocol-field request becomes an evaluable
+        prediction with finish_reason='error' instead of a failure.
+
+        Real AISBench text_infer sets output.success=False on non-200,
+        which makes AISBench exclude the sample from predictions.  The
+        generate() override converts it back to success=True with a
+        synthetic prediction so the evaluator can score it as a protocol
+        failure.
+        """
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model")
+        adapter._mock_error = "Bad Request"
+
+        output = self.FakeOutput()
+        extra = '{"response_format": {"type": "json_object"}}'
+        asyncio.run(adapter.generate("Hi", 128, output, extra_params=extra))
+
+        # Failure converted to success so AISBench includes it in predictions
+        self.assertTrue(output.success)
+        self.assertEqual(output.error_info, "")
+        # Content is a JSON prediction recording the server error
+        parsed = json.loads(output.content)
+        self.assertEqual(parsed["finish_reason"], "error")
+        self.assertEqual(parsed["content"], "")
+        self.assertEqual(parsed["server_error"], "Bad Request")
+        self.assertEqual(parsed["role"], "assistant")
+        self.assertEqual(parsed["tool_calls"], [])
+        # get_prediction returns the JSON so the evaluator can parse it
+        self.assertEqual(output.get_prediction(), output.content)
+
+    def test_generate_preserves_error_without_protocol_fields(self):
+        """Server 400 on a request WITHOUT extra_params stays a failure.
+
+        Only protocol-field requests are converted to predictions; plain
+        requests that fail must report the error normally.
+        """
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model")
+        adapter._mock_error = "Bad Request"
+
+        output = self.FakeOutput()
+        asyncio.run(adapter.generate("Hi", 128, output))
+
+        self.assertFalse(output.success)
+        self.assertEqual(output.error_info, "Bad Request")
+
+    def test_generate_normal_response_with_protocol_fields(self):
+        """A successful response with extra_params is not touched by the
+        error-conversion logic."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model")
+        adapter._mock_response = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+        }
+
+        output = self.FakeOutput()
+        extra = '{"response_format": {"type": "json_object"}}'
+        asyncio.run(adapter.generate("Hi", 128, output, extra_params=extra))
+
+        self.assertTrue(output.success)
+        parsed = json.loads(output.content)
+        self.assertEqual(parsed["finish_reason"], "stop")
+        self.assertEqual(parsed["content"], "ok")
+        self.assertNotIn("server_error", parsed)
+
+    def test_generate_stream_protocol_error_converted(self):
+        """Stream mode: server 400 on a protocol-field request also becomes
+        an evaluable prediction."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model", stream=True)
+        adapter._mock_error = "Bad Request"
+
+        output = self.FakeOutput()
+        extra = '{"guided_regex": "[0-9]+"}'
+        asyncio.run(adapter.generate("Hi", 128, output, extra_params=extra))
+
+        self.assertTrue(output.success)
+        parsed = json.loads(output.content)
+        self.assertEqual(parsed["finish_reason"], "error")
+        self.assertEqual(parsed["server_error"], "Bad Request")
 
 
 class TestWarmupDefenseInferencer(unittest.TestCase):
