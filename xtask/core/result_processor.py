@@ -493,6 +493,71 @@ def verify_result(result, task_config):
             return False
         return check_accuracy_within_threshold(baseline_value, threshold, actual_value)
 
+    if "protocol" in task_config.get("metrics"):
+        protocol_result = result.get("benchmark_protocol_result")
+        if not isinstance(protocol_result, Mapping):
+            logging.error("✗ Test failed: missing protocol result")
+            return False
+        protocol_rate = protocol_result.get("Protocol_Pass_Rate")
+        syntax_rate = protocol_result.get("Syntax_Valid_Rate")
+        if protocol_rate is None or syntax_rate is None:
+            logging.error(
+                "✗ Test failed: protocol result missing Protocol_Pass_Rate/Syntax_Valid_Rate"
+            )
+            return False
+        protocol_cfg = (task_config.get("benchmark") or {}).get("protocol") or {}
+        # Zero-tolerance by default: protocol & syntax must be 100%.
+        protocol_tol = float(protocol_cfg.get("protocol_tolerance", 0.0))
+        syntax_tol = float(protocol_cfg.get("syntax_tolerance", 0.0))
+        try:
+            protocol_ok = float(protocol_rate) >= 100.0 - protocol_tol
+            syntax_ok = float(syntax_rate) >= 100.0 - syntax_tol
+        except (TypeError, ValueError):
+            logging.error(
+                "✗ Test failed: invalid protocol/syntax rate: %r / %r",
+                protocol_rate,
+                syntax_rate,
+            )
+            return False
+        if not protocol_ok:
+            logging.error(
+                "✗ Test failed: Protocol_Pass_Rate %.2f%% below threshold %.2f%%",
+                float(protocol_rate),
+                100.0 - protocol_tol,
+            )
+            return False
+        if not syntax_ok:
+            logging.error(
+                "✗ Test failed: Syntax_Valid_Rate %.2f%% below threshold %.2f%%",
+                float(syntax_rate),
+                100.0 - syntax_tol,
+            )
+            return False
+        baseline = protocol_cfg.get("baseline")
+        if baseline is not None:
+            semantic_acc = protocol_result.get("Semantic_Accuracy")
+            if semantic_acc is None:
+                logging.error(
+                    "✗ Test failed: protocol result missing Semantic_Accuracy"
+                )
+                return False
+            threshold = protocol_cfg.get("threshold", 0.04)
+            try:
+                if not check_accuracy_within_threshold(
+                    float(baseline), float(threshold), float(semantic_acc)
+                ):
+                    logging.error(
+                        "✗ Test failed: Semantic_Accuracy %.2f%% outside baseline %.2f%% ± %.0f%%",
+                        float(semantic_acc),
+                        float(baseline),
+                        float(threshold) * 100,
+                    )
+                    return False
+            except ValueError as exc:
+                logging.error("✗ Test failed: invalid protocol baseline config: %s", exc)
+                return False
+        return True
+
     if "acc" in task_config.get("metrics"):
         baseline = task_config.get("benchmark").get("acc").get("baseline")
         if baseline:

@@ -36,6 +36,20 @@ def get_xtask_config_data():
         sys.exit(1)
 
 
+def is_protocol_test_enabled():
+    """全局开关：协议一致性 + 受限解码评测功能是否启用。
+
+    读取 config/xTask_config.json 中 ENV_CONFIG.enable_protocol_test，
+    默认 False（关闭）。关闭时即使 YAML 配置了 benchmark.protocol 段也跳过。
+    """
+    env_config = {}
+    try:
+        env_config = (get_xtask_config_data().get("ENV_CONFIG") or {})
+    except Exception:
+        pass
+    return env_config.get("enable_protocol_test", False) is True
+
+
 def get_config_data(config_file):
     try:
         if os.path.exists(config_file):
