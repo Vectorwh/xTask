@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict
 
 from xtask.utils.container_manager import path_mapping_in_container
-from xtask.utils.config_parser import get_xtask_config_data
+from xtask.utils.config_parser import get_xtask_config_data, is_protocol_test_enabled
 from xtask.datasets.dataset_downloader import download_dataset
 from xtask.datasets.dataset_manger import (
     get_custom_dataset_output_path,
@@ -385,6 +385,200 @@ def _add_last_inferencer_import(tree):
     ):
         insert_index += 1
     tree.body.insert(insert_index, import_node)
+
+
+# Top-level model dict keys that belong in generation_kwargs, NOT in the
+# model constructor.  Removed defensively from the generated model dict so
+# that VLLMCustomAPIChat.__init__ never receives them (TypeError: got an
+# unexpected keyword argument 'temperature').
+_MODEL_DICT_GENERATION_ONLY_KEYS = frozenset({
+    "temperature", "top_p", "top_k", "frequency_penalty",
+    "presence_penalty", "repetition_penalty", "seed",
+})
+
+
+class _ProtocolModelTypeOverride(ast.NodeTransformer):
+    """Replace VLLMCustomAPIChat/VLLMCustomAPIChatStream with ProtocolAwareAPIChat
+    in an AISBench model config, inject stream_verify, bake connection params,
+    and update generation_kwargs.
+
+    Why overrides: ast.unparse() produces single-line output where sed's greedy
+    ``.*`` patterns destroy fields after host_ip. Baking connection params
+    (host_ip, host_port, model, path, max_out_len, batch_size, request_rate)
+    directly into the AST eliminates the need for sed entirely. temperature
+    is NOT baked here — it belongs in generation_kwargs, and passing it as a
+    top-level model dict key crashes VLLMCustomAPIChat.__init__.
+    """
+
+    def __init__(self, stream_verify=False, generation_kwargs=None, overrides=None):
+        self.stream_verify = stream_verify
+        self.generation_kwargs = generation_kwargs or {}
+        self.overrides = overrides or {}
+        self.replacements = 0
+
+    def _replace_type(self, type_node):
+        target_names = {"VLLMCustomAPIChat", "VLLMCustomAPIChatStream"}
+        if isinstance(type_node, ast.Name) and type_node.id in target_names:
+            self.replacements += 1
+            return ast.Name(id="ProtocolAwareAPIChat", ctx=ast.Load())
+        return type_node
+
+    @staticmethod
+    def _value_to_ast(value):
+        """Convert a Python value to an AST node."""
+        if isinstance(value, (int, float, bool, str, type(None))):
+            return ast.Constant(value=value)
+        try:
+            return ast.parse(repr(value), mode="eval").body
+        except SyntaxError:
+            return ast.Constant(value=str(value))
+
+    @staticmethod
+    def _set_keyword(node, arg, value_ast):
+        """Set or replace a keyword in a dict(...) Call, preserving order."""
+        for i, item in enumerate(node.keywords):
+            if item.arg == arg:
+                node.keywords[i] = ast.keyword(arg=arg, value=value_ast)
+                return
+        node.keywords.append(ast.keyword(arg=arg, value=value_ast))
+
+    def _update_generation_kwargs(self, gk_call_node):
+        """Update keywords inside generation_kwargs=dict(...) AST node."""
+        if not self.generation_kwargs:
+            return gk_call_node
+        existing = {kw.arg: kw for kw in gk_call_node.keywords if kw.arg}
+        for key, value in self.generation_kwargs.items():
+            existing[key] = ast.keyword(arg=key, value=self._value_to_ast(value))
+        gk_call_node.keywords = list(existing.values())
+        return gk_call_node
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if not isinstance(node.func, ast.Name) or node.func.id != "dict":
+            return node
+        keywords = {item.arg: item for item in node.keywords if item.arg}
+        if "type" in keywords:
+            keywords["type"].value = self._replace_type(keywords["type"].value)
+        # Model dict: has both abbr and type keywords.
+        if "abbr" in keywords and "type" in keywords:
+            # Bake all connection params into the model dict.
+            for key, value in self.overrides.items():
+                self._set_keyword(node, key, self._value_to_ast(value))
+            # Inject stream_verify kwarg into the model dict.
+            self._set_keyword(
+                node, "stream_verify", ast.Constant(value=self.stream_verify)
+            )
+            # Remove generation-only keys that VLLMCustomAPIChat.__init__
+            # doesn't accept; they belong in generation_kwargs instead.
+            node.keywords = [
+                kw for kw in node.keywords
+                if not (kw.arg and kw.arg in _MODEL_DICT_GENERATION_ONLY_KEYS)
+            ]
+        # Update generation_kwargs values baked into the AST.
+        if "generation_kwargs" in keywords:
+            gk_value = keywords["generation_kwargs"].value
+            if (
+                isinstance(gk_value, ast.Call)
+                and isinstance(gk_value.func, ast.Name)
+                and gk_value.func.id == "dict"
+            ):
+                self._update_generation_kwargs(gk_value)
+        return node
+
+    def visit_Dict(self, node):
+        self.generic_visit(node)
+        keys = {
+            key.value: index
+            for index, key in enumerate(node.keys)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if "type" in keys:
+            node.values[keys["type"]] = self._replace_type(node.values[keys["type"]])
+        return node
+
+
+def _add_protocol_import(tree):
+    """Insert the ProtocolAwareAPIChat import after existing imports.
+
+    Imports the wrapper class directly (NOT the factory function) because
+    mmengine's _parse_lazy_import forbids calling imported names at module
+    level. ProtocolAwareAPIChat defers composition to __new__.
+    """
+    import_node = ast.ImportFrom(
+        module="xtask.benchmarks.aisbench.protocol_api",
+        names=[ast.alias(name="ProtocolAwareAPIChat")],
+        level=0,
+    )
+    insert_index = 0
+    if (
+        tree.body
+        and isinstance(tree.body[0], ast.Expr)
+        and isinstance(tree.body[0].value, ast.Constant)
+        and isinstance(tree.body[0].value.value, str)
+    ):
+        insert_index = 1
+    while (
+        insert_index < len(tree.body)
+        and isinstance(tree.body[insert_index], (ast.Import, ast.ImportFrom))
+    ):
+        insert_index += 1
+    tree.body.insert(insert_index, import_node)
+
+
+def create_protocol_model_config(
+    api_type,
+    output_file_path,
+    stream_verify=False,
+    config_dir_name="aisbench_configs",
+    generation_kwargs=None,
+    overrides=None,
+):
+    """Create a protocol-aware AISBench model config from a base api_type config.
+
+    Copies the base vllm_api config, replaces the model class with
+    ProtocolAwareAPIChat, injects stream_verify + generation_kwargs, bakes
+    connection params (host_ip, host_port, model, path, max_out_len, etc.),
+    and adds the xtask import. All parameter overrides are baked into the AST
+    so no sed-based post-editing is needed.
+    """
+    _validate_config_name(api_type, "api_type")
+    # Model configs live under configs/models/vllm_api/, not configs/datasets/.
+    relative_root = Path("ais_bench/benchmark/configs/models/vllm_api")
+    source_path = None
+    for root in _aisbench_dataset_config_roots():
+        candidate = root / relative_root / f"{api_type}.py"
+        try:
+            if candidate.is_file():
+                source_path = candidate
+                break
+        except PermissionError:
+            continue
+    if source_path is None:
+        raise FileNotFoundError(
+            f"AISBench model config vllm_api/{api_type}.py was not found"
+        )
+
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), str(source_path))
+    transformer = _ProtocolModelTypeOverride(
+        stream_verify=stream_verify,
+        generation_kwargs=generation_kwargs,
+        overrides=overrides,
+    )
+    tree = transformer.visit(tree)
+    if transformer.replacements == 0:
+        raise ValueError(
+            f"AISBench model config {source_path} has no VLLMCustomAPIChat type to override"
+        )
+    _add_protocol_import(tree)
+
+    config_dir_name = _validate_config_name(config_dir_name, "config_dir_name")
+    custom_dir = Path(output_file_path) / config_dir_name / "models"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    custom_config = custom_dir / f"xtask_protocol_{api_type}.py"
+    custom_config.write_text(
+        ast.unparse(ast.fix_missing_locations(tree)) + "\n", encoding="utf-8"
+    )
+    return f"xtask_protocol_{api_type}"
 
 
 def create_dataset_config_override(
@@ -940,7 +1134,101 @@ def generate_aisbench_script(
         shell_content.append(f'echo "配置文件修改完成（已生成备份文件 ${api_type_file}）"')
     else:
         shell_content.append("\n# 5. 执行性能测试，skip task...")
-    
+
+    # Step 6: 生成协议一致性/受限解码测试命令（受全局开关控制）
+    if "protocol" in task_config.get("metrics", ""):
+        protocol_cfg = (benchmark_dict or {}).get("protocol") or {}
+        if not is_protocol_test_enabled():
+            shell_content.append("\n# 6. 协议一致性测试：全局开关 enable_protocol_test 未开启，跳过")
+            shell_content.append(
+                'echo "警告：enable_protocol_test 全局开关未开启（config/xTask_config.json），跳过协议一致性测试"'
+            )
+        elif not protocol_cfg:
+            shell_content.append("\n# 6. 协议一致性测试：未配置 benchmark.protocol 段，跳过")
+        else:
+            shell_content.append("\n# 6. 执行协议一致性/受限解码测试")
+            append_xtask_pythonpath(shell_content)
+
+            stream_verify = protocol_cfg.get("stream_verify", False)
+            protocol_api_type = protocol_cfg.get("api_type", "vllm_api_general_chat")
+
+            # 6.1 生成协议感知模型配置（替换 VLLMCustomAPIChat → ProtocolAwareAPIChat）
+            # 连接参数（host_ip/host_port/model/path/max_out_len/batch_size/
+            # request_rate）在 AST 阶段直接烘焙进配置；temperature 属于
+            # generation_kwargs（由 YAML protocol.generation_kwargs 提供），
+            # 不能作为模型 dict 顶层键，否则 VLLMCustomAPIChat.__init__ 报
+            # unexpected keyword argument。
+            # ast.unparse() 生成单行格式，sed 的贪婪 .* 匹配会把 host_ip 之后
+            # 的所有字段吃掉，因此协议模型配置完全不使用 sed。
+            protocol_generation_kwargs = protocol_cfg.get("generation_kwargs", {})
+            protocol_output_len = protocol_cfg.get("output_len", 4096)
+            protocol_batch_size = protocol_cfg.get("batch_size", 8)
+            protocol_request_rate = protocol_cfg.get("request_rate", 0)
+            protocol_overrides = {
+                "host_ip": api_address,
+                "host_port": api_port,
+                "model": model_name,
+                "path": model_path_inside,
+                "max_out_len": protocol_output_len,
+                "batch_size": protocol_batch_size,
+                "request_rate": protocol_request_rate,
+            }
+            try:
+                protocol_model_name = create_protocol_model_config(
+                    protocol_api_type,
+                    output_file_path,
+                    stream_verify=stream_verify,
+                    config_dir_name=config_dir_name,
+                    generation_kwargs=protocol_generation_kwargs,
+                    overrides=protocol_overrides,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                shell_content.append(f'echo "错误：生成协议模型配置失败 - {exc}" >&2')
+                shell_content.append("exit 1")
+                protocol_model_name = None
+
+            if protocol_model_name:
+                protocol_model_file = (
+                    f"{output_file_path_incontainer}/{config_dir_name}/models/"
+                    f"{protocol_model_name}.py"
+                )
+                # 6.2 连接参数已在 AST 阶段烘焙进配置文件，无需 sed 替换
+
+                # 6.4 数据集配置（protocol_constrained_gen + 路径覆写）
+                protocol_dataset_path = protocol_cfg.get("dataset_path") or task_config.get(
+                    "dataset_path", ""
+                )
+                protocol_dataset_conf = protocol_cfg.get(
+                    "dataset_conf", "protocol_constrained_gen"
+                )
+                protocol_dataset_conf = create_dataset_config_override(
+                    protocol_dataset_conf,
+                    protocol_dataset_path,
+                    output_file_path,
+                    config_dir_name=config_dir_name,
+                )
+                append_dataset_path_check(shell_content, protocol_dataset_path)
+
+                # 6.5 执行协议测试
+                protocol_work_dir = f"{output_file_path_incontainer}/protocol_results"
+                num_prompts = protocol_cfg.get("num_prompts", "")
+                if num_prompts and isinstance(num_prompts, int):
+                    protocol_num_prompts_str = f"--num-prompts {num_prompts} "
+                else:
+                    protocol_num_prompts_str = ""
+                protocol_cmd = (
+                    f'ais_bench --config-dir "$AIS_BENCH_CONFIG_DIR" '
+                    f'--models {protocol_model_name} '
+                    f'--datasets {protocol_dataset_conf} '
+                    f'{protocol_num_prompts_str}'
+                    f'--mode all '
+                    f'--work-dir {protocol_work_dir}'
+                )
+                shell_content.append(f'echo "执行协议测试命令：{protocol_cmd}"')
+                append_checked_command(shell_content, protocol_cmd, "AISBench协议测试执行失败")
+                shell_content.append(f'echo "协议测试完成，结果保存至 {protocol_work_dir}"')
+                shell_content.append(f'cp {protocol_model_file} {output_file_path_incontainer}/')
+
     shell_content.append(f'chown -R {user_id}:{user_id} {output_file_path_incontainer}/* ')
 
     shell_content.append('if [ -n "${CHAT_CONFIG_FILE:-}" ] && [ -f "$CHAT_CONFIG_FILE" ]; then')

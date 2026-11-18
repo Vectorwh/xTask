@@ -15,7 +15,8 @@
         "Device_type": "A3",
         "docker_cmd": "docker",
         "python_exec": "python",
-        "pip_exec": "pip"
+        "pip_exec": "pip",
+        "enable_protocol_test": false
     },
     "DOCKER_CONFIG": {
         "docker_cmd": "docker",
