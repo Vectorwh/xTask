@@ -27,6 +27,18 @@ Per-sample extra_params flows through:
     -> generate(**args) includes extra_params
     -> get_request_body(**args) extracts and injects protocol fields
 
+Warmup defense (two layers):
+    AISBench sends warmup requests before the main inference loop using
+    data_list entries.  If those entries carry extra_params (response_format,
+    guided_*), the warmup request would include protocol fields that some
+    servers reject with 400 Bad Request, aborting the entire task.
+
+    Layer 1 (inferencer): ProtocolGenInferencer.warm_up() temporarily strips
+    extra_params from data_list during warmup and restores them afterwards.
+    Layer 2 (model): _ProtocolAwareAPIChatImpl.warm_up() sets an _in_warmup
+    flag; get_request_body() checks the flag and skips inject_protocol_fields()
+    while it is active.  Both layers handle sync and async parent signatures.
+
 Full message preservation:
     parse_text_response() / stream_infer() store the complete message as a
     JSON string in output.content (clearing output.reasoning_content) so
@@ -38,6 +50,7 @@ message extraction, SSE assembly, stream verification) remain unit-testable
 on the host without ais_bench installed.
 """
 
+import inspect
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -280,7 +293,43 @@ def create_protocol_aware_chat(stream_verify: bool = False):
 
         def __init__(self, *args, **kwargs):
             self._verify_enabled = kwargs.pop("stream_verify", stream_verify)
+            self._in_warmup = False
             super().__init__(*args, **kwargs)
+
+        # --------------------------------------------------------------
+        # Warmup defense (Layer 2: model level)
+        # --------------------------------------------------------------
+
+        def warm_up(self, *args, **kwargs):
+            """Set _in_warmup flag so get_request_body skips protocol
+            field injection during warmup requests.
+
+            Some inference servers reject requests carrying
+            response_format / guided_* fields with 400 Bad Request.
+            Warmup requests only need to pre-load the model; protocol
+            fields are irrelevant and potentially harmful.
+
+            Handles both sync and async parent signatures defensively.
+            If the parent class has no warm_up method, this is a no-op.
+            """
+            parent_warm_up = getattr(super(), "warm_up", None)
+            if parent_warm_up is None:
+                return  # Parent has no warm_up; nothing to defend.
+            self._in_warmup = True
+            try:
+                result = parent_warm_up(*args, **kwargs)
+            except BaseException:
+                self._in_warmup = False
+                raise
+            if inspect.iscoroutine(result):
+                async def _wrapped_warm_up():
+                    try:
+                        return await result
+                    finally:
+                        self._in_warmup = False
+                return _wrapped_warm_up()
+            self._in_warmup = False
+            return result
 
         async def get_request_body(
             self, input, max_out_len, output, **args
@@ -293,8 +342,11 @@ def create_protocol_aware_chat(stream_verify: bool = False):
             request_body = await super().get_request_body(
                 input, max_out_len, output, **args
             )
-            # Inject per-sample protocol/constrained-decoding fields.
-            inject_protocol_fields(request_body, extra_params)
+            # Skip protocol injection during warmup to avoid 400 errors
+            # from servers that don't support response_format/guided_*
+            # fields in warmup requests.
+            if not self._in_warmup:
+                inject_protocol_fields(request_body, extra_params)
             return request_body
 
         async def parse_text_response(self, json_content, output):
