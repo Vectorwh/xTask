@@ -436,6 +436,22 @@ def generate_aisbench_script(
 
         api_type = accuracy_cfg.get("api_type", "vllm_api_general_chat")
         api_type_file, model_config_name, shell_content = get_api_type_file(api_type, shell_content)
+        append_xtask_pythonpath(shell_content)
+        if accuracy_cfg.get("request_timeout") is not None:
+            request_timeout = int(accuracy_cfg["request_timeout"])
+            request_retries = int(accuracy_cfg.get("request_retries", 2))
+            if request_timeout <= 0 or request_retries <= 0:
+                raise ValueError("request_timeout and request_retries must be positive")
+            if api_type != "vllm_api_general_chat":
+                raise ValueError("request_timeout currently supports vllm_api_general_chat only")
+            override = (
+                "\nfrom xtask.benchmarks.aisbench.request_timeout import XTaskGPQAChat\n"
+                "models[0]['type'] = XTaskGPQAChat\n"
+                f"models[0]['request_timeout'] = {request_timeout}\n"
+                f"models[0]['retry'] = {request_retries}\n"
+            )
+            shell_content.append("printf '%s' " + shlex.quote(override) + ' >> "$CONFIG_FILE"')
+
 
         # Step 3: 修改配置文件中的核心参数（使用sed命令）
         shell_content.append("\n# 3. 修改vllm_api配置文件$CONFIG_FILE参数")

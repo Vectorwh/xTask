@@ -1,0 +1,230 @@
+# Set the P/D host anchors below for the target environment; HCCL uses LOCAL_IP.
+case_name: deepseek_v41_1017_xllm_acc_gpqa_pdp4_ddp8_ep16
+engine_type: xllm
+model_path: /export/home/models/DeepSeek-V4.1-Flash-1017-w8a8/
+served_model_name: DeepSeek-V4.1-Flash-1017-w8a8
+metrics: acc
+dataset_name: gpqa
+dataset_path: /xllm_test_060/benchmark/ais_bench/datasets/gpqa
+dataset_format: csv
+communication_backend: hccl
+userid: 1023
+serving_wait_time: 10
+hccl_if_port: 43432
+progress_conn_port: 8773
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: vllm_api_general_chat
+    dataset_conf: gpqa_gen_0_shot_cot_chat_prompt
+    num_prompts: 198
+    batch_size: 8
+    output_len: 130000
+    request_timeout: 3600
+    request_rate: 0
+    baseline: 92.42424242424242
+    threshold: 0.05
+    generation_kwargs:
+      temperature: 1.0
+      top_p: 0.95
+      ignore_eos: false
+      chat_template_kwargs:
+        thinking_mode: thinking
+    request_retries: 2
+deployment:
+  mode: pd_disaggregated
+  master_host: &prefill_host 11.87.191.75
+  sync_workspace: true
+  resource_sync:
+    enabled: true
+    source: /export/home/models/xllm_test_060
+    target: /export/home/models/xllm_test_060
+    max_workers: 4
+    timeout: 3600
+  benchmark:
+    runner_instance: prefill-0-node-0
+    health_path: /readyz
+    router_instance: router-0
+  pd_instances:
+  - name: prefill-0
+    role: prefill
+    group_master_host: *prefill_host
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_tokens_per_batch: 32768
+      max_seqs_per_batch: 64
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      max_tokens_per_chunk_for_prefill: 8192
+      enable_schedule_overlap: true
+      enable_graph: true
+      ep_size: 16
+      dp_size: 4
+      enable_disagg_pd: true
+      speculative_algorithm: DSpark
+      draft_model: /export/home/models/DeepSeek-V4.1-Flash-1017-w8a8/
+      num_speculative_tokens: 5
+      enable_flashcomm1: true
+      flashcomm1_min_prefill_tokens: 128
+      tool_call_parser: deepseekv41
+      reasoning_parser: deepseek-v4
+      disagg_pd_port: 7777
+      model_impl: python
+      npu_kernel_backend: TORCH
+      cp_size: 1
+      engram_config: '''{"cpu_offload":true,"dp_shared_memory":false}'''
+      enable_graph_aux_hidden_states: true
+      enable_fused_mc2: 1
+      draft_sampling_mode: greedy
+      enable_dsa_cp: true
+      expert_parallel_degree: 2
+      enable_swa_bounded_replay: true
+      random_seed: 123
+      bthread_concurrency: 8
+      num_threads: 8
+      max_cache_size: 2147483648
+      enable_mega_moe: false
+    nodes:
+    - name: prefill-0-node-0
+      host: *prefill_host
+      device_ids:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+      - 8
+      - 9
+      - 10
+      - 11
+      - 12
+      - 13
+      - 14
+      - 15
+      local_port: 18004
+    startup_environment:
+    - export TCMALLOC_SKIP_MMAP=1
+    - unset HCCL_OP_EXPANSION_MODE
+    - export NPU_MEMORY_FRACTION=0.96
+    - export FLA_NPU_DISABLE_PTH=1
+    - export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device"}'
+    - export INF_NAN_MODE_ENABLE=0 INF_NAN_MODE_FORCE_DISABLE=1
+    - export HCCL_SOCKET_IFNAME=bond0 GLOO_SOCKET_IFNAME=bond0 TP_SOCKET_IFNAME=bond0
+    - export HCCL_BUFFSIZE=512 HCCL_BUFFSIZE_EP=512
+    - export PYTHONHASHSEED=123
+    - ulimit -c 0
+    - export HCCL_IF_IP="$LOCAL_IP"
+    - export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    - export TASK_QUEUE_ENABLE=1
+    - export LCCL_DETERMINISTIC=1 HCCL_DETERMINISTIC=true ATB_MATMUL_SHUFFLE_K_ENABLE=0
+    serving_ready_timeout: 1800
+  - name: decode-0
+    role: decode
+    group_master_host: &decode_host 11.87.191.121
+    serving_extensiable_param:
+      max_memory_utilization: 0.85
+      max_tokens_per_batch: 4096
+      max_seqs_per_batch: 64
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      max_tokens_per_chunk_for_prefill: 8192
+      enable_schedule_overlap: true
+      enable_graph: true
+      ep_size: 16
+      dp_size: 8
+      enable_disagg_pd: true
+      speculative_algorithm: DSpark
+      draft_model: /export/home/models/DeepSeek-V4.1-Flash-1017-w8a8/
+      num_speculative_tokens: 5
+      enable_flashcomm1: true
+      flashcomm1_min_prefill_tokens: 128
+      tool_call_parser: deepseekv41
+      reasoning_parser: deepseek-v4
+      disagg_pd_port: 7777
+      model_impl: python
+      npu_kernel_backend: TORCH
+      cp_size: 1
+      engram_config: '''{"cpu_offload":true,"dp_shared_memory":false}'''
+      enable_graph_aux_hidden_states: true
+      enable_fused_mc2: 1
+      draft_sampling_mode: greedy
+      enable_dsa_cp: true
+      expert_parallel_degree: 2
+      enable_swa_bounded_replay: true
+      random_seed: 123
+      bthread_concurrency: 8
+      num_threads: 8
+      max_cache_size: 8589934592
+      enable_mega_moe: true
+    nodes:
+    - name: decode-0-node-0
+      host: *decode_host
+      device_ids:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+      - 8
+      - 9
+      - 10
+      - 11
+      - 12
+      - 13
+      - 14
+      - 15
+      local_port: 18004
+    startup_environment:
+    - export TCMALLOC_SKIP_MMAP=1
+    - unset HCCL_OP_EXPANSION_MODE
+    - export NPU_MEMORY_FRACTION=0.96
+    - export FLA_NPU_DISABLE_PTH=1
+    - export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device"}'
+    - export INF_NAN_MODE_ENABLE=0 INF_NAN_MODE_FORCE_DISABLE=1
+    - export HCCL_SOCKET_IFNAME=bond0 GLOO_SOCKET_IFNAME=bond0 TP_SOCKET_IFNAME=bond0
+    - export HCCL_BUFFSIZE=512 HCCL_BUFFSIZE_EP=512
+    - export PYTHONHASHSEED=123
+    - ulimit -c 0
+    - export HCCL_IF_IP="$LOCAL_IP"
+    - export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
+    - export TASK_QUEUE_ENABLE=0
+    - unset LCCL_DETERMINISTIC HCCL_DETERMINISTIC ATB_MATMUL_SHUFFLE_K_ENABLE
+    serving_ready_timeout: 1800
+  xllm_service:
+    batch_credit_max_grant_units: 16384
+    batch_credit_max_grant_units_per_router_tenant: 16384
+    default_request_deadline_ms: 3600000
+    max_request_deadline_ms: 3600000
+    transfer_port_base: 26000
+    service_binary_profile: auto
+    etcd:
+      host: *prefill_host
+      client_port: 22389
+      peer_port: 22380
+      container_instance: prefill-0-node-0
+    coordinators:
+    - name: coordinator-0
+      host: *prefill_host
+      http_server_port: 28888
+      rpc_server_port: 28889
+      container_instance: prefill-0-node-0
+    routers:
+    - name: router-0
+      host: *decode_host
+      http_server_port: 38888
+      rpc_server_port: 38889
+      container_instance: decode-0-node-0
+    startup_attempts: 2
+    startup_wait_seconds: 3
+    master_key_wait_seconds: 30
+serving_ready_timeout: 1800
+benchmark_timeout: 14400

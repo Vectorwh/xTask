@@ -163,7 +163,7 @@ class XllmServiceCluster:
         return env
 
     def _service_argv(self, item):
-        return [
+        argv = [
             "xllm_master_serving",
             f"--etcd_addr={self.topology.etcd_host}:{self.topology.etcd_client_port}",
             f"--http_server_port={item.http_server_port}",
@@ -176,6 +176,21 @@ class XllmServiceCluster:
             "--control_plane_shard_id=default",
             f"--tokenizer_path={self.task_config.get('model_path', '')}",
         ]
+        # Optional budgets are scoped to this YAML; omitted flags keep binary defaults.
+        for name in (
+            "batch_credit_max_grant_units",
+            "batch_credit_max_grant_units_per_router_tenant",
+            "default_request_deadline_ms",
+            "max_request_deadline_ms",
+            "flow_max_queue_wait_ms",
+        ):
+            value = self.control.get(name)
+            if value is None:
+                continue
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"xllm_service.{name} must be a positive integer")
+            argv.append(f"--{name}={value}")
+        return argv
 
     def _wait(self, predicate, timeout):
         deadline = time.monotonic() + timeout
