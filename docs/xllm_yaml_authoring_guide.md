@@ -347,6 +347,8 @@ AISBench 精度字段如下：
 | `generation_kwargs` | 建议 | 最终采用的生成参数块 | 非空时重写 AISBench 的 `generation_kwargs`。精度复现通常建议 `temperature: 0`，并明确 `ignore_eos`。 |
 | `baseline` | 是 | 预期精度值 | 当前精度结果必须有有效正数 baseline 才可能判定通过；未配置 baseline 不会自动放行。注意不同数据集的精度可能用百分数或 0 到 1 小数，必须与结果解析器的量纲一致。 |
 | `threshold` | 是 | 基线上下允许浮动比例 | 同样按 `baseline * (1 ± threshold)` 校验。 |
+| `request_timeout` | 按需 | 单条 HTTP 请求的超时秒数 | AISBench 默认单请求无超时；长输出/thinking 用例可显式设置（如 3600）。超时后按 `request_retries` 重试。目前仅支持 `vllm_api_general_chat` 接口，必须为正整数。不影响答案提取与 thinking 行为。 |
+| `request_retries` | 按需 | 请求失败后的总尝试次数 | 缺省为 2。须为正整数。 |
 
 `dump_eval_details` 有一个容易踩坑的当前限制：AISBench 脚本生成器从 YAML 顶层读取它，即应写成顶层 `dump_eval_details: true`；写在 `benchmark.acc` 里目前不会生效。
 
@@ -1151,6 +1153,35 @@ deployment:
   不用进程名批量 pkill。重试某个 Router/Coordinator 不删除 etcd 数据或影响其他成员。
   容器内需 Python 3.9+、Linux pidfd 支持（当前测试镜像满足）；未验证支持的运行环境
   应先做进程 helper 的 CPU 检查。`CLEAN_RESULTS=false` 保留完整运行环境。
+
+### Service 进程命令行透传 `extra_service_args`
+
+`xllm_master_serving` 的额外命令行参数可通过 `deployment.xllm_service.extra_service_args`
+按用例声明。每个键会被拼成 `--键=值` 追加到本用例所有 Coordinator 和 Router 进程的
+启动命令中；未写的参数保持二进制默认值。以后 Service 新增 flag 只需在 YAML 中加一行，
+不需要修改 xTask 代码。
+
+```yaml
+deployment:
+  xllm_service:
+    extra_service_args:
+      batch_credit_max_grant_units: 16384
+      batch_credit_max_grant_units_per_router_tenant: 16384
+      default_request_deadline_ms: 3600000
+      max_request_deadline_ms: 3600000
+```
+
+校验规则：
+
+- flag 名必须匹配 `[A-Za-z][A-Za-z0-9_]*`（字母开头，后接字母/数字/下划线）。
+- 值必须是标量（int、float 或 str）；布尔、null、列表、字典都会被拒绝。
+- 参数对 Coordinator 和 Router 两种角色统一生效；xTask 只做转发，不解释其含义。
+- `etcd`、`coordinators`、`routers`、`transfer_port_base`、`service_binary_profile`
+  等结构化键由 xTask 自身消费，永远不会被当作命令行参数透传。
+
+注意：flag 名写错要到 Service 进程启动时才会暴露（二进制不认识该参数会启动失败），
+新增参数首次在真机运行时建议先确认服务正常拉起。长输出用例配合客户端超时
+（`benchmark.acc.request_timeout`，见 AISBench 精度一节）可避免请求挂死。
 
 ### 多个普通实例统一路由
 

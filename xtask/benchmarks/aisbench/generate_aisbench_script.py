@@ -639,6 +639,22 @@ def generate_aisbench_script(
         repetition_penalty = accuracy_cfg.get("repetition_penalty", 1)
 
         api_type_file, model_config_name, shell_content = get_api_type_file(api_type, shell_content)
+        append_xtask_pythonpath(shell_content)
+        if accuracy_cfg.get("request_timeout") is not None:
+            request_timeout = int(accuracy_cfg["request_timeout"])
+            request_retries = int(accuracy_cfg.get("request_retries", 2))
+            if request_timeout <= 0 or request_retries <= 0:
+                raise ValueError("request_timeout and request_retries must be positive")
+            if api_type != "vllm_api_general_chat":
+                raise ValueError("request_timeout currently supports vllm_api_general_chat only")
+            override = (
+                "\nfrom xtask.benchmarks.aisbench.request_timeout import XTaskGPQAChat\n"
+                "models[0]['type'] = XTaskGPQAChat\n"
+                f"models[0]['request_timeout'] = {request_timeout}\n"
+                f"models[0]['retry'] = {request_retries}\n"
+            )
+            shell_content.append("printf '%s' " + shlex.quote(override) + ' >> "$CONFIG_FILE"')
+
 
         # gedit 等 xtask 内置 api_type 的模型配置 import xtask 兼容模块
         # （xtask.benchmarks.aisbench.gedit_image_edit_api 等），AISBench 子进程

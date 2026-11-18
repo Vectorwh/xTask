@@ -13,6 +13,7 @@ import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
+import re
 import shlex
 import time
 import uuid
@@ -163,7 +164,7 @@ class XllmServiceCluster:
         return env
 
     def _service_argv(self, item):
-        return [
+        argv = [
             "xllm_master_serving",
             f"--etcd_addr={self.topology.etcd_host}:{self.topology.etcd_client_port}",
             f"--http_server_port={item.http_server_port}",
@@ -176,6 +177,14 @@ class XllmServiceCluster:
             "--control_plane_shard_id=default",
             f"--tokenizer_path={self.task_config.get('model_path', '')}",
         ]
+        # extra_service_args are scoped to this YAML; omitted flags keep binary defaults.
+        for name, value in (self.control.get("extra_service_args") or {}).items():
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
+                raise ValueError(f"xllm_service.extra_service_args.{name} is not a valid flag name")
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise TypeError(f"xllm_service.extra_service_args.{name} must be a scalar")
+            argv.append(f"--{name}={value}")
+        return argv
 
     def _wait(self, predicate, timeout):
         deadline = time.monotonic() + timeout
