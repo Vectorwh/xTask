@@ -238,16 +238,83 @@ def _get_base_classes():
     return VLLMCustomAPIChat, VLLMCustomAPIChatStream
 
 
-def _get_client_classes():
-    """Lazily import AISBench client classes."""
-    from ais_bench.benchmark.clients import OpenAIChatTextClient, OpenAIChatStreamClient
-    return OpenAIChatTextClient, OpenAIChatStreamClient
-
-
 def _get_handle_synthetic_input():
-    """Lazely import the handle_synthetic_input decorator."""
+    """Lazily import the handle_synthetic_input decorator."""
     from ais_bench.benchmark.models.base_api import handle_synthetic_input
     return handle_synthetic_input
+
+
+def _patch_client_full_message(client):
+    """Patch a non-stream client instance to preserve the full message.
+
+    Overrides ``update_middle_data`` on the *instance* (not the class) so the
+    complete message (content, reasoning_content, tool_calls, finish_reason)
+    is stored as a JSON string in MiddleData.output instead of only
+    choices[0].message.content.
+
+    Works with any AISBench client version -- no imports from
+    ais_bench.benchmark.clients needed.
+    """
+    orig_update = client.update_middle_data
+
+    def update_middle_data(res, inputs):
+        full_msg = extract_full_message(res)
+        # Let the original update metrics (num_generated_chars, etc.)
+        try:
+            orig_update(res, inputs)
+        except Exception:
+            pass
+        # Override output with the full message JSON so protocol fields
+        # flow through the standard prediction pipeline.
+        inputs.output = json.dumps(full_msg, ensure_ascii=False)
+        inputs.output_reasoning = ""
+
+    client.update_middle_data = update_middle_data
+    return client
+
+
+def _patch_client_chunk_accumulator(client):
+    """Patch a stream client instance to collect raw SSE deltas.
+
+    Overrides ``process_response`` to attach a raw-chunk marker and
+    ``update_middle_data`` to accumulate the clean parsed chunk per-request
+    on the MiddleData object (thread-safe: each request has its own
+    MiddleData instance).
+
+    Works with any AISBench client version -- no imports from
+    ais_bench.benchmark.clients needed.
+    """
+    orig_request = client.request
+    orig_process = client.process_response
+    orig_update = client.update_middle_data
+
+    def request(inputs, parameters):
+        # Ensure middle_data is set for process_stream_line (which uses
+        # self.middle_data internally in some AISBench versions).
+        client.middle_data = inputs
+        return orig_request(inputs, parameters)
+
+    def process_response(json_content):
+        """Parse response and attach marker for delta assembly."""
+        response = orig_process(json_content)
+        if isinstance(response, dict):
+            response["_protocol_raw_chunk"] = json_content
+        return response
+
+    def update_middle_data(res, inputs):
+        # Pop marker BEFORE the original so it sees a clean chunk
+        res.pop("_protocol_raw_chunk", None)
+        # Let the original accumulate content/reasoning for metrics
+        orig_update(res, inputs)
+        # Accumulate the clean parsed chunk for SSE delta assembly
+        if not hasattr(inputs, "_protocol_delta_chunks"):
+            inputs._protocol_delta_chunks = []
+        inputs._protocol_delta_chunks.append(res)
+
+    client.request = request
+    client.process_response = process_response
+    client.update_middle_data = update_middle_data
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -337,62 +404,7 @@ def create_protocol_aware_chat(stream_verify: bool = False):
     installed (e.g. running unit tests on the host).
     """
     VLLMCustomAPIChat, VLLMCustomAPIChatStream = _get_base_classes()
-    OpenAIChatTextClient, OpenAIChatStreamClient = _get_client_classes()
     handle_synthetic_input = _get_handle_synthetic_input()
-
-    # --- Custom clients ---
-
-    class ProtocolAwareChatClient(OpenAIChatTextClient):
-        """Non-stream client preserving the full message structure.
-
-        Overrides update_middle_data() to store the complete message (content,
-        reasoning_content, tool_calls, finish_reason) as a JSON string in
-        MiddleData.output, instead of extracting only choices[0].message.content.
-        """
-
-        def update_middle_data(self, res, inputs):
-            full_msg = extract_full_message(res)
-            # Let the parent update metrics (num_generated_chars, etc.)
-            try:
-                super().update_middle_data(res, inputs)
-            except Exception:
-                pass
-            # Override output with the full message JSON so protocol fields
-            # flow through the standard prediction pipeline.
-            inputs.output = json.dumps(full_msg, ensure_ascii=False)
-            inputs.output_reasoning = ""
-
-    class ProtocolAwareStreamChatClient(OpenAIChatStreamClient):
-        """Stream client collecting raw SSE deltas for full message assembly.
-
-        Overrides process_response() to attach a marker before
-        update_middle_data() runs, and update_middle_data() to accumulate
-        the clean parsed chunk per-request on the MiddleData object
-        (thread-safe: each request has its own MiddleData instance).
-        """
-
-        def request(self, inputs, parameters):
-            # Ensure middle_data is set for process_stream_line (which uses
-            # self.middle_data internally in the base class).
-            self.middle_data = inputs
-            return super().request(inputs, parameters)
-
-        def process_response(self, json_content):
-            """Parse response and attach marker for delta assembly."""
-            response = super().process_response(json_content)
-            if isinstance(response, dict):
-                response["_protocol_raw_chunk"] = json_content
-            return response
-
-        def update_middle_data(self, res, inputs):
-            # Pop marker BEFORE super() so the base class sees a clean chunk
-            res.pop("_protocol_raw_chunk", None)
-            # Let the parent accumulate content/reasoning for metrics
-            super().update_middle_data(res, inputs)
-            # Accumulate the clean parsed chunk for SSE delta assembly
-            if not hasattr(inputs, "_protocol_delta_chunks"):
-                inputs._protocol_delta_chunks = []
-            inputs._protocol_delta_chunks.append(res)
 
     # --- Model adapters ---
 
@@ -406,12 +418,14 @@ def create_protocol_aware_chat(stream_verify: bool = False):
                 super().__init__(*args, **kwargs)
 
             def init_client(self, custom_client):
-                """Force the protocol-aware stream client (bypasses mmengine
-                registry which doesn't know our custom class)."""
-                self.client = ProtocolAwareStreamChatClient(
-                    url=self.endpoint_url, retry=self.retry
-                )
-                setattr(self.client, "api_key", self.api_key)
+                """Let the base class build the default client, then patch
+                it to accumulate SSE deltas for full message assembly.
+
+                This is version-agnostic: no imports from
+                ais_bench.benchmark.clients required.
+                """
+                super().init_client(custom_client)
+                _patch_client_chunk_accumulator(self.client)
 
             @handle_synthetic_input
             def _generate(self, input, max_out_len):
@@ -462,20 +476,44 @@ def create_protocol_aware_chat(stream_verify: bool = False):
             def _verify_against_non_stream(
                 self, messages, generation_kwargs, stream_msg
             ):
-                """Make a non-stream request with the same input and compare."""
-                non_stream_client = ProtocolAwareChatClient(
-                    url=self.endpoint_url, retry=self.retry
-                )
-                setattr(non_stream_client, "api_key", self.api_key)
+                """Make a non-stream HTTP request with the same input and
+                compare against the assembled stream message.
+
+                Uses the ``requests`` library directly instead of
+                instantiating an AISBench client -- avoids importing
+                ais_bench.benchmark.clients (not present in all versions).
+                """
+                import requests
 
                 verify_kwargs = dict(generation_kwargs)
                 verify_kwargs["stream"] = False
-
-                verify_data = self.prepare_input_data(messages, data_id=-1)
-                non_stream_client.request(verify_data, verify_kwargs)
+                payload = {
+                    "model": verify_kwargs.pop("model", self.model),
+                    "messages": messages,
+                    **verify_kwargs,
+                }
+                headers = {"Content-Type": "application/json"}
+                api_key = getattr(self, "api_key", None)
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
                 try:
-                    non_stream_msg = json.loads(verify_data.output)
-                except (json.JSONDecodeError, TypeError):
+                    resp = requests.post(
+                        self.endpoint_url,
+                        json=payload,
+                        headers=headers,
+                        timeout=300,
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                except Exception:
+                    logger.debug(
+                        "Non-stream verification request failed",
+                        exc_info=True,
+                    )
+                    return None
+                try:
+                    non_stream_msg = extract_full_message(body)
+                except Exception:
                     return None
                 return verify_stream_consistency(stream_msg, non_stream_msg)
 
@@ -486,12 +524,14 @@ def create_protocol_aware_chat(stream_verify: bool = False):
         full-message preservation."""
 
         def init_client(self, custom_client):
-            """Force the protocol-aware chat client (bypasses mmengine
-            registry which doesn't know our custom class)."""
-            self.client = ProtocolAwareChatClient(
-                url=self.endpoint_url, retry=self.retry
-            )
-            setattr(self.client, "api_key", self.api_key)
+            """Let the base class build the default client, then patch it
+            to preserve the full message structure.
+
+            This is version-agnostic: no imports from
+            ais_bench.benchmark.clients required.
+            """
+            super().init_client(custom_client)
+            _patch_client_full_message(self.client)
 
         @handle_synthetic_input
         def _generate(self, input, max_out_len):

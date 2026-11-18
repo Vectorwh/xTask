@@ -1794,7 +1794,12 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
                 self.init_client(kwargs.get("custom_client"))
 
             def init_client(self, custom_client):
-                pass
+                """Create a default text client (mirrors real AISBench
+                init_client which builds a client from config)."""
+                self.client = FakeOpenAIChatTextClient(
+                    url=self.endpoint_url, retry=self.retry
+                )
+                setattr(self.client, "api_key", self.api_key)
 
             def acquire(self):
                 pass
@@ -1811,7 +1816,12 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
             pass
 
         class FakeVLLMCustomAPIChatStream(FakeBaseAPI):
-            pass
+            def init_client(self, custom_client):
+                """Create a default stream client."""
+                self.client = FakeOpenAIChatStreamClient(
+                    url=self.endpoint_url, retry=self.retry
+                )
+                setattr(self.client, "api_key", self.api_key)
 
         def handle_synthetic_input(func):
             import functools
@@ -1828,19 +1838,15 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
         fake_pkg = types.ModuleType("ais_bench")
         fake_bench = types.ModuleType("ais_bench.benchmark")
         fake_models = types.ModuleType("ais_bench.benchmark.models")
-        fake_clients = types.ModuleType("ais_bench.benchmark.clients")
         fake_base_api = types.ModuleType("ais_bench.benchmark.models.base_api")
         fake_utils = types.ModuleType("ais_bench.benchmark.utils")
 
         fake_models.VLLMCustomAPIChat = FakeVLLMCustomAPIChat
         fake_models.VLLMCustomAPIChatStream = FakeVLLMCustomAPIChatStream
-        fake_clients.OpenAIChatTextClient = FakeOpenAIChatTextClient
-        fake_clients.OpenAIChatStreamClient = FakeOpenAIChatStreamClient
         fake_base_api.handle_synthetic_input = handle_synthetic_input
 
         fake_pkg.benchmark = fake_bench
         fake_bench.models = fake_models
-        fake_bench.clients = fake_clients
         fake_bench.models.base_api = fake_base_api
         fake_bench.utils = fake_utils
         fake_utils.prompt = fake_prompt
@@ -1850,7 +1856,6 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
             ("ais_bench", fake_pkg),
             ("ais_bench.benchmark", fake_bench),
             ("ais_bench.benchmark.models", fake_models),
-            ("ais_bench.benchmark.clients", fake_clients),
             ("ais_bench.benchmark.models.base_api", fake_base_api),
             ("ais_bench.benchmark.utils", fake_utils),
             ("ais_bench.benchmark.utils.prompt", fake_prompt),
