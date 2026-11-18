@@ -208,8 +208,9 @@ deployment:
     - unset LCCL_DETERMINISTIC HCCL_DETERMINISTIC ATB_MATMUL_SHUFFLE_K_ENABLE
     serving_ready_timeout: 1800
   xllm_service:
-    batch_credit_max_grant_units: 16384
-    batch_credit_max_grant_units_per_router_tenant: 16384
+    extra_service_args:
+      batch_credit_max_grant_units: 16384
+      batch_credit_max_grant_units_per_router_tenant: 16384
     transfer_port_base: 26000
     service_binary_profile: auto
     etcd:

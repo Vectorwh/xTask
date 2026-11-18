@@ -28,13 +28,24 @@ def test_explicit_case_budgets_reach_each_service_role(role):
                "batch_credit_max_grant_units": 16384,
                "batch_credit_max_grant_units_per_router_tenant": 16384}
     item = SimpleNamespace(**{**vars(ITEM), "role": role})
-    argv = cluster(options)._service_argv(item)
+    argv = cluster({"extra_service_args": options})._service_argv(item)
     for name, value in options.items():
         assert f"--{name}={value}" in argv
-    assert not any("flow_max_queue_wait_ms" in value for value in argv)
 
 
-@pytest.mark.parametrize("value", [True, "3600", 0, -1])
-def test_invalid_case_budget_is_rejected(value):
+def test_new_flag_passes_without_code_change():
+    argv = cluster({"extra_service_args": {"some_new_flag": 123, "str_flag": "abc"}})._service_argv(ITEM)
+    assert "--some_new_flag=123" in argv
+    assert "--str_flag=abc" in argv
+
+
+@pytest.mark.parametrize("name", ["with-dash", "with space", "9leading", "", "--inject=1"])
+def test_invalid_flag_name_is_rejected(name):
     with pytest.raises(ValueError):
-        cluster({"max_request_deadline_ms": value})._service_argv(ITEM)
+        cluster({"extra_service_args": {name: 1}})._service_argv(ITEM)
+
+
+@pytest.mark.parametrize("value", [True, None, {"a": 1}, ["x"]])
+def test_non_scalar_value_is_rejected(value):
+    with pytest.raises(TypeError):
+        cluster({"extra_service_args": {"max_request_deadline_ms": value}})._service_argv(ITEM)

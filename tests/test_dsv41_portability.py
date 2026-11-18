@@ -54,6 +54,7 @@ def test_case_host_anchors_update_whole_topology_and_hccl(hosts, tmp_path):
             assert not any("flow_max_queue_wait_ms" in argument for argument in argv)
             if case["metrics"] == "acc":
                 assert "--max_request_deadline_ms=3600000" in argv
+                assert "--default_request_deadline_ms=3600000" in argv
 
 
 def test_performance_yaml_rejects_failed_requests_and_allows_improvement():

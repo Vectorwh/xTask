@@ -13,6 +13,7 @@ import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
+import re
 import shlex
 import time
 import uuid
@@ -176,19 +177,12 @@ class XllmServiceCluster:
             "--control_plane_shard_id=default",
             f"--tokenizer_path={self.task_config.get('model_path', '')}",
         ]
-        # Optional budgets are scoped to this YAML; omitted flags keep binary defaults.
-        for name in (
-            "batch_credit_max_grant_units",
-            "batch_credit_max_grant_units_per_router_tenant",
-            "default_request_deadline_ms",
-            "max_request_deadline_ms",
-            "flow_max_queue_wait_ms",
-        ):
-            value = self.control.get(name)
-            if value is None:
-                continue
-            if type(value) is not int or value <= 0:
-                raise ValueError(f"xllm_service.{name} must be a positive integer")
+        # extra_service_args are scoped to this YAML; omitted flags keep binary defaults.
+        for name, value in (self.control.get("extra_service_args") or {}).items():
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
+                raise ValueError(f"xllm_service.extra_service_args.{name} is not a valid flag name")
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise TypeError(f"xllm_service.extra_service_args.{name} must be a scalar")
             argv.append(f"--{name}={value}")
         return argv
 
