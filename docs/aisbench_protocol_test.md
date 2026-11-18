@@ -144,13 +144,40 @@ eval_cfg = dict(
 
 ### 6.4 内置数据集
 
-`xtask/benchmarks/aisbench/datasets/protocol_constrained/` 下三组：
+`xtask/benchmarks/aisbench/datasets/protocol_constrained/` 下六组：
+
+**基础数据集（手工编写）**
 
 | 文件 | 用途 | 条数 |
 | --- | --- | --- |
-| `reasoning_split.jsonl` | 推理开关/泄漏检测 | 8 |
-| `tool_call_bfcl.jsonl` | 工具调用协议 | 7 |
-| `constrained_decoding.jsonl` | JSON Schema/正则/语法引导 | 9 |
+| `reasoning_split.jsonl` | 推理开关/泄漏检测 | 7 |
+| `tool_call_bfcl.jsonl` | 工具调用协议 | 6 |
+| `constrained_decoding.jsonl` | JSON Schema/正则/语法引导 | 8 |
+
+**边界数据集（脚本生成，`tools/generate_protocol_boundary_datasets.py`）**
+
+| 文件 | 用途 | 条数 |
+| --- | --- | --- |
+| `boundary_regex.jsonl` | 多字节中文/身份证/车牌/UUID/MAC/IPv6/邮箱/颜色码/GPS 等正则边界 | 20 |
+| `boundary_grammar.jsonl` | SQL/算术/YAML/Python签名/CSV/JSON 7 套 EBNF 语法边界 | 20 |
+| `boundary_adversarial.jsonl` | 标签碰撞/特殊字符转义/tool_choice 强制/空内容/5-8 层深层嵌套 | 30 |
+
+边界数据集采用纯 Python 硬编码生成，运行 `python tools/generate_protocol_boundary_datasets.py` 即可重新生成，`--output-dir` 可指定输出目录。所有 case 的 `max_out_len` 统一 ≥2048（避免思考模式 token 耗尽截断），深层嵌套 case 提升至 8192。
+
+### 6.5 开源数据集转换
+
+`tools/convert_open_protocol_datasets.py` 支持将开源基准转为协议数据集格式（纯函数可单测，按需运行）：
+
+| 来源 | 转换器 | 输出约束类型 |
+| --- | --- | --- |
+| BFCL v3 | `convert_bfcl()` | tool_calls |
+| JSONSchemaBench | `convert_jsonschemabench()` | schema |
+| GSM8K | `convert_gsm8k()` | require_reasoning + answer_regex |
+
+```bash
+python tools/convert_open_protocol_datasets.py --source bfcl \
+    --input /path/to/bfcl_data.json --output /path/to/output.jsonl
+```
 
 ## 7. 三层门禁评估器
 
@@ -278,7 +305,7 @@ benchmark:
     stream_verify: false
     batch_size: 8
     output_len: 4096
-    num_prompts: 9
+    num_prompts: 8
     generation_kwargs:
       temperature: 0
       ignore_eos: false
@@ -302,6 +329,42 @@ benchmark:
 
 按第 4 节格式编写 JSONL，每行包含 `question`、`max_out_len`、`extra_params`、`ground_truth`，通过 `dataset_path` 指定即可。
 
+### 10.4 使用边界数据集
+
+内置边界数据集覆盖正则/语法/对抗三类边界场景，可直接通过 `dataset_path` 引用：
+
+```yaml
+benchmark:
+  protocol:
+    dataset_path: xtask/benchmarks/aisbench/datasets/protocol_constrained/boundary_adversarial.jsonl
+```
+
+重新生成边界数据集：
+
+```bash
+python tools/generate_protocol_boundary_datasets.py
+python tools/generate_protocol_boundary_datasets.py --output-dir /custom/path
+```
+
+### 10.5 转换开源数据集
+
+将 BFCL / JSONSchemaBench / GSM8K 原始数据转为协议数据集格式：
+
+```bash
+# BFCL 工具调用
+python tools/convert_open_protocol_datasets.py --source bfcl \
+    --input /path/to/bfcl_data.json --output /path/to/bfcl_converted.jsonl
+
+# JSONSchemaBench Schema 约束
+python tools/convert_open_protocol_datasets.py --source jsonschemabench \
+    --input /path/to/jsb.jsonl --output /path/to/jsb_converted.jsonl
+
+# GSM8K 推理分离
+python tools/convert_open_protocol_datasets.py --source gsm8k \
+    --input /path/to/gsm8k.jsonl --output /path/to/gsm8k_converted.jsonl \
+    --max-out-len 4096
+```
+
 ## 11. 文件清单
 
 | 文件 | 类型 | 说明 |
@@ -313,6 +376,10 @@ benchmark:
 | `xtask/benchmarks/aisbench/protocol_constrained_evaluator.py` | 新增 | 三层门禁评估器 |
 | `xtask/benchmarks/aisbench/protocol_postprocess.py` | 新增 | A/B 对比后处理 |
 | `xtask/benchmarks/aisbench/configs/datasets/protocol_constrained_gen.py` | 新增 | 数据集配置 |
-| `xtask/benchmarks/aisbench/datasets/protocol_constrained/*.jsonl` | 新增 | 内置数据集（3 组 24 条） |
+| `xtask/benchmarks/aisbench/datasets/protocol_constrained/*.jsonl` | 新增 | 内置数据集（基础 3 组 21 条） |
+| `xtask/benchmarks/aisbench/datasets/protocol_constrained/boundary_*.jsonl` | 新增 | 边界数据集（3 组 70 条，脚本生成） |
+| `tools/generate_protocol_boundary_datasets.py` | 新增 | 边界数据集生成脚本 |
+| `tools/convert_open_protocol_datasets.py` | 新增 | 开源数据集转换脚本（BFCL/JSONSchemaBench/GSM8K） |
 | `tests/e2e/xllm/examples/yaml_authoring/36_single_aisbench_protocol.yaml` | 新增 | YAML 示例 |
 | `tests/test_aisbench_protocol.py` | 新增 | 48 个单元测试 |
+| `tests/test_protocol_boundary_datasets.py` | 新增 | 边界数据集 33 个单元测试 |
