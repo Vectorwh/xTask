@@ -1985,39 +1985,42 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
 
 
 class TestWarmupDefenseInferencer(unittest.TestCase):
-    """Layer 1: ProtocolGenInferencer.warm_up() strips extra_params from
-    data_list during warmup and restores them afterwards."""
+    """ProtocolGenInferencer.warmup() strips extra_params from the
+    data_list parameter so warmup requests don't carry protocol fields.
+
+    Real AISBench 3.1.x flow (verified from source):
+        Task.warm_up(data_list) -> new inferencer.warmup(data_list, ...)
+        -> BaseApiInferencer.warmup() iterates data_list, calls
+           do_request(copy.deepcopy(data)) -> model.generate(**data)
+        -> get_request_body(**args) -> inject_protocol_fields()
+
+    Since get_data_list() already injected extra_params into data_list,
+    warmup() must strip them before delegating to super().warmup().
+    """
 
     @classmethod
     def setUpClass(cls):
         import sys
         import types
 
+        # Fake BaseApiInferencer.warmup — records what data it receives
         class FakeGenInferencer:
-            """Minimal fake matching AISBench GenInferencer interface."""
-
             def __init__(self):
-                self.data_list = []
-                self.warmup_seen_data = []
+                self.warmup_received_data = None
+                self.warmup_call_args = None
 
             def get_data_list(self, retriever):
-                return self.data_list
+                return []
 
-            def warm_up(self, *args, **kwargs):
-                # Record what data_list looks like during warmup
-                self.warmup_seen_data = [
-                    dict(item) for item in self.data_list
+            async def warmup(self, data_list, warmup_times=1,
+                             concurrency=1):
+                # Record what data_list the parent warmup received
+                self.warmup_received_data = [
+                    dict(item) if isinstance(item, dict) else item
+                    for item in data_list
                 ]
-
-        class FakeAsyncGenInferencer(FakeGenInferencer):
-            async def warm_up(self, *args, **kwargs):
-                self.warmup_seen_data = [
-                    dict(item) for item in self.data_list
-                ]
-
-        class FakeNoWarmupInferencer(FakeGenInferencer):
-            # Deliberately no warm_up method
-            pass
+                self.warmup_call_args = (warmup_times, concurrency)
+                return {"success": 1, "failed": 0, "failed_reasons": {}}
 
         fake_pkg = types.ModuleType("ais_bench")
         fake_bench = types.ModuleType("ais_bench.benchmark")
@@ -2036,8 +2039,6 @@ class TestWarmupDefenseInferencer(unittest.TestCase):
             "ais_bench.benchmark.openicl.icl_inferencer": fake_inferencer_mod,
         }
         cls.FakeGenInferencer = FakeGenInferencer
-        cls.FakeAsyncGenInferencer = FakeAsyncGenInferencer
-        cls.FakeNoWarmupInferencer = FakeNoWarmupInferencer
 
         cls._saved_modules = {}
         for name, mod in cls._fake_modules.items():
@@ -2067,302 +2068,83 @@ class TestWarmupDefenseInferencer(unittest.TestCase):
 
     def _make_data_list(self):
         return [
-            {"prompt": "q1", "extra_params": {"response_format": {"type": "json_schema"}}},
-            {"prompt": "q2", "extra_params": {"guided_regex": "[0-9]+"}},
-            {"prompt": "q3", "extra_params": {"tools": []}},
+            {"prompt": "q1", "index": 0, "data_abbr": "ds",
+             "max_out_len": 128,
+             "extra_params": {"response_format": {"type": "json_schema"}}},
+            {"prompt": "q2", "index": 1, "data_abbr": "ds",
+             "max_out_len": 128,
+             "extra_params": {"guided_regex": "[0-9]+"}},
+            {"prompt": "q3", "index": 2, "data_abbr": "ds",
+             "max_out_len": 128},
         ]
 
-    def test_sync_warmup_strips_and_restores(self):
-        """Sync parent warm_up: extra_params removed during, restored after."""
+    def test_warmup_strips_extra_params(self):
+        """warmup() must strip extra_params from data passed to parent."""
         inferencer = self.ProtocolGenInferencer()
-        inferencer.data_list = self._make_data_list()
-        inferencer.warm_up()
+        data_list = self._make_data_list()
+        asyncio.run(inferencer.warmup(data_list, warmup_times=2,
+                                      concurrency=1))
 
-        # During warmup, data_list items had no extra_params
-        for item in inferencer.warmup_seen_data:
+        # Parent warmup received data WITHOUT extra_params
+        received = inferencer.warmup_received_data
+        self.assertIsNotNone(received)
+        for item in received:
             self.assertNotIn("extra_params", item)
+        # Other fields preserved
+        self.assertEqual(received[0]["prompt"], "q1")
+        self.assertEqual(received[0]["index"], 0)
 
-        # After warmup, extra_params are restored
+    def test_warmup_does_not_modify_original(self):
+        """Original data_list must be untouched for real inference."""
+        inferencer = self.ProtocolGenInferencer()
+        data_list = self._make_data_list()
+        asyncio.run(inferencer.warmup(data_list, warmup_times=1))
+
+        # Original still has extra_params
+        self.assertIn("extra_params", data_list[0])
         self.assertEqual(
-            inferencer.data_list[0]["extra_params"],
+            data_list[0]["extra_params"],
             {"response_format": {"type": "json_schema"}},
         )
-        self.assertEqual(
-            inferencer.data_list[1]["extra_params"],
-            {"guided_regex": "[0-9]+"},
-        )
+        self.assertIn("extra_params", data_list[1])
+        # Item without extra_params is unaffected
+        self.assertNotIn("extra_params", data_list[2])
 
-    def test_async_warmup_strips_and_restores(self):
-        """Async parent warm_up: extra_params removed during, restored after."""
-        with patch.object(
-            self.FakeGenInferencer,
-            "warm_up",
-            self.FakeAsyncGenInferencer.warm_up,
-        ):
-            inferencer = self.ProtocolGenInferencer()
-            inferencer.data_list = self._make_data_list()
-            asyncio.run(inferencer.warm_up())
-
-            for item in inferencer.warmup_seen_data:
-                self.assertNotIn("extra_params", item)
-
-            self.assertEqual(
-                inferencer.data_list[0]["extra_params"],
-                {"response_format": {"type": "json_schema"}},
-            )
-
-    def test_warmup_exception_restores_extra_params(self):
-        """extra_params must be restored even if warm_up raises."""
-        def exploding_warm_up(self, *args, **kwargs):
-            raise RuntimeError("warmup exploded")
-
-        with patch.object(
-            self.FakeGenInferencer,
-            "warm_up",
-            exploding_warm_up,
-        ):
-            inferencer = self.ProtocolGenInferencer()
-            inferencer.data_list = self._make_data_list()
-            with self.assertRaises(RuntimeError):
-                inferencer.warm_up()
-
-            # extra_params restored despite exception
-            self.assertIn("extra_params", inferencer.data_list[0])
-            self.assertEqual(
-                inferencer.data_list[0]["extra_params"],
-                {"response_format": {"type": "json_schema"}},
-            )
-
-    def test_no_parent_warmup_is_noop(self):
-        """If parent has no warm_up, override is a silent no-op."""
-        with patch.object(
-            self.FakeGenInferencer,
-            "warm_up",
-            None,
-        ):
-            inferencer = self.ProtocolGenInferencer()
-            inferencer.data_list = self._make_data_list()
-            # Should not raise
-            result = inferencer.warm_up()
-            self.assertIsNone(result)
-            # data_list unchanged
-            self.assertIn("extra_params", inferencer.data_list[0])
-
-    def test_strip_and_restore_helpers(self):
-        """_strip_extra_params / _restore_extra_params round-trip."""
+    def test_warmup_forwards_args(self):
+        """warmup_times and concurrency must be forwarded to parent."""
         inferencer = self.ProtocolGenInferencer()
-        inferencer.data_list = self._make_data_list()
-        saved = inferencer._strip_extra_params()
-        self.assertEqual(len(saved), 3)
-        self.assertEqual(saved[0], {"response_format": {"type": "json_schema"}})
-        for item in inferencer.data_list:
-            self.assertNotIn("extra_params", item)
-        inferencer._restore_extra_params(saved)
-        self.assertEqual(
-            inferencer.data_list[2]["extra_params"], {"tools": []},
-        )
+        asyncio.run(inferencer.warmup(self._make_data_list(),
+                                      warmup_times=5, concurrency=3))
+        self.assertEqual(inferencer.warmup_call_args, (5, 3))
 
+    def test_warmup_returns_parent_result(self):
+        """warmup() must return the parent's result dict."""
+        inferencer = self.ProtocolGenInferencer()
+        result = asyncio.run(inferencer.warmup(self._make_data_list()))
+        self.assertEqual(result["success"], 1)
+        self.assertEqual(result["failed"], 0)
 
-class TestWarmupDefenseModel(unittest.TestCase):
-    """Layer 2: _ProtocolAwareAPIChatImpl warm_up() sets _in_warmup flag;
-    get_request_body() skips inject_protocol_fields while flag is active."""
+    def test_warmup_items_without_extra_params_passthrough(self):
+        """Items without extra_params pass through unchanged."""
+        inferencer = self.ProtocolGenInferencer()
+        data_list = [{"prompt": "plain", "index": 0}]
+        asyncio.run(inferencer.warmup(data_list))
+        received = inferencer.warmup_received_data
+        self.assertEqual(received[0], {"prompt": "plain", "index": 0})
 
-    @classmethod
-    def setUpClass(cls):
-        import sys
-        import types
+    def test_warmup_non_dict_items_passthrough(self):
+        """Non-dict items in data_list pass through as-is."""
+        inferencer = self.ProtocolGenInferencer()
+        data_list = ["not-a-dict", 42, None]
+        asyncio.run(inferencer.warmup(data_list))
+        received = inferencer.warmup_received_data
+        self.assertEqual(received, ["not-a-dict", 42, None])
 
-        class FakeOutput:
-            def __init__(self):
-                self.content = ""
-                self.reasoning_content = ""
-
-        class FakeAiohttpResponse:
-            def __init__(self, json_data):
-                self._json = json_data
-                self.status = 200
-
-            async def json(self):
-                return self._json
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                pass
-
-        class FakeAiohttpSession:
-            def __init__(self, response):
-                self._response = response
-                self.last_request = None
-
-            def post(self, url, json=None, headers=None):
-                self.last_request = {"url": url, "json": json,
-                                     "headers": headers}
-                return FakeAiohttpResponse(json_data=self._response)
-
-            async def close(self):
-                pass
-
-        class FakeVLLMCustomAPIChat:
-            """Minimal async base with warm_up support."""
-
-            def __init__(self, path="", model="test-model",
-                         generation_kwargs=None, stream=False, **kwargs):
-                self.path = path
-                self.model = model
-                self.generation_kwargs = generation_kwargs or {}
-                self.stream = stream
-                self.url = "http://localhost:8080/v1/chat/completions"
-                self.headers = {"Authorization": "Bearer EMPTY"}
-                self.session = None
-                self._mock_response = None
-                self.warmup_request_bodies = []
-                self.last_request_body = None
-
-            async def get_request_body(self, input, max_out_len, output,
-                                        **args):
-                messages = input if isinstance(input, list) else [
-                    {"role": "user", "content": str(input)}]
-                body = {"model": self.model, "messages": messages,
-                        "max_tokens": max_out_len, "stream": self.stream}
-                body.update(self.generation_kwargs)
-                return body
-
-            async def warm_up(self, *args, **kwargs):
-                # Simulate a warmup request going through get_request_body,
-                # passing through any kwargs (e.g. extra_params) so the
-                # adapter's _in_warmup defense is actually exercised.
-                body = await self.get_request_body("warmup", 16,
-                                                   FakeOutput(), **kwargs)
-                self.warmup_request_bodies.append(body)
-
-            async def parse_text_response(self, json_content, output):
-                choices = (json_content or {}).get("choices") or [{}]
-                choice = choices[0] if isinstance(choices[0], dict) else {}
-                msg = choice.get("message") or {}
-                output.content = msg.get("content") or ""
-
-            async def text_infer(self, request_body, output):
-                await self.parse_text_response(self._mock_response, output)
-
-            async def generate(self, input, max_out_len, output,
-                                session=None, **args):
-                body = await self.get_request_body(
-                    input, max_out_len, output, **args)
-                self.last_request_body = body
-                await self.text_infer(body, output)
-                return output
-
-        fake_pkg = types.ModuleType("ais_bench")
-        fake_bench = types.ModuleType("ais_bench.benchmark")
-        fake_models = types.ModuleType("ais_bench.benchmark.models")
-        fake_models.VLLMCustomAPIChat = FakeVLLMCustomAPIChat
-        fake_pkg.benchmark = fake_bench
-        fake_bench.models = fake_models
-
-        cls._saved_modules = {}
-        for name, mod in [
-            ("ais_bench", fake_pkg),
-            ("ais_bench.benchmark", fake_bench),
-            ("ais_bench.benchmark.models", fake_models),
-        ]:
-            cls._saved_modules[name] = sys.modules.get(name)
-            sys.modules[name] = mod
-
-        cls._saved_protocol_api = sys.modules.pop(
-            "xtask.benchmarks.aisbench.protocol_api", None)
-        from xtask.benchmarks.aisbench.protocol_api import (
-            create_protocol_aware_chat,
-        )
-
-        cls.create_protocol_aware_chat = staticmethod(create_protocol_aware_chat)
-        cls.FakeOutput = FakeOutput
-        cls.FakeAiohttpSession = FakeAiohttpSession
-        cls.FakeVLLMCustomAPIChat = FakeVLLMCustomAPIChat
-
-    @classmethod
-    def tearDownClass(cls):
-        import sys
-
-        for name, mod in cls._saved_modules.items():
-            if mod is not None:
-                sys.modules[name] = mod
-            else:
-                sys.modules.pop(name, None)
-        if cls._saved_protocol_api is not None:
-            sys.modules["xtask.benchmarks.aisbench.protocol_api"] = (
-                cls._saved_protocol_api
-            )
-
-    def test_warmup_skips_protocol_injection(self):
-        """During warm_up, get_request_body must NOT inject protocol fields."""
-        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
-        adapter = adapter_cls(path="/fake", model="test-model")
-        adapter._mock_response = {
-            "choices": [{"message": {"content": "ok", "role": "assistant"},
-                         "finish_reason": "stop"}]
-        }
-
-        # Call warm_up — the fake base class sends a warmup request
-        # through get_request_body.  Since _in_warmup is True, the
-        # protocol fields from extra_params must NOT be injected.
-        asyncio.run(adapter.warm_up(
-            extra_params={"response_format": {"type": "json_schema"}}
-        ))
-
-        # The warmup request body should NOT contain response_format
-        self.assertEqual(len(adapter.warmup_request_bodies), 1)
-        warmup_body = adapter.warmup_request_bodies[0]
-        self.assertNotIn("response_format", warmup_body)
-        self.assertNotIn("guided_regex", warmup_body)
-
-        # Flag must be cleared after warm_up
-        self.assertFalse(adapter._in_warmup)
-
-    def test_normal_request_injects_protocol_fields(self):
-        """After warm_up, normal requests must inject protocol fields."""
-        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
-        adapter = adapter_cls(path="/fake", model="test-model")
-        adapter._mock_response = {
-            "choices": [{"message": {"content": "ok", "role": "assistant"},
-                         "finish_reason": "stop"}]
-        }
-
-        output = self.FakeOutput()
-        asyncio.run(adapter.generate(
-            "Hi", 64, output,
-            extra_params={"guided_regex": "[0-9]+"},
-        ))
-
-        # Protocol field must be injected in the real request
-        self.assertIn("guided_regex", adapter.last_request_body)
-
-    def test_in_warmup_flag_lifecycle(self):
-        """_in_warmup flag: False -> True during warm_up -> False after."""
-        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
-        adapter = adapter_cls(path="/fake", model="test-model")
-        adapter._mock_response = {
-            "choices": [{"message": {"content": "ok", "role": "assistant"},
-                         "finish_reason": "stop"}]
-        }
-
-        self.assertFalse(adapter._in_warmup)
-        asyncio.run(adapter.warm_up())
-        self.assertFalse(adapter._in_warmup)
-
-    def test_no_parent_warmup_is_noop(self):
-        """If parent has no warm_up, override is a silent no-op."""
-        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
-
-        # Patch the base class warm_up to None to simulate absence
-        with patch.object(
-            self.FakeVLLMCustomAPIChat, "warm_up", None
-        ):
-            adapter = adapter_cls(path="/fake", model="test-model")
-            result = adapter.warm_up()
-            self.assertIsNone(result)
-            self.assertFalse(adapter._in_warmup)
+    def test_warmup_empty_data_list(self):
+        """Empty data_list is handled without error."""
+        inferencer = self.ProtocolGenInferencer()
+        asyncio.run(inferencer.warmup([]))
+        self.assertEqual(inferencer.warmup_received_data, [])
 
 
 if __name__ == "__main__":

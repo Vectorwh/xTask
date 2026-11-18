@@ -16,19 +16,22 @@ standard async pipeline carries it end-to-end:
     -> ProtocolAwareAPIChat extracts & injects protocol fields
 
 Warmup defense:
-    AISBench sends warmup requests using data_list entries before the
-    main inference loop.  Since get_data_list() injects extra_params
-    (which may contain response_format / guided_* that some servers
-    reject with 400 Bad Request), warm_up() is overridden to temporarily
-    strip extra_params from data_list during the warmup phase and restore
-    them afterwards.  The model-side defense (ProtocolAwareAPIChat
-    ``_in_warmup`` flag) provides a second layer of protection.
+    AISBench's task runner (openicl_api_infer.py) calls
+    ``inferencer.warmup(data_list, warmup_times, concurrency)`` before
+    the main inference loop, sending warmup requests through the same
+    ``do_request`` path.  Since ``get_data_list()`` has already injected
+    ``extra_params`` into every data_list entry, warmup requests would
+    carry protocol fields (response_format, guided_*, tools) that some
+    inference servers reject with 400 Bad Request, aborting the entire
+    task ("all warmup requests failed").
+
+    ``warmup()`` is overridden to strip ``extra_params`` from the
+    data_list entries (creating stripped copies, leaving the originals
+    untouched for real inference) before delegating to the parent.
 
 Referenced as ``type=ProtocolGenInferencer`` in the dataset config
 (protocol_constrained_gen.py), which is lazy-import-safe.
 """
-
-import inspect
 
 from ais_bench.benchmark.openicl.icl_inferencer import GenInferencer
 
@@ -52,65 +55,27 @@ class ProtocolGenInferencer(GenInferencer):
         return data_list
 
     # ------------------------------------------------------------------
-    # Warmup defense (Layer 1: inferencer level)
+    # Warmup defense
     # ------------------------------------------------------------------
 
-    def warm_up(self, *args, **kwargs):
-        """Strip extra_params from data_list during warmup.
+    async def warmup(self, data_list, warmup_times=1, concurrency=1):
+        """Strip extra_params from warmup data to avoid 400 Bad Request.
 
-        AISBench's default warmup sends requests using data_list entries.
-        If those entries carry extra_params (response_format, guided_*,
-        etc.), the warmup request body will include protocol fields that
-        some inference servers reject with 400 Bad Request, causing the
-        entire task to abort ("all warmup requests failed").
+        AISBench's task runner sends warmup requests through the same
+        ``do_request`` path as real inference.  data_list entries
+        produced by ``get_data_list()`` carry ``extra_params`` (protocol
+        fields like response_format / guided_*); if those reach the
+        server in a warmup request, some servers return 400 and the
+        entire task aborts.
 
-        This override temporarily removes extra_params from every
-        data_list item before delegating to the parent warm_up(), then
-        restores them in a finally block so the real inference requests
-        still carry their per-sample protocol parameters.
-
-        Handles both sync and async parent signatures defensively.
+        This override creates stripped copies of data_list entries
+        (without extra_params) and passes them to the parent warmup().
+        The original data_list is NOT modified — the task runner reuses
+        it for the real inference loop after warmup completes.
         """
-        parent_warm_up = getattr(super(), "warm_up", None)
-        if parent_warm_up is None:
-            return  # Parent has no warm_up; nothing to defend.
-
-        saved = self._strip_extra_params()
-        try:
-            result = parent_warm_up(*args, **kwargs)
-        except BaseException:
-            self._restore_extra_params(saved)
-            raise
-        # If the parent warm_up is async, wrap the coroutine so
-        # extra_params are restored after it completes.
-        if inspect.iscoroutine(result):
-            async def _wrapped_warm_up():
-                try:
-                    return await result
-                finally:
-                    self._restore_extra_params(saved)
-            return _wrapped_warm_up()
-        self._restore_extra_params(saved)
-        return result
-
-    def _strip_extra_params(self):
-        """Remove extra_params from all data_list items.
-
-        Returns a list of the removed values (or None per item) aligned
-        with data_list indices for restoration.
-        """
-        saved = []
-        data_list = getattr(self, "data_list", None) or []
-        for item in data_list:
-            if isinstance(item, dict):
-                saved.append(item.pop("extra_params", None))
-            else:
-                saved.append(None)
-        return saved
-
-    def _restore_extra_params(self, saved):
-        """Restore previously stripped extra_params into data_list."""
-        data_list = getattr(self, "data_list", None) or []
-        for item, ep in zip(data_list, saved):
-            if ep is not None and isinstance(item, dict):
-                item["extra_params"] = ep
+        stripped_list = [
+            {k: v for k, v in item.items() if k != "extra_params"}
+            if isinstance(item, dict) else item
+            for item in data_list
+        ]
+        return await super().warmup(stripped_list, warmup_times, concurrency)
