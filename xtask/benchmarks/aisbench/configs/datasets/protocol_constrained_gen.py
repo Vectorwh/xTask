@@ -19,15 +19,19 @@ mmengine's _parse_lazy_import forbids subclassing lazily-imported names at
 module level (class Foo(Bar) triggers LazyAttr.__call__ -> RuntimeError).
 Referencing it as a type= value below is lazy-import-safe.
 
-The default GenInferencer is used (no custom inferencer).  The reader_cfg
-already separates input_columns (question, max_out_len, extra_params) from
-output_column (ground_truth), so ground_truth is never sent to the model and
-extra_params flows through to model.generate() as a kwarg.  A custom
-inferencer that bypassed the status_counter / output_handler caused the
-pipeline to hang, so it was removed.
+ProtocolGenInferencer (a GenInferencer subclass) is used instead of the
+stock GenInferencer because the stock get_data_list() only emits
+prompt/data_abbr/index/max_out_len/gold -- the extra_params column would
+never reach do_request(**data) and thus never reach
+model.generate(**args).  ProtocolGenInferencer.get_data_list() injects
+extra_params into each data_list entry so it flows through the standard
+async pipeline to ProtocolAwareAPIChat.get_request_body(**args).
+
+The reader_cfg separates input_columns (question, max_out_len,
+extra_params) from output_column (ground_truth), so ground_truth is never
+sent to the model.
 """
 
-from ais_bench.benchmark.openicl.icl_inferencer import GenInferencer
 from ais_bench.benchmark.openicl.icl_prompt_template import PromptTemplate
 from ais_bench.benchmark.openicl.icl_retriever import ZeroRetriever
 
@@ -36,6 +40,9 @@ from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
 )
 from xtask.benchmarks.aisbench.protocol_dataset import (
     ProtocolConstrainedDataset,
+)
+from xtask.benchmarks.aisbench.protocol_inferencer import (
+    ProtocolGenInferencer,
 )
 
 protocol_constrained_reader_cfg = dict(
@@ -49,7 +56,7 @@ protocol_constrained_infer_cfg = dict(
         template='{question}',
     ),
     retriever=dict(type=ZeroRetriever),
-    inferencer=dict(type=GenInferencer),
+    inferencer=dict(type=ProtocolGenInferencer),
 )
 
 protocol_constrained_eval_cfg = dict(

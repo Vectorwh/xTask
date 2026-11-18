@@ -10,6 +10,7 @@ Covers:
 - generate_aisbench_script.py: protocol section generation (switch on/off).
 """
 
+import asyncio
 import ast
 import json
 import os
@@ -1135,27 +1136,6 @@ class TestProtocolAwareAPIChatWrapper(unittest.TestCase):
         from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareAPIChat
         return ProtocolAwareAPIChat
 
-    def test_capture_extra_params_from_json_string(self):
-        """_capture_extra_params must deserialize JSON string extra_params
-        from ProtocolConstrainedDataset (which serializes to avoid pyarrow
-        ArrowInvalid on heterogeneous struct types)."""
-        from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareMixin
-
-        mixin = ProtocolAwareMixin()
-        # String form (from ProtocolConstrainedDataset.load())
-        result = mixin._capture_extra_params(
-            {"extra_params": '{"tool_choice": "none"}'})
-        self.assertEqual(result, {"tool_choice": "none"})
-        # Dict form (direct call / legacy)
-        result = mixin._capture_extra_params(
-            {"extra_params": {"tool_choice": "auto"}})
-        self.assertEqual(result, {"tool_choice": "auto"})
-        # Invalid JSON string → None
-        result = mixin._capture_extra_params({"extra_params": "not json"})
-        self.assertIsNone(result)
-        # Missing → None
-        result = mixin._capture_extra_params({})
-        self.assertIsNone(result)
 
     def test_wrapper_exists_and_is_class(self):
         cls = self._import_wrapper()
@@ -1212,7 +1192,8 @@ class TestProtocolAwareAPIChatWrapper(unittest.TestCase):
 
     def test_new_pops_generation_only_params(self):
         """temperature/top_p etc. must be popped before base __init__ and
-        stored as _generation_overrides on the instance."""
+        merged into generation_kwargs so they reach each request payload
+        via VLLMCustomAPIChat.get_request_body()."""
         cls = self._import_wrapper()
         received_kwargs = {}
 
@@ -1231,9 +1212,36 @@ class TestProtocolAwareAPIChatWrapper(unittest.TestCase):
             self.assertNotIn("temperature", received_kwargs)
             self.assertNotIn("top_p", received_kwargs)
             self.assertEqual(received_kwargs["host_ip"], "1.2.3.4")
-            # They are stored on the instance for payload injection.
-            self.assertEqual(instance._generation_overrides["temperature"], 0.7)
-            self.assertEqual(instance._generation_overrides["top_p"], 0.9)
+            # They are merged into generation_kwargs for payload injection.
+            self.assertEqual(
+                received_kwargs["generation_kwargs"]["temperature"], 0.7
+            )
+            self.assertEqual(
+                received_kwargs["generation_kwargs"]["top_p"], 0.9
+            )
+
+    def test_new_preserves_existing_generation_kwargs(self):
+        """Pre-existing generation_kwargs must be preserved when merging
+        generation-only params into them."""
+        cls = self._import_wrapper()
+        received_kwargs = {}
+
+        class _FakeComposed:
+            def __init__(self, *a, **kw):
+                received_kwargs.update(kw)
+
+        with patch(
+            "xtask.benchmarks.aisbench.protocol_api.create_protocol_aware_chat"
+        ) as mock_factory:
+            mock_factory.return_value = _FakeComposed
+            cls.__new__(
+                cls,
+                generation_kwargs={"do_sample": True},
+                temperature=0.6,
+            )
+            gk = received_kwargs["generation_kwargs"]
+            self.assertEqual(gk["do_sample"], True)
+            self.assertEqual(gk["temperature"], 0.6)
 
 
 class TestProtocolResultPostProcess(unittest.TestCase):
@@ -1637,63 +1645,16 @@ class TestParseExtraParams(unittest.TestCase):
         self.assertIsNone(parse_extra_params('[1, 2, 3]'))
 
 
-class TestBuildGenerationKwargs(unittest.TestCase):
-    """Tests for ProtocolAwareMixin._build_generation_kwargs."""
 
-    def _make_adapter(self, generation_kwargs=None, overrides=None):
-        from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareMixin
-
-        class FakeAdapter(ProtocolAwareMixin):
-            pass
-
-        adapter = FakeAdapter()
-        adapter.generation_kwargs = generation_kwargs or {}
-        adapter.model = "test-model"
-        if overrides:
-            adapter._generation_overrides = overrides
-        return adapter
-
-    def test_basic_kwargs(self):
-        adapter = self._make_adapter(
-            generation_kwargs={"do_sample": True},
-            overrides={"temperature": 0.7},
-        )
-        kwargs = adapter._build_generation_kwargs(512, None)
-        self.assertEqual(kwargs["max_tokens"], 512)
-        self.assertEqual(kwargs["model"], "test-model")
-        self.assertEqual(kwargs["do_sample"], True)
-        self.assertEqual(kwargs["temperature"], 0.7)
-
-    def test_protocol_fields_injected(self):
-        adapter = self._make_adapter()
-        extra = {"tools": [{"type": "function"}], "response_format": {"type": "json"}}
-        kwargs = adapter._build_generation_kwargs(256, extra)
-        self.assertIn("tools", kwargs)
-        self.assertIn("response_format", kwargs)
-
-    def test_no_instance_mutation(self):
-        """_build_generation_kwargs must not mutate self.generation_kwargs."""
-        adapter = self._make_adapter(generation_kwargs={"do_sample": True})
-        original = dict(adapter.generation_kwargs)
-        adapter._build_generation_kwargs(512, {"tools": []})
-        self.assertEqual(adapter.generation_kwargs, original)
-
-    def test_overrides_setdefault(self):
-        """Existing per-request kwargs win over construction-time overrides."""
-        adapter = self._make_adapter(
-            generation_kwargs={"temperature": 0.5},
-            overrides={"temperature": 0.9},
-        )
-        kwargs = adapter._build_generation_kwargs(512, None)
-        # generation_kwargs value (0.5) wins over override (0.9)
-        self.assertEqual(kwargs["temperature"], 0.5)
 
 
 class TestProtocolAwareAdapterIntegration(unittest.TestCase):
     """Integration tests for the protocol-aware adapter with fake ais_bench.
 
-    Injects fake ais_bench modules so the full _generate flow can be tested
-    on the host without ais_bench installed.
+    Injects fake ais_bench modules matching the PyPI 3.1.x async
+    architecture (generate -> get_request_body -> text_infer /
+    stream_infer -> parse_*_response) so the full async flow can be
+    tested on the host without ais_bench installed.
     """
 
     @classmethod
@@ -1701,174 +1662,128 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
         import sys
         import types
 
-        class FakeMiddleData:
+        class FakeOutput:
+            """Minimal stand-in for ais_bench Output."""
+
             def __init__(self):
-                self.output = ""
-                self.output_reasoning = ""
-                self.data_id = -1
+                self.content = ""
+                self.reasoning_content = ""
+                self.success = True
 
-            def get_output(self):
-                if self.output_reasoning:
-                    return self.output_reasoning + "\n\n" + self.output
-                return self.output
+            def get_prediction(self):
+                if self.reasoning_content:
+                    return self.reasoning_content + "\n\n" + self.content
+                return self.content
 
-        class FakeBaseClient:
-            def __init__(self, url, retry, **kwargs):
-                self.url = url
-                self.retry = retry
-                self.is_stream = False
-                self.middle_data = None
+        class FakeAiohttpResponse:
+            def __init__(self, status=200, json_data=None):
+                self.status = status
+                self._json_data = json_data or {}
+
+            async def json(self):
+                return self._json_data
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        class FakeAiohttpSession:
+            def __init__(self, response=None):
+                self._response = response
+                self.last_request = None
+
+            def post(self, url, json=None, headers=None):
+                self.last_request = {"url": url, "json": json,
+                                     "headers": headers}
+                return FakeAiohttpResponse(json_data=self._response)
+
+        class FakeVLLMCustomAPIChat:
+            """Minimal async base matching PyPI BaseAPIModel call chain."""
+
+            def __init__(self, path="", model="test-model",
+                         generation_kwargs=None, stream=False, **kwargs):
+                self.path = path
+                self.model = model
+                self.generation_kwargs = generation_kwargs or {}
+                self.stream = stream
+                self.url = "http://localhost:8080/v1/chat/completions"
+                self.headers = {"Authorization": "Bearer EMPTY"}
+                self.session = None
                 self._mock_response = None
+                self._mock_stream_chunks = []
                 self.last_request_body = None
 
-            def construct_request_body(self, inputs, parameters):
-                return {"messages": inputs, "stream": False, **parameters}
+            async def get_request_body(self, input, max_out_len, output,
+                                       **args):
+                messages = input if isinstance(input, list) else [
+                    {"role": "user", "content": str(input)}]
+                body = {"model": self.model, "messages": messages,
+                        "max_tokens": max_out_len, "stream": self.stream}
+                body.update(self.generation_kwargs)
+                return body
 
-            def do_request(self, request):
-                return self._mock_response
+            async def text_infer(self, request_body, output):
+                self.last_request_body = request_body
+                await self.parse_text_response(self._mock_response, output)
 
-            def process_response(self, response):
-                return response
-
-            def is_valid_response(self, res):
-                return isinstance(res, dict) and "choices" in res
-
-            def update_middle_data(self, res, inputs):
-                choice = res["choices"][0]
+            async def parse_text_response(self, json_content, output):
+                choices = (json_content or {}).get("choices") or [{}]
+                choice = choices[0] if isinstance(choices[0], dict) else {}
                 msg = choice.get("message") or {}
-                inputs.output = msg.get("content", "")
-                inputs.output_reasoning = msg.get("reasoning_content", "")
+                output.content = msg.get("content") or ""
+                output.reasoning_content = msg.get("reasoning_content") or ""
 
-            def request(self, inputs, parameters):
-                body = self.construct_request_body(inputs, parameters)
-                self.last_request_body = body
-                res = self.process_response(self.do_request(body))
-                if self.is_valid_response(res):
-                    self.update_middle_data(res, inputs)
-                return inputs.get_output()
+            async def stream_infer(self, request_body, output):
+                self.last_request_body = request_body
+                for chunk in self._mock_stream_chunks:
+                    await self.parse_stream_response(chunk, output)
 
-            def finish_count(self):
-                pass
-
-        class FakeOpenAIChatTextClient(FakeBaseClient):
-            pass
-
-        class FakeOpenAIChatStreamClient(FakeBaseClient):
-            def __init__(self, url, retry, **kwargs):
-                super().__init__(url, retry, **kwargs)
-                self.is_stream = True
-                self._stream_chunks = []
-
-            def request(self, inputs, parameters):
-                self.middle_data = inputs
-                self.last_request_body = self.construct_request_body(
-                    inputs, parameters
-                )
-                for chunk in self._stream_chunks:
-                    self.process_stream_line(chunk)
-                return inputs.get_output()
-
-            def process_stream_line(self, json_content):
-                response = self.process_response(json_content)
-                if self.is_valid_response(response):
-                    self.update_middle_data(response, self.middle_data)
-                return response
-
-            def update_middle_data(self, res, inputs):
-                choice = res["choices"][0]
+            async def parse_stream_response(self, json_content, output):
+                choices = (json_content or {}).get("choices") or [{}]
+                choice = choices[0] if isinstance(choices[0], dict) else {}
                 delta = choice.get("delta") or {}
                 if delta.get("content"):
-                    inputs.output += delta["content"]
+                    output.content += delta["content"]
                 if delta.get("reasoning_content"):
-                    inputs.output_reasoning += delta["reasoning_content"]
+                    output.reasoning_content += delta["reasoning_content"]
 
-        class FakeBaseAPI:
-            def __init__(self, **kwargs):
-                self.endpoint_url = "http://localhost:8080/v1/chat/completions"
-                self.retry = 0
-                self.api_key = "EMPTY"
-                self.generation_kwargs = kwargs.get("generation_kwargs", {}) or {}
-                self.model = kwargs.get("model", "test-model")
-                self.is_multi_modal = False
-                self.client = None
-                self.init_client(kwargs.get("custom_client"))
-
-            def init_client(self, custom_client):
-                """Create a default text client (mirrors real AISBench
-                init_client which builds a client from config)."""
-                self.client = FakeOpenAIChatTextClient(
-                    url=self.endpoint_url, retry=self.retry
-                )
-                setattr(self.client, "api_key", self.api_key)
-
-            def acquire(self):
-                pass
-
-            def prepare_input_data(self, messages, data_id):
-                md = FakeMiddleData()
-                md.data_id = data_id
-                return md
-
-            def set_result(self, cache_data):
-                pass
-
-        class FakeVLLMCustomAPIChat(FakeBaseAPI):
-            pass
-
-        class FakeVLLMCustomAPIChatStream(FakeBaseAPI):
-            def init_client(self, custom_client):
-                """Create a default stream client."""
-                self.client = FakeOpenAIChatStreamClient(
-                    url=self.endpoint_url, retry=self.retry
-                )
-                setattr(self.client, "api_key", self.api_key)
-
-        def handle_synthetic_input(func):
-            import functools
-
-            @functools.wraps(func)
-            def wrapper(self, input, max_out_len):
-                return func(self, input, max_out_len)
-
-            return wrapper
-
-        fake_prompt = types.ModuleType("ais_bench.benchmark.utils.prompt")
-        fake_prompt.is_mm_prompt = lambda x: False
+            async def generate(self, input, max_out_len, output,
+                               session=None, **args):
+                body = await self.get_request_body(
+                    input, max_out_len, output, **args)
+                if self.stream:
+                    await self.stream_infer(body, output)
+                else:
+                    await self.text_infer(body, output)
+                return output
 
         fake_pkg = types.ModuleType("ais_bench")
         fake_bench = types.ModuleType("ais_bench.benchmark")
         fake_models = types.ModuleType("ais_bench.benchmark.models")
-        fake_base_api = types.ModuleType("ais_bench.benchmark.models.base_api")
-        fake_utils = types.ModuleType("ais_bench.benchmark.utils")
-
         fake_models.VLLMCustomAPIChat = FakeVLLMCustomAPIChat
-        fake_models.VLLMCustomAPIChatStream = FakeVLLMCustomAPIChatStream
-        fake_base_api.handle_synthetic_input = handle_synthetic_input
-
         fake_pkg.benchmark = fake_bench
         fake_bench.models = fake_models
-        fake_bench.models.base_api = fake_base_api
-        fake_bench.utils = fake_utils
-        fake_utils.prompt = fake_prompt
 
         cls._saved_modules = {}
         for name, mod in [
             ("ais_bench", fake_pkg),
             ("ais_bench.benchmark", fake_bench),
             ("ais_bench.benchmark.models", fake_models),
-            ("ais_bench.benchmark.models.base_api", fake_base_api),
-            ("ais_bench.benchmark.utils", fake_utils),
-            ("ais_bench.benchmark.utils.prompt", fake_prompt),
         ]:
             cls._saved_modules[name] = sys.modules.get(name)
             sys.modules[name] = mod
 
         cls._saved_protocol_api = sys.modules.pop(
-            "xtask.benchmarks.aisbench.protocol_api", None
+            "xtask.benchmarks.aisbench.protocol_api", None)
+        from xtask.benchmarks.aisbench.protocol_api import (
+            create_protocol_aware_chat,
         )
-        from xtask.benchmarks.aisbench.protocol_api import create_protocol_aware_chat
 
         cls.create_protocol_aware_chat = staticmethod(create_protocol_aware_chat)
+        cls.FakeOutput = FakeOutput
+        cls.FakeAiohttpSession = FakeAiohttpSession
 
     @classmethod
     def tearDownClass(cls):
@@ -1887,7 +1802,7 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
             sys.modules.pop("xtask.benchmarks.aisbench.protocol_api", None)
 
     def test_non_stream_generate_preserves_full_message(self):
-        """_generate must return the full message as JSON, not just content."""
+        """generate() must store the full message as JSON in output.content."""
         adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
         adapter = adapter_cls(path="/fake", model="test-model")
 
@@ -1902,112 +1817,96 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
                 "finish_reason": "stop",
             }]
         }
-        adapter.client._mock_response = full_response
+        adapter._mock_response = full_response
 
-        input_dict = {"data_id": 0, "prompt": "Hello"}
-        result = adapter._generate(input_dict, 512)
+        output = self.FakeOutput()
+        asyncio.run(adapter.generate("Hello", 512, output))
 
-        parsed = json.loads(result)
+        parsed = json.loads(output.content)
         self.assertEqual(parsed["content"], "answer")
         self.assertEqual(parsed["reasoning_content"], "thinking")
         self.assertEqual(parsed["finish_reason"], "stop")
         self.assertEqual(len(parsed["tool_calls"]), 1)
+        # reasoning_content cleared so get_prediction returns full JSON
+        self.assertEqual(output.reasoning_content, "")
+        self.assertEqual(output.get_prediction(), output.content)
 
     def test_non_stream_generate_injects_protocol_fields(self):
-        """extra_params from input dict must be injected into the request."""
+        """extra_params from generate args must be injected into the request."""
         adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
         adapter = adapter_cls(path="/fake", model="test-model")
 
-        adapter.client._mock_response = {
+        adapter._mock_response = {
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
         }
 
-        input_dict = {
-            "data_id": 1,
-            "prompt": "Hello",
-            "extra_params": '{"tools": [{"type": "function", "function": {"name": "f"}}], "tool_choice": "auto"}',
-        }
-        adapter._generate(input_dict, 256)
+        output = self.FakeOutput()
+        extra = ('{"tools": [{"type": "function", "function": {"name": "f"}}],'
+                 ' "tool_choice": "auto"}')
+        asyncio.run(adapter.generate("Hello", 256, output, extra_params=extra))
 
-        body = adapter.client.last_request_body
+        body = adapter.last_request_body
         self.assertIn("tools", body)
         self.assertEqual(body["tool_choice"], "auto")
         self.assertEqual(body["max_tokens"], 256)
         self.assertEqual(body["model"], "test-model")
 
-    def test_non_stream_generate_with_generation_overrides(self):
-        """Construction-time generation overrides must be merged into kwargs."""
+    def test_non_stream_generate_with_generation_kwargs(self):
+        """Construction-time generation_kwargs must reach the request body."""
         adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
-        adapter = adapter_cls(path="/fake", model="test-model")
-        adapter._generation_overrides = {"temperature": 0.7}
+        adapter = adapter_cls(
+            path="/fake", model="test-model",
+            generation_kwargs={"temperature": 0.7},
+        )
 
-        adapter.client._mock_response = {
+        adapter._mock_response = {
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
         }
 
-        adapter._generate({"data_id": 0, "prompt": "Hi"}, 128)
+        output = self.FakeOutput()
+        asyncio.run(adapter.generate("Hi", 128, output))
 
-        body = adapter.client.last_request_body
+        body = adapter.last_request_body
         self.assertEqual(body["temperature"], 0.7)
 
     def test_non_stream_generate_string_input(self):
-        """String input (no dict wrapper) must also work."""
+        """String input (not a list) must also work."""
         adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
         adapter = adapter_cls(path="/fake", model="test-model")
 
-        adapter.client._mock_response = {
+        adapter._mock_response = {
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
         }
 
-        result = adapter._generate("Hello world", 64)
-        parsed = json.loads(result)
+        output = self.FakeOutput()
+        asyncio.run(adapter.generate("Hello world", 64, output))
+        parsed = json.loads(output.content)
         self.assertEqual(parsed["content"], "ok")
 
-    def test_custom_client_created(self):
-        """init_client must create a client with full-message preservation."""
-        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
-        adapter = adapter_cls(path="/fake", model="test-model")
-        self.assertIsNotNone(adapter.client)
-        # The client must have the overridden update_middle_data
-        adapter.client._mock_response = {
-            "choices": [{"message": {"content": "test"}, "finish_reason": "stop"}]
-        }
-        from xtask.benchmarks.aisbench.protocol_api import ProtocolAwareMixin
-
-        md = type("MD", (), {"output": "", "output_reasoning": ""})()
-        adapter.client.update_middle_data(
-            {"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}]}, md
-        )
-        # Output must be JSON (full message), not just "x"
-        parsed = json.loads(md.output)
-        self.assertEqual(parsed["content"], "x")
-        self.assertEqual(parsed["finish_reason"], "stop")
-
     def test_stream_generate_assembles_deltas(self):
-        """Stream adapter must assemble SSE deltas into a full message."""
-        adapter_cls = self.create_protocol_aware_chat(stream_verify=True)
-        adapter = adapter_cls(path="/fake", model="test-model")
-        adapter._verify_enabled = False  # skip non-stream comparison
+        """Stream generate must assemble SSE deltas into a full message."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model", stream=True)
 
-        adapter.client._stream_chunks = [
+        adapter._mock_stream_chunks = [
             {"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]},
             {"choices": [{"delta": {"content": " world"}, "finish_reason": None}]},
             {"choices": [{"delta": {}, "finish_reason": "stop"}]},
         ]
 
-        result = adapter._generate({"data_id": 0, "prompt": "Hi"}, 64)
+        output = self.FakeOutput()
+        asyncio.run(adapter.generate("Hi", 64, output))
 
-        parsed = json.loads(result)
+        parsed = json.loads(output.content)
         self.assertEqual(parsed["content"], "Hello world")
         self.assertEqual(parsed["finish_reason"], "stop")
 
     def test_stream_generate_with_reasoning_and_tool_calls(self):
-        """Stream adapter must assemble reasoning + tool_calls deltas."""
-        adapter_cls = self.create_protocol_aware_chat(stream_verify=True)
-        adapter = adapter_cls(path="/fake", model="test-model")
-        adapter._verify_enabled = False
+        """Stream generate must assemble reasoning + tool_calls deltas."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=False)
+        adapter = adapter_cls(path="/fake", model="test-model", stream=True)
 
-        adapter.client._stream_chunks = [
+        adapter._mock_stream_chunks = [
             {"choices": [{"delta": {"reasoning_content": "step1"}, "finish_reason": None}]},
             {"choices": [{"delta": {"reasoning_content": "step2"}, "finish_reason": None}]},
             {"choices": [{"delta": {"tool_calls": [{
@@ -2020,9 +1919,10 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
             }]}, "finish_reason": "tool_calls"}]},
         ]
 
-        result = adapter._generate({"data_id": 0, "prompt": "Weather?"}, 128)
+        output = self.FakeOutput()
+        asyncio.run(adapter.generate("Weather?", 128, output))
 
-        parsed = json.loads(result)
+        parsed = json.loads(output.content)
         self.assertEqual(parsed["reasoning_content"], "step1step2")
         self.assertEqual(len(parsed["tool_calls"]), 1)
         self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "get_weather")
@@ -2031,12 +1931,57 @@ class TestProtocolAwareAdapterIntegration(unittest.TestCase):
         )
         self.assertEqual(parsed["finish_reason"], "tool_calls")
 
-    def test_stream_adapter_creates_stream_client(self):
-        """Stream adapter's init_client must create a stream-capable client."""
+    def test_stream_verify_consistent(self):
+        """Stream verify passes when stream and non-stream match."""
         adapter_cls = self.create_protocol_aware_chat(stream_verify=True)
-        adapter = adapter_cls(path="/fake", model="test-model")
-        self.assertIsNotNone(adapter.client)
-        self.assertTrue(getattr(adapter.client, "is_stream", False))
+        adapter = adapter_cls(path="/fake", model="test-model", stream=True)
+
+        adapter._mock_stream_chunks = [
+            {"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        adapter.session = self.FakeAiohttpSession(response={
+            "choices": [{
+                "message": {"content": "Hello", "role": "assistant"},
+                "finish_reason": "stop",
+            }]
+        })
+
+        output = self.FakeOutput()
+        asyncio.run(adapter.generate("Hi", 64, output))
+
+        parsed = json.loads(output.content)
+        self.assertEqual(parsed["content"], "Hello")
+        self.assertEqual(parsed["finish_reason"], "stop")
+        # Verification request was made with stream=False
+        self.assertFalse(adapter.session.last_request["json"]["stream"])
+
+    def test_stream_verify_inconsistent(self):
+        """Stream verify logs a warning but still returns the stream result."""
+        adapter_cls = self.create_protocol_aware_chat(stream_verify=True)
+        adapter = adapter_cls(path="/fake", model="test-model", stream=True)
+
+        adapter._mock_stream_chunks = [
+            {"choices": [{"delta": {"content": "Stream says A"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        adapter.session = self.FakeAiohttpSession(response={
+            "choices": [{
+                "message": {"content": "Non-stream says B", "role": "assistant"},
+                "finish_reason": "stop",
+            }]
+        })
+
+        output = self.FakeOutput()
+        with self.assertLogs(
+            "xtask.benchmarks.aisbench.protocol_api", level="WARNING"
+        ) as cm:
+            asyncio.run(adapter.generate("Hi", 64, output))
+
+        # Stream result is still returned despite mismatch
+        parsed = json.loads(output.content)
+        self.assertEqual(parsed["content"], "Stream says A")
+        self.assertTrue(any("mismatch" in msg.lower() for msg in cm.output))
 
 
 if __name__ == "__main__":

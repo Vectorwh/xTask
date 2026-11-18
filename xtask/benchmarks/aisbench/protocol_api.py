@@ -1,29 +1,37 @@
-"""Protocol-aware API adapter for AISBench.
+"""Protocol-aware API adapter for AISBench (PyPI 3.1.x async architecture).
 
-Extends AISBench's VLLMCustomAPIChat / VLLMCustomAPIChatStream to support:
+Extends AISBench's VLLMCustomAPIChat to support:
 1. Per-sample extra_params passthrough (tools, tool_choice, response_format,
    guided_json, guided_regex, guided_grammar, extra_body).
 2. Full message preservation (reasoning_content, tool_calls, finish_reason)
    instead of extracting only choices[0].message.content.
 3. Optional stream verification: SSE delta chunks are assembled per the
    OpenAI streaming spec and compared against the non-stream result; field
-   misalignment or tag leakage (e.g. </think> in content) marks the case
+   misalignment or tag leakage (e.g. <think> in content) marks the case
    as a protocol error.
 
-AISBench request flow (for reference):
-    generate(inputs) -> ThreadPoolExecutor -> _generate(input, max_out_len)
-        (decorated with @handle_synthetic_input: rate-limit, finish_count,
-         result queue)
-        -> extract extra_params from input dict (thread-safe local)
-        -> build messages (str / PromptList / multi-modal)
-        -> build generation_kwargs + inject protocol fields
-        -> client.request(MiddleData, kwargs)
-            -> construct_request_body()   (OpenAI payload)
-            -> do_request()               (HTTP POST)
-            -> process_response()         (parse JSON)
-            -> update_middle_data()       (extract/preserve full message)
-            -> return MiddleData.get_output()
-        -> return prediction string (full message JSON)
+PyPI AISBench (>= 3.1) async request flow:
+    GenInferencer.do_request(data, ...)
+        -> data.pop("index"/"prompt"/"data_abbr"/"max_out_len"/"gold")
+        -> await model.generate(input, max_out_len, output, session, **data)
+    BaseAPIModel.generate(input_data, max_out_len, output, session, **args)
+        -> request_body = await get_request_body(input, max_out_len, output, **args)
+        -> await text_infer(request_body, output)   # non-stream
+           or stream_infer(request_body, output)     # stream
+    text_infer -> parse_text_response(json_content, output)
+    stream_infer -> parse_stream_response(json_content, output) per chunk
+
+Per-sample extra_params flows through:
+    ProtocolGenInferencer.get_data_list() puts extra_params into data_list
+    -> do_request(**data) includes extra_params
+    -> generate(**args) includes extra_params
+    -> get_request_body(**args) extracts and injects protocol fields
+
+Full message preservation:
+    parse_text_response() / stream_infer() store the complete message as a
+    JSON string in output.content (clearing output.reasoning_content) so
+    that Output.get_prediction() returns the full message JSON. The
+    evaluator (ProtocolAndConstrainedEvaluator) parses it back to a dict.
 
 ais_bench is imported lazily so the pure-Python helpers (payload injection,
 message extraction, SSE assembly, stream verification) remain unit-testable
@@ -48,14 +56,14 @@ PROTOCOL_FIELDS = frozenset({
 })
 
 # Reasoning tags that must NOT leak into content when reasoning is stripped.
-REASONING_LEAK_TAGS = ("</think>", "<think>", "<|begin_of_thought|>", "<|end_of_thought|>")
+REASONING_LEAK_TAGS = ("<think>", "</think>", "<|begin_of_thought|>", "<|end_of_thought|>")
 
 
 # Parameters that belong in generation_kwargs / request payloads, NOT in the
 # model constructor.  If they appear as top-level model dict keys, they are
 # popped defensively in ProtocolAwareAPIChat.__new__ to avoid
 # ``VLLMCustomAPIChat.__init__() got an unexpected keyword argument`` and
-# later merged into each request payload in _build_generation_kwargs.
+# merged into generation_kwargs so they reach each request payload.
 _GENERATION_ONLY_PARAMS = frozenset({
     "temperature",
     "top_p",
@@ -232,160 +240,15 @@ def parse_extra_params(value: Any) -> Optional[Dict[str, Any]]:
 # AISBench lazy imports
 # ---------------------------------------------------------------------------
 
-def _get_base_classes():
-    """Lazily import AISBench base classes. Returns (chat_cls, stream_cls)."""
-    from ais_bench.benchmark.models import VLLMCustomAPIChat, VLLMCustomAPIChatStream
-    return VLLMCustomAPIChat, VLLMCustomAPIChatStream
+def _get_base_class():
+    """Lazily import AISBench VLLMCustomAPIChat.
 
-
-def _get_handle_synthetic_input():
-    """Lazily import the handle_synthetic_input decorator."""
-    from ais_bench.benchmark.models.base_api import handle_synthetic_input
-    return handle_synthetic_input
-
-
-def _patch_client_full_message(client):
-    """Patch a non-stream client instance to preserve the full message.
-
-    Overrides ``update_middle_data`` on the *instance* (not the class) so the
-    complete message (content, reasoning_content, tool_calls, finish_reason)
-    is stored as a JSON string in MiddleData.output instead of only
-    choices[0].message.content.
-
-    Works with any AISBench client version -- no imports from
-    ais_bench.benchmark.clients needed.
+    PyPI 3.1.x merges stream/non-stream into a single class controlled by
+    the ``stream`` constructor flag; VLLMCustomAPIChatStream is a deprecated
+    subclass that just sets stream=True.
     """
-    orig_update = client.update_middle_data
-
-    def update_middle_data(res, inputs):
-        full_msg = extract_full_message(res)
-        # Let the original update metrics (num_generated_chars, etc.)
-        try:
-            orig_update(res, inputs)
-        except Exception:
-            pass
-        # Override output with the full message JSON so protocol fields
-        # flow through the standard prediction pipeline.
-        inputs.output = json.dumps(full_msg, ensure_ascii=False)
-        inputs.output_reasoning = ""
-
-    client.update_middle_data = update_middle_data
-    return client
-
-
-def _patch_client_chunk_accumulator(client):
-    """Patch a stream client instance to collect raw SSE deltas.
-
-    Overrides ``process_response`` to attach a raw-chunk marker and
-    ``update_middle_data`` to accumulate the clean parsed chunk per-request
-    on the MiddleData object (thread-safe: each request has its own
-    MiddleData instance).
-
-    Works with any AISBench client version -- no imports from
-    ais_bench.benchmark.clients needed.
-    """
-    orig_request = client.request
-    orig_process = client.process_response
-    orig_update = client.update_middle_data
-
-    def request(inputs, parameters):
-        # Ensure middle_data is set for process_stream_line (which uses
-        # self.middle_data internally in some AISBench versions).
-        client.middle_data = inputs
-        return orig_request(inputs, parameters)
-
-    def process_response(json_content):
-        """Parse response and attach marker for delta assembly."""
-        response = orig_process(json_content)
-        if isinstance(response, dict):
-            response["_protocol_raw_chunk"] = json_content
-        return response
-
-    def update_middle_data(res, inputs):
-        # Pop marker BEFORE the original so it sees a clean chunk
-        res.pop("_protocol_raw_chunk", None)
-        # Let the original accumulate content/reasoning for metrics
-        orig_update(res, inputs)
-        # Accumulate the clean parsed chunk for SSE delta assembly
-        if not hasattr(inputs, "_protocol_delta_chunks"):
-            inputs._protocol_delta_chunks = []
-        inputs._protocol_delta_chunks.append(res)
-
-    client.request = request
-    client.process_response = process_response
-    client.update_middle_data = update_middle_data
-    return client
-
-
-# ---------------------------------------------------------------------------
-# Mixin (thread-safe per-sample state)
-# ---------------------------------------------------------------------------
-
-class ProtocolAwareMixin:
-    """Mixin providing per-sample extra_params injection and full-message
-    preservation for AISBench API model adapters.
-
-    Thread safety: ``_generate`` uses local variables for per-sample state
-    (extra_params, generation_kwargs) -- no instance attribute mutation.
-    """
-
-    def _capture_extra_params(self, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Pop extra_params from generate() kwargs and store for this request.
-
-        Handles both dict (direct call / legacy) and JSON-string (from
-        ProtocolConstrainedDataset) representations.
-
-        Note: This stores on the instance and is NOT thread-safe.  The
-        ``_generate`` override uses :func:`parse_extra_params` on a local
-        variable instead.  This method is kept for direct API callers.
-        """
-        extra = kwargs.pop("extra_params", None)
-        extra = parse_extra_params(extra)
-        self._current_extra_params = extra
-        return extra
-
-    def _build_generation_kwargs(
-        self, max_out_len: int, extra_params: Optional[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """Build per-request generation kwargs with protocol fields injected.
-
-        Thread-safe: operates on a local copy of self.generation_kwargs.
-        """
-        generation_kwargs = dict(getattr(self, "generation_kwargs", {}) or {})
-        generation_kwargs.update({"max_tokens": max_out_len})
-        generation_kwargs.update({"model": self.model})
-        inject_protocol_fields(generation_kwargs, extra_params)
-        # Apply generation-only params (temperature etc.) captured at
-        # construction time; use setdefault so per-request kwargs win.
-        overrides = getattr(self, "_generation_overrides", {})
-        for key, value in overrides.items():
-            generation_kwargs.setdefault(key, value)
-        return generation_kwargs
-
-    @staticmethod
-    def _build_messages(input_data, is_multi_modal: bool = False):
-        """Build OpenAI-format messages from input (same logic as base class).
-
-        Returns (messages, is_multi_modal_updated).
-        """
-        from ais_bench.benchmark.utils.prompt import is_mm_prompt
-
-        if isinstance(input_data, str) or is_multi_modal:
-            return [{"role": "user", "content": input_data}], is_multi_modal
-        elif is_mm_prompt(input_data):
-            return [{"role": "user", "content": input_data}], True
-        else:
-            messages = []
-            for item in input_data:
-                msg = {"content": item["prompt"]}
-                if item["role"] == "HUMAN":
-                    msg["role"] = "user"
-                elif item["role"] == "BOT":
-                    msg["role"] = "assistant"
-                elif item["role"] == "SYSTEM":
-                    msg["role"] = "system"
-                messages.append(msg)
-            return messages, is_multi_modal
+    from ais_bench.benchmark.models import VLLMCustomAPIChat
+    return VLLMCustomAPIChat
 
 
 # ---------------------------------------------------------------------------
@@ -393,172 +256,127 @@ class ProtocolAwareMixin:
 # ---------------------------------------------------------------------------
 
 def create_protocol_aware_chat(stream_verify: bool = False):
-    """Factory: create a ProtocolAwareAPIChat or ProtocolAwareAPIChatStream
-    class bound to the currently installed AISBench.
+    """Factory: create a ProtocolAwareAPIChat class bound to the currently
+    installed AISBench (PyPI 3.1.x async architecture).
 
     Args:
-        stream_verify: if True, use the stream adapter and enable SSE
-            assembly + non-stream comparison verification.
+        stream_verify: if True, enable SSE assembly + non-stream comparison
+            verification after stream_infer completes.
 
     This factory pattern avoids import errors when ais_bench is not
     installed (e.g. running unit tests on the host).
     """
-    VLLMCustomAPIChat, VLLMCustomAPIChatStream = _get_base_classes()
-    handle_synthetic_input = _get_handle_synthetic_input()
+    VLLMCustomAPIChat = _get_base_class()
 
-    # --- Model adapters ---
+    class _ProtocolAwareAPIChatImpl(VLLMCustomAPIChat):
+        """Protocol-aware chat adapter for PyPI AISBench async architecture.
 
-    if stream_verify:
-        class _ProtocolAwareAPIChatStreamImpl(ProtocolAwareMixin, VLLMCustomAPIChatStream):
-            """Stream adapter with SSE delta assembly and optional
-            consistency verification against non-stream results."""
+        Overrides three async hooks in the BaseAPIModel call chain:
+        - get_request_body: inject per-sample protocol fields from extra_params
+        - parse_text_response: store full message JSON in output.content
+        - parse_stream_response + stream_infer: assemble SSE deltas into a
+          full message and optionally verify against non-stream result
+        """
 
-            def __init__(self, *args, **kwargs):
-                self._verify_enabled = kwargs.pop("stream_verify", True)
-                super().__init__(*args, **kwargs)
+        def __init__(self, *args, **kwargs):
+            self._verify_enabled = kwargs.pop("stream_verify", stream_verify)
+            super().__init__(*args, **kwargs)
 
-            def init_client(self, custom_client):
-                """Let the base class build the default client, then patch
-                it to accumulate SSE deltas for full message assembly.
+        async def get_request_body(
+            self, input, max_out_len, output, **args
+        ):
+            # Extract per-sample extra_params (dict or JSON string from
+            # ProtocolConstrainedDataset serialization).
+            extra_params = parse_extra_params(args.pop("extra_params", None))
+            # Let the base class build the standard OpenAI payload
+            # (messages, model, max_tokens, stream, generation_kwargs, tools).
+            request_body = await super().get_request_body(
+                input, max_out_len, output, **args
+            )
+            # Inject per-sample protocol/constrained-decoding fields.
+            inject_protocol_fields(request_body, extra_params)
+            return request_body
 
-                This is version-agnostic: no imports from
-                ais_bench.benchmark.clients required.
-                """
-                super().init_client(custom_client)
-                _patch_client_chunk_accumulator(self.client)
+        async def parse_text_response(self, json_content, output):
+            # Let the base class fill content / reasoning_content / usage
+            # and call update_extra_details_data_from_text_response.
+            await super().parse_text_response(json_content, output)
+            # Override: replace content with the full message JSON so
+            # get_prediction() returns the complete message structure
+            # (content + reasoning_content + tool_calls + finish_reason).
+            full_msg = extract_full_message(json_content)
+            output.content = json.dumps(full_msg, ensure_ascii=False)
+            output.reasoning_content = ""
 
-            @handle_synthetic_input
-            def _generate(self, input, max_out_len):
-                # Extract per-sample fields from input dict (thread-safe locals)
-                extra_params = None
-                data_id = -1
-                if isinstance(input, dict):
-                    data_id = input.get("data_id", -1)
-                    extra_params = parse_extra_params(input.get("extra_params"))
-                    input = input.get("prompt")
-                if max_out_len <= 0:
-                    return ""
+        async def parse_stream_response(self, json_content, output):
+            # Let the base class accumulate content / reasoning_content.
+            await super().parse_stream_response(json_content, output)
+            # Collect raw chunks for SSE delta assembly in stream_infer.
+            if not hasattr(output, "_protocol_delta_chunks"):
+                output._protocol_delta_chunks = []
+            output._protocol_delta_chunks.append(json_content)
 
-                messages, self.is_multi_modal = self._build_messages(
-                    input, getattr(self, "is_multi_modal", False)
-                )
-                generation_kwargs = self._build_generation_kwargs(
-                    max_out_len, extra_params
-                )
-
-                cache_data = self.prepare_input_data(messages, data_id)
-                _ = self.client.request(cache_data, generation_kwargs)
-                self.set_result(cache_data)
-
-                # Assemble full message from collected SSE deltas
-                delta_chunks = getattr(cache_data, "_protocol_delta_chunks", [])
-                stream_msg = assemble_sse_deltas(delta_chunks)
-
-                # Optional: verify against non-stream result
-                if self._verify_enabled:
-                    try:
-                        report = self._verify_against_non_stream(
-                            messages, generation_kwargs, stream_msg
-                        )
-                        if report and not report["consistent"]:
-                            logger.warning(
-                                "Stream consistency check failed: %s",
-                                report["errors"],
-                            )
-                    except Exception:
-                        logger.debug(
-                            "Stream verification skipped due to error",
-                            exc_info=True,
-                        )
-
-                return json.dumps(stream_msg, ensure_ascii=False)
-
-            def _verify_against_non_stream(
-                self, messages, generation_kwargs, stream_msg
-            ):
-                """Make a non-stream HTTP request with the same input and
-                compare against the assembled stream message.
-
-                Uses the ``requests`` library directly instead of
-                instantiating an AISBench client -- avoids importing
-                ais_bench.benchmark.clients (not present in all versions).
-                """
-                import requests
-
-                verify_kwargs = dict(generation_kwargs)
-                verify_kwargs["stream"] = False
-                payload = {
-                    "model": verify_kwargs.pop("model", self.model),
-                    "messages": messages,
-                    **verify_kwargs,
-                }
-                headers = {"Content-Type": "application/json"}
-                api_key = getattr(self, "api_key", None)
-                if api_key:
-                    headers["Authorization"] = f"Bearer {api_key}"
+        async def stream_infer(self, request_body, output):
+            await super().stream_infer(request_body, output)
+            if not output.success:
+                return
+            # Assemble full message from collected SSE deltas.
+            delta_chunks = getattr(output, "_protocol_delta_chunks", [])
+            if not delta_chunks:
+                return
+            stream_msg = assemble_sse_deltas(delta_chunks)
+            # Optional: verify stream consistency against a non-stream
+            # request with the same payload.
+            if self._verify_enabled:
                 try:
-                    resp = requests.post(
-                        self.endpoint_url,
-                        json=payload,
-                        headers=headers,
-                        timeout=300,
+                    report = await self._verify_against_non_stream(
+                        request_body, stream_msg
                     )
-                    resp.raise_for_status()
-                    body = resp.json()
+                    if report and not report["consistent"]:
+                        logger.warning(
+                            "Stream consistency check failed: %s",
+                            report["errors"],
+                        )
                 except Exception:
                     logger.debug(
-                        "Non-stream verification request failed",
+                        "Stream verification skipped due to error",
                         exc_info=True,
                     )
-                    return None
-                try:
-                    non_stream_msg = extract_full_message(body)
-                except Exception:
-                    return None
-                return verify_stream_consistency(stream_msg, non_stream_msg)
+            # Store full message JSON as content so get_prediction()
+            # returns the complete message structure.
+            output.content = json.dumps(stream_msg, ensure_ascii=False)
+            output.reasoning_content = ""
 
-        return _ProtocolAwareAPIChatStreamImpl
+        async def _verify_against_non_stream(
+            self, request_body: dict, stream_msg: Dict[str, Any]
+        ) -> Optional[Dict[str, Any]]:
+            """Make a non-stream HTTP request with the same payload and
+            compare against the assembled stream message.
 
-    class _ProtocolAwareAPIChatImpl(ProtocolAwareMixin, VLLMCustomAPIChat):
-        """Non-stream adapter with per-sample protocol field injection and
-        full-message preservation."""
-
-        def init_client(self, custom_client):
-            """Let the base class build the default client, then patch it
-            to preserve the full message structure.
-
-            This is version-agnostic: no imports from
-            ais_bench.benchmark.clients required.
+            Reuses the aiohttp session already opened by generate().
             """
-            super().init_client(custom_client)
-            _patch_client_full_message(self.client)
-
-        @handle_synthetic_input
-        def _generate(self, input, max_out_len):
-            # Extract per-sample fields from input dict (thread-safe locals)
-            extra_params = None
-            data_id = -1
-            if isinstance(input, dict):
-                data_id = input.get("data_id", -1)
-                extra_params = parse_extra_params(input.get("extra_params"))
-                input = input.get("prompt")
-            if max_out_len <= 0:
-                return ""
-
-            messages, self.is_multi_modal = self._build_messages(
-                input, getattr(self, "is_multi_modal", False)
-            )
-            generation_kwargs = self._build_generation_kwargs(
-                max_out_len, extra_params
-            )
-
-            cache_data = self.prepare_input_data(messages, data_id)
-            response = self.client.request(cache_data, generation_kwargs)
-            self.set_result(cache_data)
-
-            # The custom client stored the full message JSON in output;
-            # cache_data.get_output() returns it.
-            return cache_data.get_output()
+            verify_body = dict(request_body)
+            verify_body["stream"] = False
+            verify_body.pop("stream_options", None)
+            try:
+                async with self.session.post(
+                    url=self.url, json=verify_body, headers=self.headers
+                ) as response:
+                    if response.status != 200:
+                        logger.debug(
+                            "Non-stream verification got status %s",
+                            response.status,
+                        )
+                        return None
+                    body = await response.json()
+            except Exception:
+                logger.debug(
+                    "Non-stream verification request failed",
+                    exc_info=True,
+                )
+                return None
+            non_stream_msg = extract_full_message(body)
+            return verify_stream_consistency(stream_msg, non_stream_msg)
 
     return _ProtocolAwareAPIChatImpl
 
@@ -572,20 +390,20 @@ class ProtocolAwareAPIChat:
     time via ``__new__``, so generated config files can safely reference
     ``type=ProtocolAwareAPIChat`` as a plain name.
 
-    The ``stream_verify`` field in the model config dict selects the stream
-    adapter (SSE assembly + consistency verification) vs the non-stream one.
+    The ``stream_verify`` field in the model config dict enables SSE
+    assembly + consistency verification after stream inference.
     """
 
     def __new__(cls, *args, stream_verify: bool = False, **kwargs):
         # Pop generation-only params that the base constructor doesn't
-        # accept (temperature, top_p, ...).  They are stored on the instance
-        # and merged into each request payload by _build_generation_kwargs.
-        captured: Dict[str, Any] = {}
+        # accept (temperature, top_p, ...).  Merge them into
+        # generation_kwargs so they reach each request payload via
+        # VLLMCustomAPIChat.get_request_body().
+        gen_kwargs = dict(kwargs.get("generation_kwargs") or {})
         for key in _GENERATION_ONLY_PARAMS:
             if key in kwargs:
-                captured[key] = kwargs.pop(key)
+                gen_kwargs[key] = kwargs.pop(key)
+        if gen_kwargs:
+            kwargs["generation_kwargs"] = gen_kwargs
         composed_cls = create_protocol_aware_chat(stream_verify=stream_verify)
-        instance = composed_cls(*args, **kwargs)
-        if captured:
-            instance._generation_overrides = captured
-        return instance
+        return composed_cls(*args, **kwargs)
