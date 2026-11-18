@@ -35,6 +35,30 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# HuggingFace Dataset union-artifact cleanup
+# ---------------------------------------------------------------------------
+
+def _strip_nulls(obj: Any) -> Any:
+    """Recursively remove ``None`` values from dicts and lists.
+
+    HuggingFace ``Dataset.from_list()`` unions all dict keys across rows and
+    fills missing values with ``None``.  This corrupts not only top-level
+    ground_truth keys but also **nested** structures — e.g. a JSON Schema's
+    ``properties`` dict gains null-valued entries from other cases, and
+    ``required`` becomes null for schemas that originally omitted it.
+    ``jsonschema.validate()`` raises ``SchemaError`` on such null subschemas.
+
+    Stripping nulls restores each ground_truth to its original shape before
+    evaluation.
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_nulls(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_strip_nulls(item) for item in obj]
+    return obj
+
+
+# ---------------------------------------------------------------------------
 # Content extraction (reasoning may be mixed into content)
 # ---------------------------------------------------------------------------
 
@@ -499,7 +523,10 @@ class ProtocolAndConstrainedEvaluator:
         normalized_refs: List[Dict[str, Any]] = []
         for ref in references:
             if isinstance(ref, dict):
-                normalized_refs.append(ref)
+                # Strip null values introduced by HuggingFace Dataset key
+                # union (restores original ground_truth shape, including
+                # nested schema.properties and required fields).
+                normalized_refs.append(_strip_nulls(ref))
             else:
                 normalized_refs.append({"answer": ref})
 

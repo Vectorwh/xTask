@@ -473,6 +473,94 @@ class TestNullKeyGroundTruth(unittest.TestCase):
         self.assertEqual(result["Semantic_Accuracy"], 100.0)  # regex case: no answer check → pass; schema case: answer matches
 
 
+class TestStripNulls(unittest.TestCase):
+    """Tests for _strip_nulls (HuggingFace Dataset nested union cleanup)."""
+
+    def test_strips_top_level_nulls(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _strip_nulls
+
+        gt = {"schema": None, "regex": "1[3-9]", "answer": None}
+        result = _strip_nulls(gt)
+        self.assertEqual(result, {"regex": "1[3-9]"})
+
+    def test_strips_nested_schema_properties(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _strip_nulls
+
+        # Simulates id 2's schema after HuggingFace Dataset union:
+        # properties gains null entries from other cases' schemas.
+        polluted = {
+            "type": "object",
+            "properties": {
+                "steps": None, "answer": None, "persons": None,
+                "name": {"type": "string"}, "age": {"type": "integer"},
+                "address": {"type": "object", "properties": {
+                    "street": {"type": "string"}, "city": {"type": "string"},
+                    "zipcode": {"type": "string"},
+                }},
+                "category": None, "reason": None,
+            },
+            "required": None,
+        }
+        result = _strip_nulls(polluted)
+        self.assertNotIn("steps", result["properties"])
+        self.assertNotIn("required", result)
+        self.assertIn("name", result["properties"])
+        self.assertIn("address", result["properties"])
+
+    def test_preserves_non_null_values(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _strip_nulls
+
+        gt = {"answer": 0, "regex": "", "grammar": True, "require_reasoning": True}
+        result = _strip_nulls(gt)
+        # 0, "", True are NOT None — must be preserved.
+        self.assertEqual(result, gt)
+
+    def test_handles_lists(self):
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import _strip_nulls
+
+        data = {"required": ["steps", "answer"], "items": [None, "a", {"x": None, "y": 1}]}
+        result = _strip_nulls(data)
+        self.assertEqual(result["required"], ["steps", "answer"])
+        self.assertEqual(result["items"], ["a", {"y": 1}])
+
+    def test_score_with_polluted_schema(self):
+        """End-to-end: a schema polluted by HF Dataset union (null properties)
+        must not cause SchemaError — _strip_nulls cleans it before validation."""
+        from xtask.benchmarks.aisbench.protocol_constrained_evaluator import (
+            ProtocolAndConstrainedEvaluator,
+        )
+
+        # id 2 scenario: model outputs correct JSON matching intended schema,
+        # but reference schema is polluted with null property entries.
+        full_msg = {
+            "content": '{"name": "张三", "age": 30, "address": {"street": "中山路123号", "city": "北京市", "zipcode": "100000"}}',
+            "reasoning_content": "", "tool_calls": [], "finish_reason": "stop",
+        }
+        polluted_ref = {
+            "expected_finish_reason": "stop",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "steps": None, "answer": None, "persons": None, "locations": None,
+                    "name": {"type": "string"}, "age": {"type": "integer"},
+                    "address": {"type": "object", "properties": {
+                        "street": {"type": "string"}, "city": {"type": "string"},
+                        "zipcode": {"type": "string"},
+                    }},
+                    "category": None, "reason": None,
+                },
+                "required": None,
+            },
+            "answer": None, "regex": None, "grammar": None,
+            "answer_regex": None, "require_reasoning": None,
+        }
+        evaluator = ProtocolAndConstrainedEvaluator()
+        result = evaluator.score([json.dumps(full_msg)], [polluted_ref])
+        self.assertEqual(result["Syntax_Valid_Rate"], 100.0,
+                         f"Polluted schema should be cleaned: {result['details'][0]['syntax']['errors']}")
+        self.assertEqual(result["Protocol_Pass_Rate"], 100.0)
+
+
 class TestRegexSearchFallback(unittest.TestCase):
     """Tests for _validate_regex search fallback."""
 
