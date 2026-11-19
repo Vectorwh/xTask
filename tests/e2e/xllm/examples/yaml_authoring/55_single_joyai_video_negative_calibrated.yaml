@@ -1,0 +1,117 @@
+# Calibrated-label paired semantic engineering regression; NOT official acceptance baseline.
+# 12 conditions /24 fresh 50-step T2AV requests, semantic score only; no VBench quality/perf conflation.
+# pass/fail/inconclusive is preserved; never tune thresholds to make generated results pass.
+engine_type: xllm
+model_path: /export/home/models/joyo_v2_diffusers_stage3p5_it526400
+served_model_name: JoyAI-Video
+dataset_name: joyai_video_smoke
+communication_backend: hccl
+userid: 1003
+serving_wait_time: 10
+benchmark_timeout: 14400
+hccl_if_port: 46100
+progress_conn_port: 19363
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    local_port: 18224
+    serving_ready_timeout: 1800
+    serving_extensiable_param:
+      backend: dit
+      model_id: JoyAI-Video
+      npu_kernel_backend: TORCH
+      tp_size: 16
+      sp_size: 1
+      cfg_size: 1
+      dp_size: 1
+      vae_size: 1
+      text_encoder_tp_size: 8
+      dit_enable_text_encoder: true
+      max_requests_per_batch: 1
+      max_tokens_per_batch: 4096
+      max_memory_utilization: 0.95
+      enable_prefix_cache: false
+      enable_chunked_prefill: false
+      enable_schedule_overlap: false
+      enable_graph: false
+      enable_rolling_load: false
+      dit_cache_policy: None
+      use_contiguous_input_buffer: false
+      enable_shm: true
+      output_shm_size: 1024
+      forward_execution_timeout_ms: 1800000
+    startup_environment:
+    - export HCCL_OP_EXPANSION_MODE=HOST
+case_name: 55_single_joyai_video_negative_calibrated
+metrics: acc
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    task: t2av
+    scenario: cfg_pair
+    mode: generate_and_evaluate
+    manifest: ${DEPENDENCE_PACKAGE_PATH}/datasets/joyai_video/joyai_video_negative_calibrated_v1.jsonl
+    generation:
+      size: 512*288
+      num_frames: 81
+      fps: 16
+      num_inference_steps: 50
+      guidance_scale: 4.0
+      flow_shift: 8.0
+      seed: 42
+      sampling_rate: 44100
+      concurrency: 1
+      repeats: 1
+      warmups: 0
+      request_timeout: 1800
+      limit: 0
+    media:
+      audio: required
+      duration_tolerance_s: 0.25
+      channels: 2
+    evaluation:
+      enabled: false
+    gates: []
+    checks:
+      negative_control:
+        backend: benchmark_semantics
+        profile: xtask_negative_v1
+        device: cpu
+        python_exec: ${DEPENDENCE_PACKAGE_PATH}/joyai_video_benchmark/semantic_env/bin/python
+        vision:
+          model_path: ${DEPENDENCE_PACKAGE_PATH}/joyai_video_benchmark/grounding-dino-tiny
+          frames: 16
+          max_side: 768
+          box_threshold: 0.4
+          text_threshold: 0.2
+        audio:
+          model_path: ${DEPENDENCE_PACKAGE_PATH}/joyai_video_benchmark/clap-htsat-unfused
+          window_seconds: 5.0
+          stride_seconds: 2.5
+          similarity_min: 0.3
+          margin: 0.0
+        timeout: 7200

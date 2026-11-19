@@ -25,8 +25,9 @@ class GenerateSweImageListTests(unittest.TestCase):
     def write_case(self, **swe):
         config = {
             "case_name": "swe_image_list_test",
-            "metrics": "swebench",
-            "benchmark": {"benchmark_type": "aisbench", "swebench": {
+            "metrics": "acc",
+            "benchmark": {"benchmark_type": "aisbench", "acc": {
+                "mode": "all",
                 "dataset": "verified_mini", "split": "test", **swe,
             }},
         }
@@ -82,7 +83,7 @@ class GenerateSweImageListTests(unittest.TestCase):
 
     def test_rejects_non_swe_yaml_and_unsupported_image(self):
         task = self.write_case()
-        task["metrics"] = "perf"
+        task["benchmark"].pop("acc")
         self.yaml.write_text(yaml.safe_dump(task))
         with self.assertRaisesRegex(ValueError, "explicit AISBench SWE-bench"):
             generator.image_list_for_case(self.yaml, self.dataset)

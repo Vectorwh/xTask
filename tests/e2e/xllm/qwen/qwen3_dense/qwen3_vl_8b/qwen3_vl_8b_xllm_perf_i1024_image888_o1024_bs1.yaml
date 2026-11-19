@@ -2,7 +2,7 @@ additional_config: ''
 benchmark:
   benchmark_type: evalscope
   perf:
-    baseline: 104.7084
+    baseline: 122.4159
     batch_size: 1
     request_rate: 1
     case_type: performance

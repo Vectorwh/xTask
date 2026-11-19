@@ -419,11 +419,30 @@ def verify_result(result, task_config):
     acc_flag = False
     logging.debug("entry function: %s"% inspect.currentframe().f_code.co_name)
 
+    from xtask.benchmarks.asr.config import is_asr_task, result_issues
+
+    if is_asr_task(task_config):
+        issues = result_issues(result.get("benchmark_asr_result"), task_config)
+        if result.get("archive_error"):
+            issues.append({"category": "processing", "reason": str(result["archive_error"])})
+        if result.get("benchmark_success") is False and not issues:
+            issues.append({"category": "execution", "reason": "ASR benchmark command failed"})
+        result["asr_gate_issues"] = issues
+        if issues:
+            logging.error("ASR verification failed: %s", "; ".join(issue["reason"] for issue in issues))
+        return not issues
+
+    from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+    if is_text_video_task(task_config):
+        from xtask.benchmarks.vbench.text_video.reporting import verify
+
+        return verify(result, task_config)
     if result.get("benchmark_success") is False:
         logging.error("✗ Test failed: benchmark command did not complete successfully")
         return False
 
-    if "vbench" in task_config.get("metrics", []):
+    if _is_vbench_case(task_config):
         vbench_result = result.get("benchmark_vbench_result")
         if not isinstance(vbench_result, Mapping):
             logging.error("✗ Test failed: missing VBench result")
@@ -577,10 +596,11 @@ def verify_result(result, task_config):
         except ValueError as exc:
             logging.error("✗ Test failed: invalid perf baseline config: %s", exc)
             return False
+        quality_passed = "acc" not in task_config.get("metrics") or acc_flag
         if not rules:
-            return True
+            return quality_passed
         if _evaluate_perf_baseline_rules(perf_result.summary, rules):
-            return True
+            return quality_passed
     else:
         return acc_flag
 
@@ -630,6 +650,7 @@ def _relative_output_path(result):
 
 
 def _result_location(result, execution_host):
+    execution_host = result.get("artifact_host") or execution_host
     relative_path = _relative_output_path(result).strip("/")
     if execution_host and relative_path:
         return f"{execution_host}/{relative_path}"
@@ -652,8 +673,60 @@ def _contains_metric(task_config, metric_name):
     return metric_name in metrics
 
 
+def _is_vbench_case(task_config):
+    """VBench gate: task gate first (new format), legacy metric as fallback.
+
+    New-format VBench YAML carries ``metrics: acc`` with the config in
+    ``benchmark.vbench`` (``benchmark_type: vbench``), so the metrics list no
+    longer identifies these cases; the legacy ``metrics: vbench`` style is
+    still honoured.
+    """
+    from xtask.benchmarks.vbench.task_gate import is_vbench_task
+
+    return is_vbench_task(task_config) or _contains_metric(task_config, "vbench")
+
+
+def _vbench_baseline_pair(benchmark):
+    """Extract ``(baseline, threshold)`` from a ``benchmark.vbench`` block."""
+    vbench = (benchmark.get("vbench") or {}) if isinstance(benchmark, Mapping) else {}
+    evaluation = vbench.get("evaluation") or {}
+    baseline = evaluation.get("baseline", vbench.get("baseline"))
+    if baseline in (None, ""):
+        return None
+    return baseline, evaluation.get("threshold", vbench.get("threshold", 0.1))
+
+
 def _configured_baseline(task_config):
+    # A SWE-bench task may ship metrics: acc with the SWE config in
+    # benchmark.acc (new format) or metrics: swebench with benchmark.swebench
+    # (legacy). Decide before the generic acc/perf loop, otherwise the acc
+    # branch would read benchmark_acc_result, which SWE runs never produce.
+    from xtask.benchmarks.aisbench.swebench import (
+        is_aisbench_swebench_task,
+        swebench_config,
+    )
+
+    if is_aisbench_swebench_task(task_config):
+        swebench = swebench_config(task_config)
+        baseline = swebench.get("baseline")
+        if baseline not in (None, ""):
+            return "swebench", baseline, swebench.get("threshold", 0.1)
+        return None
     benchmark = task_config.get("benchmark") or {}
+    # A VBench task (benchmark_type: vbench) owns benchmark.vbench regardless
+    # of metrics (new format uses metrics: acc, legacy uses metrics: vbench).
+    # Decide before the generic acc/perf loop: a new-format VBench YAML would
+    # otherwise hit the acc branch with an empty benchmark.acc block and lose
+    # its baseline.
+    if _is_vbench_case(task_config):
+        from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+        if is_text_video_task(task_config):
+            return None  # Opt-in native dimension/performance gates, never legacy I2V total.
+        pair = _vbench_baseline_pair(benchmark)
+        if pair is not None:
+            return ("vbench",) + pair
+        return None
     for metric_name in ("acc", "perf"):
         if not _contains_metric(task_config, metric_name):
             continue
@@ -664,24 +737,14 @@ def _configured_baseline(task_config):
         if baseline:
             return metric_name, baseline, metric_config.get("threshold")
     # A vbench block may be present as metadata in a non-VBench task.  Only
-    # an explicit VBench metric is allowed to select its baseline.
+    # an explicit legacy VBench metric is allowed to select its baseline
+    # here (VBench tasks were already handled above). SWE-bench tasks (both
+    # YAML formats) were also handled above.
     if not _contains_metric(task_config, "vbench"):
-        if not _contains_metric(task_config, "swebench"):
-            return None
-        from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
-
-        if not is_aisbench_swebench_task(task_config):
-            return None
-        swebench = (benchmark.get("swebench") or {}) if isinstance(benchmark, Mapping) else {}
-        baseline = swebench.get("baseline")
-        if baseline not in (None, ""):
-            return "swebench", baseline, swebench.get("threshold", 0.1)
         return None
-    vbench = (benchmark.get("vbench") or {}) if isinstance(benchmark, Mapping) else {}
-    evaluation = vbench.get("evaluation") or {}
-    baseline = evaluation.get("baseline", vbench.get("baseline"))
-    if baseline not in (None, ""):
-        return "vbench", baseline, evaluation.get("threshold", vbench.get("threshold", 0.1))
+    pair = _vbench_baseline_pair(benchmark)
+    if pair is not None:
+        return ("vbench",) + pair
     return None
 
 
@@ -746,6 +809,21 @@ def _baseline_failure_reason(result, task_config):
 
 
 def _baseline_difference(result, task_config):
+    from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+    if is_text_video_task(task_config):
+        from xtask.benchmarks.vbench.text_video.config import result_issues as video_issues
+        from xtask.benchmarks.vbench.text_video.reporting import task_config as video_config
+
+        return "; ".join(issue["reason"] for issue in video_issues(result.get("benchmark_vbench_result"), video_config(task_config)) if issue["category"] == "baseline")
+    from xtask.benchmarks.asr.config import is_asr_task, result_issues
+
+    if is_asr_task(task_config):
+        return "; ".join(
+            issue["reason"]
+            for issue in result_issues(result.get("benchmark_asr_result"), task_config)
+            if issue["category"] == "baseline"
+        )
     configured = _configured_baseline(task_config)
     if configured is None:
         return ""
@@ -823,6 +901,8 @@ def _baseline_result_failed(result, task_config):
 
 
 def _classify_failure(result, task_config):
+    from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
+
     if result.get("success"):
         return "", ""
 
@@ -849,6 +929,29 @@ def _classify_failure(result, task_config):
             else message
         )
         return FAILURE_XLLM, reason or "xLLM process or service health check failed"
+    from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+    if is_text_video_task(task_config):
+        from xtask.benchmarks.vbench.text_video.reporting import failure
+
+        return failure(result, task_config)
+    from xtask.benchmarks.asr.config import is_asr_task, result_issues
+
+    if is_asr_task(task_config):
+        if result.get("archive_error"):
+            return FAILURE_PROCESSING, str(result["archive_error"])
+        issues = result.get("asr_gate_issues") or result_issues(result.get("benchmark_asr_result"), task_config)
+        category = next(
+            (name for name in ("execution", "processing", "baseline")
+             if any(issue["category"] == name for issue in issues)),
+            "processing",
+        )
+        labels = {
+            "execution": FAILURE_BENCHMARK,
+            "processing": FAILURE_PROCESSING,
+            "baseline": FAILURE_BASELINE,
+        }
+        return labels[category], "; ".join(issue["reason"] for issue in issues) or message
 
     if result.get("benchmark_success") is False:
         reason = message
@@ -856,9 +959,12 @@ def _classify_failure(result, task_config):
             reason = f"{reason}: {benchmark_stderr}" if reason else benchmark_stderr
         return FAILURE_BENCHMARK, reason or "Benchmark command failed"
 
-    if result.get("benchmark_success") is True and _contains_metric(task_config, "swebench"):
-        from xtask.benchmarks.aisbench.swebench import is_aisbench_swebench_task
-
+    if result.get("benchmark_success") is True and (
+        _contains_metric(task_config, "swebench")
+        or is_aisbench_swebench_task(task_config)
+    ):
+        # New-format SWE YAML carries metrics: acc, so the explicit task gate
+        # must run before any _contains_metric fallback (legacy format).
         if is_aisbench_swebench_task(task_config):
             swe_result = result.get("benchmark_swebench_result")
             if isinstance(swe_result, Mapping):
@@ -873,7 +979,7 @@ def _classify_failure(result, task_config):
         return FAILURE_BASELINE, _baseline_failure_reason(result, task_config)
 
     if result.get("benchmark_success") is True:
-        if _contains_metric(task_config, "vbench"):
+        if _is_vbench_case(task_config):
             raw_vbench_result = result.get("benchmark_vbench_result")
             vbench_result = raw_vbench_result if isinstance(raw_vbench_result, Mapping) else {}
             try:
@@ -889,7 +995,11 @@ def _classify_failure(result, task_config):
                     and vbench_result.get("total_score") is None
                 )
             )
-        elif _contains_metric(task_config, "swebench"):
+        elif is_aisbench_swebench_task(task_config) or _contains_metric(
+            task_config, "swebench"
+        ):
+            # New-format SWE YAML carries metrics: acc; the task gate must win
+            # over the _contains_metric fallback used by the legacy format.
             from xtask.benchmarks.aisbench.swebench import swebench_mode
 
             raw_swe_result = result.get("benchmark_swebench_result")
@@ -923,7 +1033,40 @@ def _result_payload(result, task_config=None):
     benchmark_type = str(
         (task_config.get("benchmark") or {}).get("benchmark_type", "")
     ).lower()
+    if benchmark_type == "asr":
+        payload = result.get("benchmark_asr_result") or {}
+        fields = {
+            "backend": payload.get("backend"),
+            "scoring_profile": payload.get("scoring_profile"),
+            "config_file": payload.get("config_file"),
+            "result_file": payload.get("result_file"),
+        }
+        from xtask.benchmarks.asr.reporting import summarize_runs
+        fields["summary_by_concurrency"] = {
+            label: {key: value for key, value in group.items() if key != "run_ids"}
+            for label, group in summarize_runs(payload.get("runs")).items()
+        }
+        # Keep request texts/audio and large lists in artifacts, not Excel cells.
+        score_fields = {"N", "C", "S", "D", "I", "error_count", "error_rate_pct", "unit"}
+        for run in payload.get("runs", []):
+            label = str(run.get("run_id", "run"))
+            fields[label] = {
+                "complete": run.get("complete"),
+                "failed_requests": run.get("failed_requests"),
+                "score": {
+                    key: value for key, value in (run.get("score") or {}).items()
+                    if key in score_fields
+                },
+                "metrics": run.get("metrics", {}),
+            }
+        return fields
     if benchmark_type == "vbench" and isinstance(vbench_result, Mapping):
+        from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+        if is_text_video_task(task_config):
+            from xtask.benchmarks.vbench.text_video.reporting import workbook_payload
+
+            return workbook_payload(result)
         # Keep the workbook bounded.  VBench's per-video evaluation payload
         # and latency list belong in the archived JSON files, not in one Excel
         # cell (Excel rejects values over 32K and the row becomes unreadable).
@@ -1046,7 +1189,13 @@ def _build_result_row(result, task_config, task_path=None, args=None):
     model_name = resolve_model_name(task_path, task_config)
     success = bool(result.get("success"))
     failure_category, failure_reason = _classify_failure(result, task_config)
-    is_accuracy = _contains_metric(task_config, "acc")
+    # New-format VBench YAML carries metrics: acc, but its Excel columns come
+    # from _result_payload (benchmark_type: vbench), not the accuracy column.
+    from xtask.benchmarks.asr.config import is_asr_task
+
+    is_accuracy = _contains_metric(task_config, "acc") and not (
+        _is_vbench_case(task_config) or is_asr_task(task_config)
+    )
     benchmark = task_config.get("benchmark") or {}
     execution_host = _resolve_execution_host(task_config, args)
     finished_at = datetime.now(tz=CHINA_STANDARD_TIME).isoformat(timespec="seconds")

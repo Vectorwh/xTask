@@ -46,8 +46,6 @@ deployment:
   sync_workspace: true
   resource_sync:
     enabled: true
-    source: /export/home/models/xllm_test_060
-    target: /export/home/models/xllm_test_060
     max_workers: 4
     timeout: 3600
   # 显式 C/R 复用引擎容器；etcd 与模型传输参数保持本用例原值。

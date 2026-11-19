@@ -20,7 +20,8 @@ from xtask.utils.config_parser import get_xtask_config_data
 DEFAULT_RESOURCE_ROOT = "/export/home/models/xllm_test_060"
 CONTAINER_RESOURCE_ROOT = "/xllm_test_060"
 NUMACTL_RPM = "numactl-2.0.16-9.vo2203sp4.aarch64.rpm"
-EVALSCOPE_WHEEL = "evalscope-1.5.0-py3-none-any.whl"
+EVALSCOPE_OFFLINE_DIR = "evalscope_offline"
+EVALSCOPE_MAIN_WHEEL = "evalscope-1.14.0-py3-none-any.whl"
 TORCH_NPU_WHEEL = "torch_npu-2.9.0.post2-cp311-cp311-linux_aarch64.whl"
 
 
@@ -31,6 +32,36 @@ def get_dependence_package_path() -> str:
     )
     text = str(value or "").strip()
     return text or DEFAULT_RESOURCE_ROOT
+
+
+DEPENDENCE_PLACEHOLDER = "${DEPENDENCE_PACKAGE_PATH}"
+
+
+def expand_dependence_placeholder(value: Any) -> Any:
+    """Expand ``${DEPENDENCE_PACKAGE_PATH}`` in a YAML path field.
+
+    Host-side paths become ``DEPENDENCE_PACKAGE_PATH/...``; container-side
+    paths (those already under the fixed ``/xllm_test_060`` mount) become
+    ``/xllm_test_060/...``.  Callers pass the resolved string to
+    ``path_mapping_in_container`` when the field is read inside a container.
+
+    Non-string values and strings without the placeholder pass through
+    unchanged, so this is safe to apply to every task-config string.
+    """
+    if not isinstance(value, str) or DEPENDENCE_PLACEHOLDER not in value:
+        return value
+    return value.replace(DEPENDENCE_PLACEHOLDER, get_dependence_package_path())
+
+
+def expand_dependence_placeholders(node: Any) -> Any:
+    """Recursively expand the placeholder through a task-config mapping."""
+    if isinstance(node, str):
+        return expand_dependence_placeholder(node)
+    if isinstance(node, dict):
+        return {key: expand_dependence_placeholders(item) for key, item in node.items()}
+    if isinstance(node, list):
+        return [expand_dependence_placeholders(item) for item in node]
+    return node
 
 
 def _nonempty_path(value: Any) -> Optional[str]:
@@ -116,9 +147,12 @@ def _aisbench_component() -> ResourceComponent:
 
 def _evalscope_component() -> ResourceComponent:
     return ResourceComponent(
-        "evalscope-wheel",
-        EVALSCOPE_WHEEL,
-        (EVALSCOPE_WHEEL,),
+        "evalscope-offline",
+        EVALSCOPE_OFFLINE_DIR,
+        (
+            EVALSCOPE_OFFLINE_DIR,
+            f"{EVALSCOPE_OFFLINE_DIR}/{EVALSCOPE_MAIN_WHEEL}",
+        ),
     )
 
 
@@ -249,6 +283,9 @@ def build_host_requirements(
                 _path_component(root, "benchmark/ais_bench/datasets/textvqa"),
             )
     elif benchmark_type == "evalscope":
+        _append_component(runner_components, _evalscope_component())
+    elif benchmark_type == "image_edit":
+        # image_edit installs from the same evalscope_offline wheel closure.
         _append_component(runner_components, _evalscope_component())
 
     for relative_path in _referenced_resource_paths(task_config, root):

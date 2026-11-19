@@ -1,0 +1,152 @@
+# JoyAI-Image-Edit-Plus 图片编辑精度测试（AISBench gedit，LMM-as-Judge 打分）。
+#
+# 结构对齐 37 号（Qwen-Image-Edit-2509 acc）用例，judge 块与 37 号完全一致
+# （Qwen2.5-VL-7B-Instruct 单卡 NPU12 / 18008 / hccl 43500）。
+# 模型族协议差异（被测模型侧）：
+#   - 两段式 skip tokens：JoyAI 取 34（xllm pipeline_joyimage_edit_plus.h
+#     kPromptEmbeddingStartIndex = 34；Qwen 为 64）；GEditImageEditAPI 按
+#     model/path 含 joyai-image-edit / joyimageeditplus 等图片编辑族专有
+#     标记自动检测（xtask/benchmarks/aisbench/gedit_image_edit_api.py），
+#     generation_kwargs.model_family 可显式覆盖；
+#   - DiT 参考图走 input.media_sources 多图（Qwen 走 input.image 单图）；
+#   - 出图分辨率传 parameters.size（缺省 1328*1328）：实测不给 size 走
+#     bucket 会退化为 512*512，judge 打分崩塌（见 gedit_image_edit_api.py
+#     请求体组装段注释）。
+#
+# DiT 并行约束与 37 号不同：JoyAI MMDiT 32 头（Qwen 24 头），sp_size 须整除
+# 32，6 卡 sp3*cfg2（37 号）不适用（32 % 3 != 0）；本用例取 NPU 0-3 四卡
+# sp2*cfg2（world = 2*1*2*1 = 4，transformer_joyimage_edit_plus.h 的
+# CHECK_EQ(num_heads_ % sp_size, 0) 约束满足）。
+# DiT 用解耦视图目录 JoyAI-Image-Edit-Plus-dit（详见 deployment.dit 注释），
+# 不加载进程内 text_encoder 权重。
+#
+# 前置条件（与 37 号一致）：
+# 1. GEdit-Bench 数据集（datasets load_from_disk 格式）默认
+#    <DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/GEdit-Bench；
+# 2. dataset_conf: gedit_gen_0_shot_llmjudge 已在 AISBench 部署目录
+#    configs/datasets/gedit/ 存在，无需新增映射；
+# 3. 被测模型 api_type: gedit_image_edit（xtask 内置，走两段式协议），
+#    encoder 地址经 GEDIT_ENCODER_URL（默认 http://127.0.0.1:18007）；
+# 4. LLM judge：gedit 配置内置 VLLMCustomAPIChat，judge 端点由
+#    acc.judge_endpoint 指定（生成器 AST 替换 host_ip/host_port）。
+#
+# baseline 为 SC/PQ 两维 LLM 打分综合分（0-10）：4.56（两次干净轮实测均值）。
+case_name: joyai_image_edit_acc
+engine_type: xllm
+model_path: /export/home/models/JoyAI-Image-Edit-Plus
+served_model_name: JoyAI-Image-Edit-Plus
+metrics: acc
+dataset_name: gedit
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 30
+
+deployment:
+  dit:
+    # JoyAI MMDiT 32 头：sp_size 须整除 32，6 卡 sp3*cfg2（37 号）不适用
+    # （32 % 3 != 0）；取 4 卡 sp2*cfg2（world = 2*2*1*1 = 4）。
+    device_ids: [0, 1, 2, 3]
+    # DiT 解耦视图目录：symlink 全部组件 + model_index.json 中 text_encoder
+    # 分量置 null（dit_model_loader.cpp:602 "Skipping null component"）。
+    # DiT 不加载 17G 进程内 text_encoder：Rank0 免于 transformer(16.5G)+encoder
+    # (17G) 叠加 OOM，且避免小 token 序列上 text_encoder TP4 与 SP2 子通信组
+    # 的 HCCL AICPU 碰撞（RunAicpuKfcResInitV2, acl 507018）。
+    # 解耦模式（prompt_embed tensor_sources, pipeline:328-339）不执行进程内
+    # 编码路径，text_encoder_ 仅在 encode_prompts(:619) 才被 CHECK，跳过加载
+    # 不影响 forward；has_component(:105) 为假时也不再强制 TORCH backend。
+    model_path: /export/home/models/JoyAI-Image-Edit-Plus-dit
+    # 每卡一个 xLLM 进程；端口按 rank 从 19000 连续自增（19000-19003），
+    # 与 encoder 的 18007 互不冲突，无需逐卡列举。
+    port: 19000
+    master_node_addr: 127.0.0.1:19757
+    health_path: /health
+    hccl_if_port: 43432
+    # DiT 4 卡加载较慢，给足就绪时间（默认 900s）
+    readiness_timeout: 1800
+    serving_extensiable_param:
+      model_id: JoyAI-Image-Edit-Plus
+      backend: dit
+      dit_cache_policy: None
+      dit_cache_warmup_steps: 0
+      cfg_size: 2
+      sp_size: 2
+      # npu_kernel_backend=TORCH：text_encoder 分量已置 null（解耦视图目录），
+      # 构造期 CHECK(:108) 不触发；主干 attention 为 npu_fusion_attention
+      # 原生算子，TORCH 仅影响 kernel dispatch，与 38 号实跑配置保持一致。
+      npu_kernel_backend: TORCH
+      # 通信组拓扑与 38 号成功跑一致（text_encoder_tp 组照常创建，
+      # dit_collective_communicator.cpp:95 无条件建组，与是否加载权重无关）。
+      text_encoder_tp_size: 4
+      enable_prefix_cache: false
+      enable_chunked_prefill: false
+      enable_schedule_overlap: false
+      enable_shm: true
+      use_contiguous_input_buffer: false
+      max_memory_utilization: 0.6
+  encoder:
+    device_ids: [7]
+    port: 18007
+    master_node_addr: 127.0.0.1:29798
+    health_path: /health
+    # 启动环境与手工脚本一致（hccl_if_port 独立避开 DiT 的 43432）
+    hccl_if_port: 43438
+    serving_extensiable_param:
+      max_memory_utilization: 0.86
+      max_tokens_per_batch: 40000
+      max_seqs_per_batch: 256
+      block_size: 128
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      enable_schedule_overlap: false
+      enable_shm: true
+      enable_return_mm_full_embeddings: 1
+      task: embed
+      # 同 38 号：Qwen3-VL ATB 实现 embed warmup 崩溃，用 TORCH 实现。
+      npu_kernel_backend: TORCH
+  judge:
+    # LLM judge：Qwen2.5-VL-7B-Instruct 单卡（TP=1）@ NPU12 / 18008
+    # （judge 块与 37 号完全一致）。
+    device_ids: [12]
+    port: 18008
+    master_node_addr: 127.0.0.1:29810
+    health_path: /health
+    model_path: /export/home/models/Qwen2.5-VL-7B-Instruct
+    # HCCL 基础端口必须避开 DiT 43432/encoder 43438 的端口段：
+    # 43442 会落进 DiT HCCL 端口区间，曾导致 DiT 首次 allreduce 时
+    # aicpu 异常（ERR02005/acl 507018）；沿用已验证的 43500。
+    hccl_if_port: 43500
+    serving_extensiable_param:
+      model_id: Qwen2.5-VL-7B-Instruct
+      max_memory_utilization: 0.90
+      max_seqs_per_batch: 16
+      max_body_size: 536870912
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      enable_schedule_overlap: false
+
+benchmark:
+  benchmark_type: aisbench
+  acc:
+    case_type: accuracy
+    api_type: gedit_image_edit
+    dataset_conf: gedit_gen_0_shot_llmjudge
+    # 数据集默认 <DEPENDENCE_PACKAGE_PATH>/benchmark/ais_bench/datasets/
+    # GEdit-Bench（load_from_disk 格式）；显式写 benchmark.acc.dataset_path
+    # 可覆盖。
+    # 调试样例只评测前 20 条（GEdit-Bench 全量 1212）；删除该字段即可全量评测。
+    num_prompts: 20
+    batch_size: 1
+    output_len: 512
+    request_rate: 0
+    # LLM-judge 端点（OpenAI 兼容多模态；AST 替换进 gedit judge 配置）。
+    # 留空则由调度器按 deployment.judge 注入 127.0.0.1:18008。
+    judge_endpoint: 127.0.0.1:18008
+    # gedit 为 LLM judge 打分（0-10）；baseline 为 SC/PQ 两维综合分（算术平均）。
+    # 回填口径：两次无外部干扰干净轮（20261103_010342 综合分 4.70、20261103_132652 综合
+    # 分 4.425）的算术平均，与 37 号（Qwen）口径一致；threshold 0.20 同 37 号。
+    baseline: 4.56
+    threshold: 0.20
+    generation_kwargs:
+      temperature: 0.01
+      ignore_eos: false

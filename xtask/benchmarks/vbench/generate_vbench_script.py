@@ -67,6 +67,12 @@ def generate_vbench_script(
     """
 
     config = _vbench_config(task_config)
+    if config.get("task") in {"t2v", "t2av"}:
+        from xtask.benchmarks.vbench.text_video.generate import generate_script
+
+        return generate_script(task_config, output_file_path, output_shell_file, python_exec)
+    if config.get("task") not in (None, "i2v"):
+        raise ValueError("VBench task must be i2v, t2v or t2av")
     mode = str(config.get("mode", "generate_and_evaluate")).lower()
     valid_modes = {"generate", "evaluate", "generate_and_evaluate"}
     if mode not in valid_modes:

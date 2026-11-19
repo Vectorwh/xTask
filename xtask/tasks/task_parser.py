@@ -567,6 +567,10 @@ def gen_group_paraset_task(
             logging.error(f"基础配置文件为空: {basecase_file}")
             return False
 
+        from xtask.utils.resource_sync import expand_dependence_placeholders
+
+        base_config = expand_dependence_placeholders(base_config)
+
         from xtask.core.service_group import validate_pd_deployment_authoring
 
         validate_pd_deployment_authoring(base_config)
@@ -750,10 +754,19 @@ def gen_group_autoassess_task(
             logging.error(f"基础配置文件为空或解析失败: {basecase_file}")
             return False
 
+        from xtask.utils.resource_sync import expand_dependence_placeholders
+
+        base_config = expand_dependence_placeholders(base_config)
+
         # Normalize even the first/default round, which does not call the
         # parameter updater. Do not mutate the retained source configuration.
         config_copy = copy.deepcopy(base_config)
         normalize_xllm_service_config(config_copy)
+        from xtask.benchmarks.asr.config import is_asr_task
+        asr_case = is_asr_task(base_config)
+        if asr_case:
+            from xtask.benchmarks.asr.reporting import auto_assess_settings
+            asr_settings = auto_assess_settings(base_config)
         param_value = None
 
         # 3. 确定参数值并更新配置
@@ -761,10 +774,13 @@ def gen_group_autoassess_task(
             # 优先使用传入的参数
             param_value = config_para[PARAM_NAME]
             # 更新配置字典中的值
-            _update_config_by_path(config_copy, PARAM_NAME, param_value)
+            if asr_case:
+                config_copy["benchmark"]["asr"]["concurrency"] = [param_value]
+            else:
+                _update_config_by_path(config_copy, PARAM_NAME, param_value)
         else:
             # 回退：从基础配置中获取默认值 (使用链式 get 防止 KeyError)
-            param_value = base_config.get("benchmark", {}).get("perf", {}).get(PARAM_NAME)
+            param_value = asr_settings["concurrency"] if asr_case else base_config.get("benchmark", {}).get("perf", {}).get(PARAM_NAME)
 
             if param_value is None:
                 logging.error(f"无法获取有效的 {PARAM_NAME}，请检查 config_para 或基础配置文件结构。")

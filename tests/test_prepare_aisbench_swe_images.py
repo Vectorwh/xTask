@@ -43,10 +43,10 @@ class PrepareSweImagesTests(unittest.TestCase):
     def task(self):
         return {
             "case_name": "swebench_test",
-            "metrics": "swebench",
+            "metrics": "acc",
             "benchmark": {
                 "benchmark_type": "aisbench",
-                "swebench": {"runner": {
+                "acc": {"runner": {
                     "host": "11.87.48.253",
                     "runtime_container": {"proxy": {
                         "https": "http://example-proxy:80",
@@ -85,12 +85,12 @@ class PrepareSweImagesTests(unittest.TestCase):
     def test_non_swe_and_invalid_proxy_fail_closed(self):
         runner = FakeRunner()
         task = self.task()
-        task["metrics"] = "perf"
+        task["benchmark"].pop("acc")
         with self.assertRaisesRegex(ValueError, "explicit AISBench SWE-bench"):
             prepare.prepare_images(task, self.IMAGES, runner)
         self.assertEqual(runner.commands, [])
         task = self.task()
-        task["benchmark"]["swebench"]["runner"]["runtime_container"]["proxy"]["https"] = "malformed"
+        task["benchmark"]["acc"]["runner"]["runtime_container"]["proxy"]["https"] = "malformed"
         with self.assertRaisesRegex(ValueError, "HTTP\\(S\\) URL"):
             prepare.prepare_images(task, self.IMAGES, runner)
         self.assertFalse(any(command.startswith("flock ") for command, _ in runner.commands))

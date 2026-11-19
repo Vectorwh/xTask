@@ -1,0 +1,68 @@
+# Stage 1: reproduce the supplied TP2 + CTC + Suffix request/scoring profile.
+# Change model_path, deployment host/device IDs before running on another server.
+case_name: joyai_asr_xllm_tp2_legacy
+engine_type: xllm
+model_path: /export/home/models/JoyaiASR
+served_model_name: JoyaiASR
+metrics: acc,perf
+dataset_name: ta3_test0925_quiet
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+benchmark:
+  benchmark_type: asr
+  asr:
+    backend: legacy_infer
+    # Defaults: <xTask>/asr_doc/{infer,data}.zip; override with absolute paths.
+    dataset_name: ta3_test0925_quiet
+    expected_samples: 1162
+    api: audio
+    concurrency: [1, 2, 5, 10]
+    repeats: 1
+    use_context: true
+    stream: true
+    timeout: 300
+    max_audio_seconds: 30
+    scoring_profile: joyai_legacy
+    # All levels share one server lifetime. This is NOT a cold-cache guarantee.
+    cache_condition: service_lifetime
+    warmup:
+      synthetic_requests: 3
+      api: audio
+      exclude_first: 0
+    generation:
+      temperature: 0
+      repetition_penalty: 1.05
+      language: zh
+    # Establish a new verified baseline before adding gates; historical PDF
+    # numbers belong to a different configuration and are not copied here.
+    gates: []
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+    - name: master-0
+      host: 11.87.191.75
+      role: master
+      rank_start: 0
+      device_ids: [0, 1]
+      local_port: 8018
+      serving_extensiable_param:
+        backend: vlm
+        task: generate
+        model_impl: python
+        tp_size: 2
+        dp_size: 1
+        use_ctc: true
+        enable_graph: true
+        enable_prefill_piecewise_graph: true
+        enable_graph_mode_decode_no_padding: true
+        enable_prefix_cache: false
+        enable_chunked_prefill: true
+        enable_schedule_overlap: false
+        max_seqs_per_batch: 16
+        speculative_algorithm: Suffix
+        num_speculative_tokens: 6
+        speculative_suffix_max_cached_requests: 0

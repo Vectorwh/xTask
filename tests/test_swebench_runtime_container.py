@@ -36,15 +36,15 @@ def task(container=True):
                 "ais_bench_bin": "/usr/local/python3.11.15/bin/ais_bench",
             }
         }
-    return {"metrics": "swebench", "served_model_name": "test", "case_name": "swe_case",
-            "benchmark": {"benchmark_type": "aisbench", "swebench": swe}}
+    return {"metrics": "acc", "served_model_name": "test", "case_name": "swe_case",
+            "benchmark": {"benchmark_type": "aisbench", "acc": swe}}
 
 
 def per_case_task():
     config = task()
-    old = config["benchmark"]["swebench"].pop("setup")
+    old = config["benchmark"]["acc"].pop("setup")
     old["runtime_container"].pop("name")
-    config["benchmark"]["swebench"]["runner"].update(old)
+    config["benchmark"]["acc"]["runner"].update(old)
     return config
 
 
@@ -87,12 +87,12 @@ class DriverTests(unittest.TestCase):
         for name in ("28_single_aisbench_swebench", "31_single_aisbench_swebench_dsv4"):
             with self.subTest(case=name):
                 path = Path(__file__).parent / "e2e/xllm/examples/yaml_authoring" / f"{name}.yaml"
-                swe = yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]["swebench"]
+                swe = yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]["acc"]
                 self.assertNotIn("setup", swe)
                 self.assertNotIn("name", swe["runner"]["runtime_container"])
                 self.assertEqual(swe["runner"]["runtime_container"]["image"], IMAGE)
         external = Path(__file__).parent / "e2e/xllm/examples/yaml_authoring/29_external_aisbench_swebench.yaml"
-        swe = yaml.safe_load(external.read_text(encoding="utf-8"))["benchmark"]["swebench"]
+        swe = yaml.safe_load(external.read_text(encoding="utf-8"))["benchmark"]["acc"]
         self.assertNotIn("runtime_container", swe["runner"])
 
     def test_unconfigured_path_remains_host_only(self):
@@ -120,11 +120,11 @@ class DriverTests(unittest.TestCase):
 
     def test_opted_in_driver_passes_shim_only_to_aisbench(self):
         cfg = per_case_task()
-        cfg["benchmark"]["swebench"]["runner"]["docker_copy_fallback"] = True
-        cfg["benchmark"]["swebench"]["runner"]["docker_run_retry"] = True
-        cfg["benchmark"]["swebench"]["runner"]["clean_infer_container"] = True
-        cfg["benchmark"]["swebench"]["runner"]["github_raw_retry"] = True
-        cfg["benchmark"]["swebench"]["runner"]["agent_container_timeout"] = "4h"
+        cfg["benchmark"]["acc"]["runner"]["docker_copy_fallback"] = True
+        cfg["benchmark"]["acc"]["runner"]["docker_run_retry"] = True
+        cfg["benchmark"]["acc"]["runner"]["clean_infer_container"] = True
+        cfg["benchmark"]["acc"]["runner"]["github_raw_retry"] = True
+        cfg["benchmark"]["acc"]["runner"]["agent_container_timeout"] = "4h"
         executor = Executor()
         state = SweRuntimeContainerState()
         with mock.patch("xtask.benchmarks.aisbench.swebench_x86_container.time.time", return_value=1791500000):
@@ -150,8 +150,8 @@ class DriverTests(unittest.TestCase):
 
     def test_runtime_proxy_is_limited_to_benchmark_entrypoint(self):
         cfg = per_case_task()
-        cfg["benchmark"]["swebench"]["runner"]["docker_copy_fallback"] = True
-        container = cfg["benchmark"]["swebench"]["runner"]["runtime_container"]
+        cfg["benchmark"]["acc"]["runner"]["docker_copy_fallback"] = True
+        container = cfg["benchmark"]["acc"]["runner"]["runtime_container"]
         container["proxy"] = {
             "http": "http://bamboo-proxy.jd.com:80",
             "https": "http://bamboo-proxy.jd.com:80",
@@ -179,7 +179,7 @@ class DriverTests(unittest.TestCase):
 
     def test_bad_runtime_proxy_is_rejected_before_docker_creation(self):
         cfg = per_case_task()
-        cfg["benchmark"]["swebench"]["runner"]["runtime_container"]["proxy"] = {
+        cfg["benchmark"]["acc"]["runner"]["runtime_container"]["proxy"] = {
             "https": "not-a-url"
         }
         executor = Executor()
@@ -236,14 +236,14 @@ class DriverTests(unittest.TestCase):
 
     def test_runner_setup_fields_override_legacy_without_mutating_config(self):
         cfg = per_case_task()
-        cfg["benchmark"]["swebench"]["setup"] = {"python": "/old/python", "skip": False}
-        cfg["benchmark"]["swebench"]["runner"]["python"] = "/new/python"
-        cfg["benchmark"]["swebench"]["runner"]["skip"] = True
+        cfg["benchmark"]["acc"]["setup"] = {"python": "/old/python", "skip": False}
+        cfg["benchmark"]["acc"]["runner"]["python"] = "/new/python"
+        cfg["benchmark"]["acc"]["runner"]["skip"] = True
         merged = swebench_setup(cfg)
         self.assertEqual(merged["python"], "/new/python")
         self.assertTrue(merged["skip"])
         self.assertIn("runtime_container", merged)
-        self.assertEqual(cfg["benchmark"]["swebench"]["setup"]["python"], "/old/python")
+        self.assertEqual(cfg["benchmark"]["acc"]["setup"]["python"], "/old/python")
 
     def test_probe_failure_after_creation_is_cleanable_by_id(self):
         class BrokenProbe(Executor):
@@ -309,7 +309,7 @@ class DriverTests(unittest.TestCase):
             self.prepare(wrong)
         self.assertFalse(any(item.startswith("docker run ") for item in wrong.calls))
         cfg = task()
-        cfg["benchmark"]["swebench"]["dataset_path"] = "/other/datasets/test.parquet"
+        cfg["benchmark"]["acc"]["dataset_path"] = "/other/datasets/test.parquet"
         with self.assertRaisesRegex(ValueError, "dataset_path"):
             self.prepare(Executor(), cfg)
 
@@ -374,7 +374,7 @@ class DriverTests(unittest.TestCase):
         ) as install:
             result = generator.execute_aisbench_swe_benchmark(cfg, tmp)
             self.assertTrue(result.success)
-            self.assertEqual(install.call_args.args[0]["benchmark"]["swebench"]["runner"]["python"], wrappers[0])
+            self.assertEqual(install.call_args.args[0]["benchmark"]["acc"]["runner"]["python"], wrappers[0])
             self.assertIn(wrappers[1], Path(tmp, "run_aisbench_swe.sh").read_text())
             calls = fake.mock_calls
             download = next(i for i, call in enumerate(calls) if call[0] == "download")
@@ -383,7 +383,7 @@ class DriverTests(unittest.TestCase):
             self.assertLess(download, removed)
             self.assertIn("docker rm -f " + "f" * 64, [call.args[0] for call in fake.run.call_args_list])
             self.assertTrue(any(str(call.args[0]).startswith("rm -f ") for call in fake.run.call_args_list))
-        self.assertNotIn("python", cfg["benchmark"]["swebench"]["runner"])
+        self.assertNotIn("python", cfg["benchmark"]["acc"]["runner"])
 
     def test_new_runner_does_not_hide_failed_cleanup(self):
         cfg = per_case_task()
@@ -526,11 +526,11 @@ class DriverTests(unittest.TestCase):
             result = generator.execute_aisbench_swe_benchmark(cfg, tmp)
             self.assertTrue(result.success)
             driver.assert_called_once()
-            assigned = install.call_args.args[0]["benchmark"]["swebench"]
+            assigned = install.call_args.args[0]["benchmark"]["acc"]
             self.assertEqual(assigned["setup"]["python"], wrappers[0])
             self.assertEqual(assigned["ais_bench_bin"], wrappers[1])
             self.assertIn(wrappers[1], Path(tmp, "run_aisbench_swe.sh").read_text())
-        self.assertNotIn("ais_bench_bin", cfg["benchmark"]["swebench"])
+        self.assertNotIn("ais_bench_bin", cfg["benchmark"]["acc"])
 
 
 if __name__ == "__main__":

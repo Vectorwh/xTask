@@ -75,14 +75,23 @@ class VBenchScriptTests(unittest.TestCase):
         vbench = config["benchmark"]["vbench"]
         for key in ("full_info", "image_root", "cache_dir", "evaluation_script"):
             vbench.pop(key, None)
+        # 默认路径跟随 config/xTask_config.json 的 DEPENDENCE_PACKAGE_PATH，
+        # 而不是任何写死的目录，避免依赖包根目录迁移后测试失效。
+        from xtask.benchmarks.vbench.defaults import (
+            get_default_full_info,
+            get_default_image_root,
+        )
+
+        expected_full_info = get_default_full_info()
+        expected_image_root = get_default_image_root()
         with tempfile.TemporaryDirectory() as tmp, mock.patch(
             "xtask.benchmarks.vbench.generate_vbench_script.path_mapping_in_container",
             side_effect=lambda value: value,
         ):
             generate_vbench_script(config, tmp)
             script = (Path(tmp) / "run_vbench_test.sh").read_text(encoding="utf-8")
-        self.assertIn("VBench full_info 不存在: /export/home/models/xllm_test_060/vbench_data/full_info.json", script)
-        self.assertIn("VBench image_root 不存在: /export/home/models/xllm_test_060/vbench_data/data", script)
+        self.assertIn(f"VBench full_info 不存在: {expected_full_info}", script)
+        self.assertIn(f"VBench image_root 不存在: {expected_image_root}", script)
         # path_mapping_in_container is mocked to identity, so the shared
         # project paths appear with their host-side suffixes.
         self.assertRegex(script, r"VBENCH_CACHE_DIR=\S*/outputs/vbench_data/cache\b")
@@ -104,7 +113,10 @@ class VBenchScriptTests(unittest.TestCase):
         self.assertIn("--image-root /data/images", script)
         self.assertIn("/data/evaluate.py", script)
         self.assertIn("VBENCH_CACHE_DIR=/opt/vbench_cache", script)
-        self.assertNotIn("xllm_test_060", script)
+        # 显式路径生效后不应再出现依赖包默认根目录名。
+        from xtask.benchmarks.vbench.defaults import _dependence_package_path
+
+        self.assertNotIn(_dependence_package_path().rsplit("/", 1)[-1], script)
         self.assertNotIn("outputs/vbench_data", script)
 
 

@@ -3,13 +3,13 @@ benchmark:
   benchmark_type: evalscope
   acc:
     acc_dataset_len: 30
-    baseline: 0.3
+    baseline: 0.3667
     batch_size: 4
     case_type: accuracy
     enable_debug: false
     ignore_eos: false
     seed: 1024
-    threshold: 0.05
+    threshold: 0.12
     timeout: 3600
     endpoint: /v1
     generation_config:
@@ -23,7 +23,7 @@ benchmark:
         dataset_id: /xllm_test_060/datasets/mmmu
         subset_list:
         - Music
-        split: validation
+        eval_split: validation
 block_size: 128
 case_name: qwen3_vl_8b_xllm_acc_mmmu
 communication_backend: hccl

@@ -5,9 +5,11 @@ from xtask.core import result_processor
 
 class VBenchResultVerificationTests(unittest.TestCase):
     @staticmethod
-    def _config(baseline=None, threshold=0.1):
+    def _config(baseline=None, threshold=0.1, metrics="acc"):
+        # New-format VBench YAML: metrics: acc + benchmark.vbench
+        # (benchmark_type: vbench). Pass metrics="vbench" for the legacy style.
         return {
-            "metrics": "vbench",
+            "metrics": metrics,
             "benchmark": {
                 "benchmark_type": "vbench",
                 "vbench": {
@@ -45,6 +47,18 @@ class VBenchResultVerificationTests(unittest.TestCase):
         config = self._config(baseline=0.90, threshold=0.05)
         self.assertTrue(result_processor.verify_result(self._result(0.88), config))
         self.assertFalse(result_processor.verify_result(self._result(0.80), config))
+
+    def test_legacy_metrics_vbench_still_verifies(self):
+        config = self._config(baseline=0.90, threshold=0.05, metrics="vbench")
+        self.assertTrue(result_processor.verify_result(self._result(0.88), config))
+        self.assertFalse(result_processor.verify_result(self._result(0.80), config))
+
+    def test_new_format_gate_ignores_metrics_value(self):
+        from xtask.benchmarks.vbench.task_gate import is_vbench_task
+
+        self.assertTrue(is_vbench_task(self._config()))
+        self.assertTrue(is_vbench_task(self._config(metrics="vbench")))
+        self.assertTrue(is_vbench_task(self._config(metrics="perf")))
 
     def test_non_vbench_task_ignores_unrelated_vbench_block(self):
         config = {

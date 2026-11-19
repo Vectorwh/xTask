@@ -2,7 +2,7 @@ case_name: 25_single_vbench_wan_i2v
 engine_type: xllm
 model_path: /export/home/models/wan2_2
 served_model_name: wan2_2
-metrics: vbench
+metrics: acc
 dataset_name: vbench_i2v
 dataset_format: json
 communication_backend: hccl

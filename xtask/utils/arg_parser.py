@@ -648,6 +648,10 @@ Usage Examples:
             # Load from case file
             return self._load_case_config(args.case_name)
         
+        elif config_source == ConfigSource.CASE_GROUP:
+            # CLI defaults do not describe the YAMLs in a heterogeneous group.
+            return {'source': 'case_group', 'case_group': args.case_group}
+
         elif config_source == ConfigSource.TEMPLATE:
             # Return template file path for main program to process
             return {
@@ -713,7 +717,11 @@ Usage Examples:
         case_dir = os.path.join(os.getcwd(), "tests")
         case_file = find_case_file(case_name, case_dir)
         with open(case_file, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+            config = yaml.safe_load(f)
+
+        from xtask.utils.resource_sync import expand_dependence_placeholders
+
+        return expand_dependence_placeholders(config)
     
     def _parse_gpu_ids(self, gpu_ids_str: str) -> List[int]:
         """Parse comma-separated GPU ID string into list"""
@@ -761,6 +769,13 @@ Usage Examples:
         if config.get('source') == 'template':
             logging.info(f"  Template File: {config.get('template_path')}")
             return
+        if config.get('source') == 'case_group':
+            logging.info("  Case Group: %s", config.get('case_group'))
+            logging.info("  Model/service/benchmark settings are loaded from each case YAML")
+            return
+        if config.get('served_model_name'):
+            logging.info("  Model: %s (%s)", config.get('served_model_name'), config.get('engine_type'))
+            logging.info("  Path: %s", config.get('model_path') or 'external service')
         
         # Model information
         if 'model' in config:
@@ -783,7 +798,7 @@ Usage Examples:
         # Benchmark
         if 'benchmark' in config:
             benchmark = config['benchmark']
-            logging.info(f"  Benchmark: {benchmark.get('type')}")
+            logging.info("  Benchmark: %s", benchmark.get('benchmark_type') or benchmark.get('type'))
 
 
 def main():

@@ -1,0 +1,52 @@
+# Stage-one JoyAI-Video example. Replace endpoint/model and verify deployment components.
+# Not validated against a real JoyAI model; gates are intentionally unset.
+# Prepare offline VBench scoring models; sampling_rate MUST match audio_vae config.
+# Generates paired reference/target only: negative-control efficacy remains NOT_SCORED.
+# Add checks.negative_control.command and explicit gates after agreeing the detector/judge.
+case_name: 45_external_joyai_video_cfg_pairs
+engine_type: xllm
+served_model_name: JoyAI-Video
+metrics: acc
+dataset_name: joyai_video_smoke
+external_service:
+  enabled: true
+  endpoint: http://127.0.0.1:8018
+  health_path: /health
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    task: t2av
+    scenario: cfg_pair
+    mode: generate
+    manifest: ${DEPENDENCE_PACKAGE_PATH}/datasets/joyai_video/joyai_video_cfg_pairs.jsonl
+    generation:
+      size: 512*288
+      num_frames: 81
+      fps: 16
+      num_inference_steps: 50
+      guidance_scale: 4.0
+      flow_shift: 8.0
+      seed: 42
+      sampling_rate: 44100
+      concurrency: 1
+      repeats: 1
+      warmups: 0
+      request_timeout: 1800
+      limit: 0
+    media:
+      audio: required
+      duration_tolerance_s: 0.25
+      channels: 2
+    evaluation:
+      enabled: false
+      dimensions:
+      - subject_consistency
+      - background_consistency
+      - motion_smoothness
+      - dynamic_degree
+      - aesthetic_quality
+      - imaging_quality
+      device: cpu
+      local: true
+      code_root: ${DEPENDENCE_PACKAGE_PATH}/benchmark/vbench2
+    gates: []

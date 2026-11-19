@@ -55,12 +55,18 @@ deployment:
   sync_workspace: true
   resource_sync:
     enabled: true
-    source: /export/home/models/xllm_test_060
-    target: /export/home/models/xllm_test_060
     max_workers: 4
     timeout: 3600
   # 显式 C/R 复用引擎容器；etcd 与模型传输参数保持本用例原值。
   xllm_service:
+    # 131072-token 请求的 KV 授予需求超过 batch credit 默认上限
+    # (prefill 1025 / decode 1032 blocks > per_router_tenant 默认 1024)，
+    # 请求会在 wallet 无授予时持续 BATCH_WALLET_WAIT，15 秒队列等待后以
+    # DEADLINE_EXCEEDED(status_code=4) 终止。与 dsv41_1017 用例的
+    # extra_service_args 方案一致(docs/dsv41_1017_validation.md)。
+    extra_service_args:
+      batch_credit_max_grant_units: 16384
+      batch_credit_max_grant_units_per_router_tenant: 16384
     service_binary_profile: auto
     etcd:
       host: 11.87.191.75

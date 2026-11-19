@@ -13,7 +13,7 @@ from typing import Any, Dict, Mapping, Optional
 
 import yaml
 
-from xtask.tasks.parameter_search import normalize_assess_search_config
+from xtask.tasks.parameter_search import search_config_for_task
 
 
 REPORT_MODES = {"para_set", "auto_assess"}
@@ -132,9 +132,7 @@ class AssessmentReporter:
             return existing
 
         if self.mode == "para_set":
-            search_config = normalize_assess_search_config(
-                config.get("assess_search")
-            )
+            search_config = search_config_for_task(config)
             objective = copy.deepcopy(search_config.get("objective"))
             constraints = copy.deepcopy(search_config.get("constraints") or {})
             state = {
@@ -172,6 +170,15 @@ class AssessmentReporter:
                 "trials": [],
             }
 
+        from xtask.benchmarks.asr.config import is_asr_task
+        if self.mode == "auto_assess" and is_asr_task(config):
+            from xtask.benchmarks.asr.reporting import auto_assess_settings
+            settings = auto_assess_settings(config)
+            state.update(
+                objective={"metric": "benchmark.asr.concurrency", "direction": "maximize"},
+                constraints={settings["metric"]: {"max": settings["max"]}},
+                targets={settings["metric"]: settings["max"]},
+            )
         self._states[base_case_name] = state
         return state
 
@@ -190,6 +197,9 @@ class AssessmentReporter:
             state.get("constraints") or {},
             result.get("message"),
         )
+        from xtask.benchmarks.asr.config import is_asr_task
+        if is_asr_task(result.get("task_config") or {}) and result.get("success") is not True:
+            status, feasible, error = "failed", False, str(result.get("message") or "ASR trial gates failed")
         return {
             "trial_number": identity.get("sg_index") or len(state["trials"]) + 1,
             "case_name": identity["case_name"],
@@ -214,8 +224,10 @@ class AssessmentReporter:
         search_state: Optional[Mapping[str, Any]],
         action: Optional[str],
     ) -> Dict[str, Any]:
-        batch_size = parameters.get("benchmark.perf.batch_size")
-        if result.get("scheduler_error"):
+        from xtask.benchmarks.asr.config import is_asr_task
+        asr_case = is_asr_task(result.get("task_config") or {})
+        batch_size = parameters.get("benchmark.asr.concurrency" if asr_case else "benchmark.perf.batch_size")
+        if result.get("scheduler_error") or (asr_case and result.get("success") is not True):
             status = "failed"
             feasible = False
             error = str(result.get("message") or "scheduler error")
@@ -224,6 +236,10 @@ class AssessmentReporter:
                 "ttft_p90": {"max": float(getattr(self.args, "target_ttft", 600000))},
                 "tpot_p90": {"max": float(getattr(self.args, "target_tpot", 100))},
             }
+            if asr_case:
+                from xtask.benchmarks.asr.reporting import auto_assess_settings
+                settings = auto_assess_settings(result["task_config"])
+                constraints = {settings["metric"]: {"max": settings["max"]}}
             status, feasible, _unused, error = _evaluate_metrics(
                 metrics, None, constraints, result.get("message")
             )
@@ -279,6 +295,8 @@ class AssessmentReporter:
             summary["selected_batch_size"] = (
                 best_trial.get("objective_value") if best_trial else None
             )
+            if (objective or {}).get("metric") == "benchmark.asr.concurrency":
+                summary["selected_concurrency"] = summary["selected_batch_size"]
 
         report_dir = self.output_root / "search" / _safe_name(state["case_name"])
         report_dir.mkdir(parents=True, exist_ok=True)
@@ -360,6 +378,11 @@ def _load_trial_parameters(
         combination = metadata.get("current_combination")
         return copy.deepcopy(combination) if isinstance(combination, dict) else {}
 
+    from xtask.benchmarks.asr.config import is_asr_task
+    if is_asr_task(config):
+        values = ((config.get("benchmark") or {}).get("asr") or {}).get("concurrency", [])
+        values = [values] if isinstance(values, int) else values
+        return {"benchmark.asr.concurrency": values[0] if len(values) == 1 else values}
     batch_size = (
         (config.get("benchmark") or {}).get("perf") or {}
     ).get("batch_size")
@@ -376,6 +399,10 @@ def _load_yaml_mapping(path: str) -> Dict[str, Any]:
 
 
 def _extract_metrics(result: Mapping[str, Any]) -> Dict[str, float]:
+    from xtask.benchmarks.asr.config import is_asr_task
+    if is_asr_task(result.get("task_config") or {}):
+        from xtask.benchmarks.asr.reporting import search_metrics
+        return search_metrics(result)
     perf_result = result.get("benchmark_perf_result")
     summary = getattr(perf_result, "summary", None)
     if summary is None:

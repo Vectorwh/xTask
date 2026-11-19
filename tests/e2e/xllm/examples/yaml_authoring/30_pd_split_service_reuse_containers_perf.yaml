@@ -44,8 +44,8 @@ deployment:
   sync_workspace: true
   resource_sync:
     enabled: true
-    source: /export/home/models/xllm_test_060
-    target: /export/home/models/xllm_test_060
+    source: ${DEPENDENCE_PACKAGE_PATH}
+    target: ${DEPENDENCE_PACKAGE_PATH}
     max_workers: 4
     timeout: 3600
   # 保留基准用例的 etcd；Coordinator 使用 28888/28889，Router 使用 38888/38889。
