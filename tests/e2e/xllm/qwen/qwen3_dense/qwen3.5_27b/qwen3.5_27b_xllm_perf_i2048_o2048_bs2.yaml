@@ -5,13 +5,13 @@ benchmark:
     acc_dataset_len: 0
     api_type: vllm_api_general_stream
     baseline_metrics:
-      - metric: output_tps_avg
-        baseline: 90.063
-        compare: gte
+    - metric: output_tps_avg
+      baseline: 90.063
+      compare: gte
     batch_size: 2
     case_type: performance
     dataset_conf: gsm8k_gen_0_shot_cot_str_perf
-    dataset_path: null
+    dataset_path:
     dump_eval_details: false
     dump_extract_rate: false
     enable_debug: false
@@ -41,17 +41,24 @@ served_model_name: Qwen3.5-27B
 userid: 1048
 serving_wait_time: 10
 deployment:
+  mode: service_routed
   master_host: 11.87.191.75
-  benchmark:
-    runner_instance: master-0
-    health_path: /health
-  instances:
-  - name: master-0
+  xllm_service:
+    service_binary_profile: auto
     host: 11.87.191.75
-    role: master
-    rank_start: 0
-    device_ids: [0, 1]
-    local_port: 8800
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
+  benchmark:
+    runner_instance: default-0-node-0
+    router_instance: router-0
+    health_path: /health
+  service_instances:
+  - name: default-0
+    group_master_host: 11.87.191.75
+    progress_conn_port: 9590
     serving_extensiable_param:
       max_memory_utilization: 0.7
       max_tokens_per_batch: 32768
@@ -72,3 +79,8 @@ deployment:
       enable_mtp_draft_body_tp1: true
       task: generate
       backend: llm
+    nodes:
+    - name: default-0-node-0
+      host: 11.87.191.75
+      device_ids: [0, 1]
+      local_port: 8800

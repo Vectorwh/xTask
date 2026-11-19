@@ -36,28 +36,35 @@ benchmark:
     num_warmups: 4
     # baseline=output_tps_avg 实测值，threshold 0.10=±10% 容差。
     baseline_metrics:
-      - metric: output_tps_avg
-        baseline: 22.464
-        compare: gte
+    - metric: output_tps_avg
+      baseline: 22.464
+      compare: gte
     generation_kwargs: {temperature: 0, ignore_eos: true}
 
 deployment:
+  mode: service_routed
   master_host: 11.87.191.75
   sync_workspace: true
   resource_sync:
     enabled: true
     max_workers: 4
     timeout: 3600
-  benchmark:
-    runner_instance: master-0
-    health_path: /health
-  instances:
-  - name: master-0
+  xllm_service:
+    service_binary_profile: auto
     host: 11.87.191.75
-    role: master
-    rank_start: 0
-    device_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
-    local_port: 18004
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
+  benchmark:
+    runner_instance: default-0-node-0
+    router_instance: router-0
+    health_path: /health
+  service_instances:
+  - name: default-0
+    group_master_host: 11.87.191.75
+    progress_conn_port: 9590
     serving_extensiable_param:
       # 最优性能配置(单机混部): 02_运行脚本/dsv4最优性能脚本/xllm/single.sh
       max_memory_utilization: 0.7
@@ -79,3 +86,8 @@ deployment:
       flashcomm1_min_prefill_tokens: 1000
       tool_call_parser: deepseekv4
       reasoning_parser: deepseek-v4
+    nodes:
+    - name: default-0-node-0
+      host: 11.87.191.75
+      device_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      local_port: 18004
