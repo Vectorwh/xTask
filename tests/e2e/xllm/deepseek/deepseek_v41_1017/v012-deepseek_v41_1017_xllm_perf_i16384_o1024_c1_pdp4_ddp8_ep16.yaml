@@ -1,5 +1,5 @@
 # Set the P/D host anchors below for the target environment; HCCL uses LOCAL_IP.
-case_name: deepseek_v41_1017_xllm_perf_i16384_o1024_c1_pdp4_ddp8_ep16
+case_name: v012-deepseek_v41_1017_xllm_perf_i16384_o1024_c1_pdp4_ddp8_ep16
 engine_type: xllm
 model_path: /export/home/models/DeepSeek-V4.1-Flash-1017-w8a8/
 served_model_name: DeepSeek-V4.1-Flash-1017-w8a8
@@ -25,14 +25,14 @@ benchmark:
     request_rate: 0
     num_prompts: 4
     num_warmups: 10
-    baseline: 141.0992
+    baseline: 143.2097
     threshold: 0.1
     generation_kwargs:
       temperature: 0
       ignore_eos: true
     baseline_metrics:
     - metric: output_tps_avg
-      baseline: 126.98928
+      baseline: 128.88873
       compare: gte
     - metric: failed_requests
       baseline: 1
@@ -117,7 +117,10 @@ deployment:
       local_port: 18004
     startup_environment:
     - export TCMALLOC_SKIP_MMAP=1
-    - unset HCCL_OP_EXPANSION_MODE
+    - unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+    - unset DSV41_OPS_ROOT HCCL_OP_EXPANSION_MODE XLLM_SMLA_ACCEPT_NONMAINLINE XLLM_V41_DSPARK_DRAFT_GRAPH DSV41_PROFILE_RAW_ONLY
+    - export ASCEND_CUSTOM_OPP_PATH="$ASCEND_OPP_PATH/vendors/custom_xllm_math:$ASCEND_OPP_PATH/vendors/custom_transformer"
+    - export PYTHONUNBUFFERED=1
     - export NPU_MEMORY_FRACTION=0.96
     - export FLA_NPU_DISABLE_PTH=1
     - export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device"}'
@@ -193,7 +196,10 @@ deployment:
       local_port: 18004
     startup_environment:
     - export TCMALLOC_SKIP_MMAP=1
-    - unset HCCL_OP_EXPANSION_MODE
+    - unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+    - unset DSV41_OPS_ROOT HCCL_OP_EXPANSION_MODE XLLM_SMLA_ACCEPT_NONMAINLINE XLLM_V41_DSPARK_DRAFT_GRAPH DSV41_PROFILE_RAW_ONLY
+    - export ASCEND_CUSTOM_OPP_PATH="$ASCEND_OPP_PATH/vendors/custom_xllm_math:$ASCEND_OPP_PATH/vendors/custom_transformer"
+    - export PYTHONUNBUFFERED=1
     - export NPU_MEMORY_FRACTION=0.96
     - export FLA_NPU_DISABLE_PTH=1
     - export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device"}'
@@ -208,9 +214,27 @@ deployment:
     - unset LCCL_DETERMINISTIC HCCL_DETERMINISTIC ATB_MATMUL_SHUFFLE_K_ENABLE
     serving_ready_timeout: 1800
   xllm_service:
+    # Service parameters match 66 master-service-launch/common.flags.
+    etcd_namespace: xllm-pd
     extra_service_args:
-      batch_credit_max_grant_units: 16384
-      batch_credit_max_grant_units_per_router_tenant: 16384
+      reasoning_parser: ''
+      tool_call_parser: ''
+      http_server_max_concurrency: 256
+      rpc_server_max_concurrency: 256
+      max_concurrency: 256
+      load_balance_policy: CAR
+      flow_max_queue_wait_ms: 15000
+      flow_max_queued_requests_per_tenant: 512
+      flow_max_queued_tokens_per_tenant: 8388608
+      default_request_deadline_ms: 3600000
+      max_request_deadline_ms: 3600000
+      engine_state_soft_ttl_ms: 10000
+      engine_state_hard_ttl_ms: 60000
+      engine_heartbeat_hard_ttl_ms: 60000
+      batch_credit_grant_concurrency_units: 16
+      batch_credit_max_grant_units_per_router_tenant: 4096
+      batch_credit_tenant_buckets: 1
+      batch_credit_max_grant_units: 4096
     transfer_port_base: 26000
     service_binary_profile: auto
     etcd:
@@ -226,10 +250,10 @@ deployment:
       container_instance: prefill-0-node-0
     routers:
     - name: router-0
-      host: *decode_host
+      host: *prefill_host
       http_server_port: 38888
       rpc_server_port: 38889
-      container_instance: decode-0-node-0
+      container_instance: prefill-0-node-0
     startup_attempts: 2
     startup_wait_seconds: 3
     master_key_wait_seconds: 30
