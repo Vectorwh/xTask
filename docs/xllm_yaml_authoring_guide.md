@@ -53,6 +53,8 @@
 | 外部 JoyaiASR 两轮重复评测，验证日期归档和报表 | `41_external_joyai_asr_legacy_repeats.yaml` |
 | 普通 Qwen3.6-35B-A3B AISBench perf 回归抽测 | `42_single_qwen36_35b_a3b_perf_regression.yaml` |
 | 外部已有服务 + AISBench GPQA 精度，endpoint 用**域名**（验证走 AISBench `url` 字段） | `43_external_aisbench_gpqa_acc_domain.yaml` |
+| JoyAI-Video T2V/T2AV 视频质量、CFG/embedding 与性能 | `43`—`48`，见第 8 节新增小节 |
+| 文字直发音视频＋负向物体/事件暂定回归评分 | `49_external_joyai_video_negative_semantics.yaml` |
 | PD 场景 `startup_environment` 启动环境注入示例（字段演示，非新场景） | `28_startup_environment.yaml` |
 
 这些示例使用工程测试环境中的模型路径和 IP。换环境时，优先改 `model_path`、`host`、`master_host`、卡号和基线；旧 YAML 不需要跟着改。
@@ -594,7 +596,7 @@ benchmark:
       mmmu:
         dataset_id: /xllm_test_060/datasets/mmmu
         subset_list: [Music]
-        split: validation
+        eval_split: validation
 ```
 
 EvalScope 精度字段如下：
@@ -604,10 +606,10 @@ EvalScope 精度字段如下：
 | `case_type` | 是 | 标记这是精度测试 | 建议固定写 `accuracy`。 |
 | `acc_dataset_len` | 按需 | 最多评测多少条 | 非空时映射到 `--limit`；不写则不追加 limit。 |
 | `batch_size` | 是 | 一次并行评测多少条 | 映射到 `--eval-batch-size`，默认 1。 |
-| `timeout` | 建议 | 单次 EvalScope API 请求/评测超时 | 映射到 `--timeout`，当前代码默认 36000 秒。 |
+| `timeout` | 建议 | 单次 EvalScope API 请求/评测超时 | 并入 `--generation-config` 的 `timeout` 字段（`--timeout` 自 evalscope 1.14.0 起已弃用）；`generation_config` 里已显式写 `timeout` 时以它为准，代码默认 36000 秒。 |
 | `endpoint` | 建议 | OpenAI API 基础路径 | 与服务地址、端口拼成 `http://<host>:<port><endpoint>`，默认 `/v1`。 |
 | `generation_config` | 按数据集需要 | 传给模型的生成配置 | 整体传给 `--generation-config`。常见键包括 `temperature`、`top_p`、`top_k`、`max_tokens`、`retries`，具体支持范围由 EvalScope 版本决定。 |
-| `dataset_args` | 按数据集需要 | 每个数据集自己的位置、子集和 split | 整体传给 `--dataset-args`。键名通常与顶层 `dataset_name` 对应。 |
+| `dataset_args` | 按数据集需要 | 每个数据集自己的位置、子集和 split | 整体传给 `--dataset-args`。键名通常与顶层 `dataset_name` 对应。键名必须是 EvalScope `BenchmarkMeta` 的字段（`dataset_id`/`local_path`、`subset_list`、`eval_split`、`few_shot_num`、`prompt_template`、`metric_list` 等）；不认识的键会被静默忽略，所以切 split 要写 `eval_split`，写 `split` 不生效。 |
 | `baseline`、`threshold` | 是 | 精度基线和容许波动 | 量纲必须与 EvalScope 解析出的精度一致，例如解析值为 `0.30` 时不要把 baseline 写成 `30`。 |
 
 顶层 `dataset_name` 会映射到 `evalscope eval --datasets`。`dataset_args` 常见子字段包括：
@@ -2151,6 +2153,467 @@ python3 xtask/benchmarks/vbench/tools/convert_wan22_diffusers.py \
 需从 HuggingFace `Wan2.2-I2V-A14B-Diffusers` 拉取放入同一目录，
 并在根目录补 `config.json`（`transformers_version: null` 可跳过框架的
 transformers 版本对齐安装）。
+
+### JoyAI-Video T2V/T2AV（显式新增，第一阶段）
+
+模型结构、张量形状、Expert-Chosen MoE、CFG 和 xLLM 源码讲解见
+[JoyAI-Video 模型结构详解](joyai_video_model_architecture.md) /
+[离线图文 HTML（含可点击代码摘录）](joyai_video_model_architecture.html)。
+
+完整执行流程及 GroundingDINO/CLAP 配对 **JUDGE** 详图见
+[JoyAI-Video 自动化评测流程与 JUDGE](joyai_video_evaluation_flow.md)（总流程、judge、校准三张图）。
+也可直接使用 [离线交互 HTML 图例](joyai_video_evaluation_flow.html)，浏览器打开即可。
+
+**本节是当前已接入的文本视频 adapter，不改变 Wan2.2 I2V 默认。**
+`benchmark_type: vbench` 下不写 `task`（或写 `task: i2v`）仍执行原 I2V driver、
+参考图片、10 维评分和原总分。只有明确写 `task: t2v/t2av` 才启用新路径。
+不按模型名称自动切换，也不复用 I2V 的 `full_info/image_root` 默认值。
+
+当前模型定位是 JoyOV2 文本驱动的视频/音视频生成；**不支持上传图片、视频、
+音频作为条件**，新 manifest 对这些字段明确报错，避免“上传了但模型没用”的假支持。
+
+#### 真机自部署与模型目录（50—54）
+
+`50_single_joyai_video_t2av_smoke.yaml` 使用已核对的本地 JoyOV2 权重，
+16 卡 TP16/EP16、服务内文本编码 TP8，直接发送文字，不要求外部 embedding。
+该配置是加载/链路探测配置，不是最优并行配置或正式性能基线：只生成 1 条、
+2 个去噪步骤，音轨完整性仍必须通过。
+
+Diffusers 权重根目录通常只有 `model_index.json`。仅显式 `task: t2v/t2av`
+允许框架在缺少根 `config.json` 时读取有效的 pipeline index，保留容器内
+Transformers 版本；**不要修改共享权重来伪造根 config**。已有根 config 的
+版本对齐仍优先，原 LLM/Wan 的依赖准备规则不变。
+
+客户端的 `served_model_name` 必须等于服务模型 ID。50—52 显式设置
+`serving_extensiable_param.model_id: JoyAI-Video`；不设置时 xLLM 默认用模型
+路径末级目录名，对错误模型名返回的 404 不能当成 endpoint 不支持。
+
+50—52 的 `startup_environment` 中 `HCCL_OP_EXPANSION_MODE=HOST` 是本机
+CANN/HCCL 问题排查的用例级覆盖，不改共享 AIV 模板。更换环境应重新验证。
+`51` 质量用例使用 3 条/50 步、独立 CPU VBench 六维评分；`52` 性能用例
+使用 3 条×2 轮/50 步，1 条预热不计入计时，关闭评分器。两者尚无验收
+基线，执行成功不等于达到正式质量/性能要求。`53` 是原25的本机 Wan I2V
+回归副本，只改用例名、主机和隔离端口，原 benchmark/模型参数不变。`54` 是原42的 Qwen3.6 perf 副本，使用
+2/3卡和隔离端口，保留原 AISBench 请求、预热、MTP 和双向范围基线。
+
+建议串行运行，先确认卡未被其他任务占用；不加入原模型用例组：
+
+```bash
+XTASK_BENCH_REPORT=0 python main.py --case_group 50_single_joyai_video_t2av_smoke
+# 仅在50产出真实音视频且检查通过后运行：
+XTASK_BENCH_REPORT=0 python main.py --case_group 51_single_joyai_video_t2av_quality
+XTASK_BENCH_REPORT=0 python main.py --case_group 52_single_joyai_video_t2av_perf
+# 原模型回归（保持已有基线）：
+XTASK_BENCH_REPORT=0 python main.py --case_group 53_single_wan_i2v_regression
+XTASK_BENCH_REPORT=0 python main.py --case_group 54_single_qwen36_perf_regression
+```
+
+#### 场景与验证边界
+
+| task / scenario | 行为 | 质量验证边界 |
+| --- | --- | --- |
+| `t2v` / `text` | 正向/负向文本生成视频 | VBench 基础视觉维度；默认要求无音轨 |
+| `t2av` / `text` | 文本生成音视频 | 视频维度＋音轨、采样率、声道/时长、完整解码检查；**未接入 VABench** |
+| 任一 task / `cfg_pair` | 同样本、同 seed/guidance 的中性负向与目标负向配对 | 可用 `benchmark_semantics` 的物体/音频事件暂定回归评分；无检测器的诊断仍为 `not_scored` |
+| 任一 task / `embedding` | 使用真实外部 Qwen3-VL embedding | 文件、形状、数值和来源检查；不宣称 encoder 等价性已验证 |
+| 任一 task / `embedding_pair` | reference 服务内文本编码／target 外部特征 | 可记录解码画面/音频误差；需约定容差后才有数值等价验收 |
+
+其中正负文本、embedding 是条件方式，不是新的内容 benchmark。质量与性能用
+独立 YAML：`metrics: acc` 或 `perf`；拒绝 `acc,perf` 混合。新 adapter 的
+`auto_assess/para_set` 暂未导通，会明确拒绝，不误用普通 LLM TTFT/TPOT 搜索。
+直接通过独立用例的 `concurrency/repeats` 测试；配对诊断固定 `concurrency: 1`，
+避免 reference/target 相互干扰。
+
+#### 输入清单与准备
+
+基础输入使用明确的 JSON 列表或 JSONL，必须有唯一 ID 和 prompt：
+
+```json
+{"id":"footsteps","prompt":"A person walks across a wooden floor with matching footstep sounds.","negative_prompt":"watermark, background music","category":"physical_sound"}
+```
+
+`guidance_scale > 1` 的文本路径要求非空 `negative_prompt`。`cfg_pair` 另需
+显式 `neutral_negative_prompt`；两个配对臂 seed、尺寸、FPS、步数和 guidance
+保持相同，只修改负向文本。不能用“文件不同”证明负向词生效。
+
+全量验收语料和模型权重不是上述 smoke prompt 数据的替代品；固定 prompt ID、
+seed、参数及模型/评分器版本后建立实测基线。示例小集不代表官方标准全量分数。
+
+#### 配置与执行
+
+```yaml
+case_name: joyai_video_t2av_quality
+engine_type: xllm
+served_model_name: JoyAI-Video
+metrics: acc
+external_service:
+  enabled: true
+  endpoint: http://127.0.0.1:8018
+  health_path: /health
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    task: t2av
+    scenario: text
+    mode: generate_and_evaluate
+    manifest: /path/to/prompts.jsonl
+    generation:
+      size: "512*288"
+      num_frames: 81
+      fps: 16
+      num_inference_steps: 50
+      guidance_scale: 4.0
+      flow_shift: 8.0
+      seed: 42
+      sampling_rate: 44100  # 必须与实际 audio_vae 配置相同，不依赖通用接口默认 32000
+      concurrency: 1       # 请求并发，不是模型原生 batch
+      repeats: 1
+      warmups: 0
+      request_timeout: 1800
+      limit: 0             # 0=全部，取子集必须明确记录
+    media:
+      audio: required
+      channels: 2          # 需核对 audio_vae
+      duration_tolerance_s: 0.25
+    evaluation:
+      enabled: true
+      device: cpu
+      local: true
+      code_root: /xllm_test_060/benchmark/vbench2
+      dimensions: [subject_consistency, background_consistency,
+                   motion_smoothness, dynamic_degree, aesthetic_quality, imaging_quality]
+    gates: []              # 先跑稳定实测，再配置单边门禁；没有伪造默认基线
+```
+
+需要显式尺寸（32 的倍数）、帧数（4n+1）、FPS、步数、guidance、seed；不能
+用未消费的 `seconds` 或普通 LLM `batch_size` 代替。当前一请求一视频、Base64
+MediaSource 响应；二进制 Tensor/媒体响应尚未适配。
+
+如果原服务包含 `audio_vae`，它不会因为 `task: t2v` 就关闭音频。视频质量
+可设 `media.audio: optional`（仍显式填写采样率）并只评视觉，但必须标记是
+音频开启下的视频评价；**T2V 性能拒绝 optional 音频，音频服务应测 T2AV 性能**。
+客户端不能通过请求保证关闭音频或冷缓存。JoyOV2 pipeline 当前单次模型 batch
+为 1，自部署必须配置 `max_requests_per_batch: 1`，不能把 HTTP 并发当原生 batch。
+
+模式：
+
+- `generate`：真实请求＋媒体验证，不跑 VBench；用于性能或请求级诊断。
+- `generate_and_evaluate`：生成完成后再评分；生成 E2E 不包含评分耗时。
+- `evaluate`：显式 `source_run` 指向完整历史日期归档，离线读取/校验视频后评分。
+  不启动/安装/清理 xLLM，不探测 endpoint，不记录新生成性能；源任务/场景和文件
+  SHA256 必须一致。
+
+性能用例要求 `mode: generate`、`evaluation.enabled: false`，不运行 judge/
+parity 等评分器。明确 warmup 次数，预热独立记录、不计正式请求；正式请求永远
+新生成，不断点复用旧视频、不重试失败请求。`request_timeout` 沿用 urllib
+socket 超时，不宣称为严格整场 watchdog；整场超时由 xTask 容器命令控制。
+
+#### 视频评分与门禁
+
+第一阶段调用已准备的 VBench 官方 `compute_<dimension>` 函数，对每个视频保存
+原始维度结果；支持上例六个基础维度，可额外选择 `temporal_flickering`。
+这是 `vbench_basic_t2v` 自定义回归口径，**不生成 I2V total，也不冒充标准
+T2V 16 维总分**。缺模型/依赖、空评分、维度缺失或逐视频覆盖不全都会失败。
+新的独立评分进程在 decord/FFmpeg 不兼容时使用 OpenCV RGB 解码，输出记录
+`video_decoder`；不修改旧 Wan I2V 评分进程或原官方 compute 函数。评分结果还保存
+compute 源码、模型资产 SHA256、torch 版本和评分设备，避免不同版本混用基线。
+`local: true` 下先检查离线评分资产，禁止运行中隐式 wget/git 下载模型。
+
+音轨检查证明的是可用性，不是声音语义、音画同步、口型或台词正确性。
+VABench/语音/音效专项评分属于第二阶段，当前明确没有这些质量分。
+
+门禁按原生字段配置单边比较，不复制普通 LLM token/s 基线：
+
+```yaml
+gates:
+  - metric: video_quality.subject_consistency
+    compare: gte
+    baseline: 0.8  # 仅展示写法，不是已验收数值
+  - metric: performance.e2el_p90_ms
+    compare: lte
+    baseline: 60000  # 仅展示写法
+```
+
+以上实际位于 `benchmark.vbench.gates`。空 gates 仍检查所有请求、输出媒体和
+已启用评分维度完整性。失败/NaN/缺失不填 0。配对 workload 的混合性能不能
+做单模型性能门禁，应使用独立 text/embedding 性能用例。小样本 P99 标警告。
+
+#### 外部 embedding 与配对检查
+
+清单增加 `embedding: {path: ..., sha256: ...}`，CFG 可增加 `negative_embedding`。
+路径相对于 manifest，执行前暂存、每个日期再存 immutable 副本并核对 SHA256。
+第一阶段采用 xLLM 原生 Tensor JSON 的 **FP32、wire shape `[T,D]`**。以下可执行
+结构用 D=2 仅展示传输格式，真实模型必须使用匹配的 5120 等维度和真实特征：
+
+```json
+{"datatype":"FP32","shape":[2,2],"contents":{"fp32_contents":[0.1,0.2,0.3,0.4]}}
+```
+
+上段不是模型可用特征，不可用于真实模型验收；内容数必须等于 shape 乘积。服务 DiTBatch
+自动添加 batch 维，wire 不能送 `[1,T,D]`。维度由 `embedding_dim`（默认 5120）
+与真实 Transformer 配置核对。CFG 必须有负向 embedding 或明确的
+`parameters.joyo_text_seqlens.int64_tensor_param` 两段长度，禁止把单份正向特征
+静默等分为正负两份。编码器来源记录包含 checkpoint、tokenizer、模板 SHA256、
+`feature: qwen3_vl_pre_norm_residual`、`dtype: FP32`；记录来源不等于独立验证权重。
+本阶段不生成 encoder 特征，不用 H3/generic pooled 特征替代 JoyOV2 特征。
+`embedding_pair` 的 CFG 对照要求独立正/负 embedding 及匹配的 `negative_prompt`，
+不能用无法核对文本边界的 packed 特征做服务内/外部等价验收。
+
+`embedding_pair` 可用内置数值检查：
+
+```yaml
+checks:
+  embedding_parity:
+    backend: decoded_media
+    video_size: 64
+    audio_sample_rate: 16000
+```
+
+它比较同 seed 的 reference/target 解码 RGB 缩放后的 MAE（像素按 255 归一化），
+有音轨时还比较重采样单声道 PCM MAE。记录 avg/max，不要求 MP4 哈希一致。
+没有自动默认容差；`checks` 完成只意味着数值成功计算，不代表语义等价通过。
+若需验收可显式增加 `embedding_parity.video_mae_max` 等门禁；原始编码特征等价
+还需编码器导出/核验材料。默认同服务比较，也可显式 `reference_endpoint`，并
+核对两服务模型、版本和配置一致。
+
+#### 直接文字优先：负向内容自动评分（xtask_negative_v1）
+
+正常优先链路是 44（文字直发 T2AV 基础质量）、48（独立性能）和 49（负向
+语义回归）。46/47 的外部 embedding 仅保留可选诊断，不是正常测试的前置条件。
+
+49 的显式 `checks.negative_control.backend: benchmark_semantics` 复用公开
+benchmark 的采样/语义观察方法：画面使用 GroundingDINO 逐目标、逐采样帧检测，
+音频使用 CLAP 与标注的竞争描述比较余弦相似度。该 profile **不是 VBench 或
+VABench 官方总分/官方阈值**，更不把 CLAP 相似度称为概率；是 xTask 初版
+provisional 回归规则，正式验收必须用人工标注小集校准检测误报/漏报及阈值。
+
+- 画面：每视频均匀采样至多 16 帧，每个短物体标签独立查询；默认 box=0.4、
+  text=0.3。检测器失败/某帧解码失败不能按“禁止对象没出现”处理。
+- 音频：FFmpeg 从实际音轨读 PCM，按 scorer 采样率重采样、单声道；默认窗口
+  5 秒、步长 2.5 秒、首尾全覆盖。CLAP 的事件描述余弦值 ≥0.15 且高于最佳竞争
+  描述至少 0.05 才标成该窗口检测到事件。**这些阈值未校准，不是行业标准。**
+- 每样本必须标注 required 与 forbidden；画面必需目标取交集、禁止目标取并集。
+  音频也要求明确事件文本与竞争文本，不用任意自由句子做二分类概率。
+- 相同正向文本、seed、guidance、尺寸和步数成对运行；建议目标负向串保留对照
+  的中性词，再追加要排除的对象/事件，减少混杂因素。重复完全相同条件先平均，
+  不把同 seed repeats 当成独立样本。
+- 只测物体/声音事件排除和正向目标保留，**不宣称验证动作、物理、台词、口型、
+  音画同步**；这些仍需要其他专门评分器。
+
+```yaml
+checks:
+  negative_control:
+    backend: benchmark_semantics
+    profile: xtask_negative_v1
+    device: cpu
+    python_exec: /export/home/models/xllm_test_060/joyai_video_benchmark/semantic_env/bin/python
+    vision:
+      model_path: /export/home/models/xllm_test_060/joyai_video_benchmark/grounding-dino-tiny
+      frames: 16
+      box_threshold: 0.4
+      text_threshold: 0.3
+    audio:
+      model_path: /export/home/models/xllm_test_060/joyai_video_benchmark/clap-htsat-unfused
+      window_seconds: 5.0
+      stride_seconds: 2.5
+      similarity_min: 0.15
+      margin: 0.05
+    timeout: 3600
+```
+
+清单中的 checks 示例（完整 JSONL 见 example49 的 data）：
+
+```json
+{"required_video":["person"],"forbidden_video":["car","bus"]}
+```
+
+音频条目放入 `required_audio/forbidden_audio`，每条都有 `id`、`text`、
+`alternatives`（非空竞争事件描述列表）。不是音频专门类别时不要强行评价口型；
+没有音轨或相关 scorer 未启用时明确失败。每个启用模态至少需要对应标注样本。
+
+**暂定通过条件，画面/音频分别判定，不能用一个总分掩盖另一模态失败：**
+
+| 条件 | 初版值 | 含义 |
+| --- | --- | --- |
+| 独立条件最少数 | 6/模态 | 同样条件、同seed重复不能凑数 |
+| 有效对照最少数 | 3/模态 | 对照的禁止内容检出率至少10%才用于有效性比较 |
+| 目标组禁止内容平均检出率 | ≤10% | 分别检查所有条件与有效对照子集，避免对照稀释 |
+| 有效对照的禁止内容相对降低 | ≥25% | `(对照均值-目标均值)/对照均值` |
+| 有效对照改善比例 | ≥60% | 一个条件至少降低2个百分点才算改善 |
+| 正向必需内容检出率 | 对照/目标都≥50% | 排除掉所有内容不能算负向成功 |
+| 正向检出率下降 | ≤5个百分点 | 保护正向目标 |
+
+可在 `policy` 中逐项覆盖（默认值保存进结果），不隐式采用历史模型数值。样本
+不足或对照中没有足够禁止内容时状态为 `inconclusive`，xTask 不判通过，提示
+补充/校准数据，**不是自动改prompt把数据做成通过**。检出偏差必须人工校准。
+
+结果 `negative_control.json` 保存逐帧框/置信度、逐音频窗口相似度、成对检出率、
+聚合指标和 assessment。`status=pass/fail/inconclusive`、`provisional=true`、
+policy、scorer源码/权重 SHA256、torch/transformers版本全记录。
+Excel 展示 `video.negative_control.*` 与 assessment，基线/不充分证据分类区分。
+评分成功只表示结果可算；只有所有 policy 项通过才是这个**暂定规则下**的通过。
+
+评分环境与原 VBench/Wan 完全隔离：新 scorer 子进程可以使用显式 `python_exec`。
+在目标评分镜像内先手工运行 `tools/prepare_video_semantic_scorers.py --root ...`
+准备 dedicated venv（不继承 system site packages），可用 `--wheelhouse` 离线安装。
+需要下载模型时明确 `--download-models` 和两个固定 commit revision；工具拒绝
+覆盖已有环境/模型。测试执行不会在线下载或修改现有镜像、评分模型、WAN配置。
+已发现原 VBench 镜像的 Transformers/NPU/pyiqa 依赖有冲突，不在该环境原地
+降级；使用独立CPU scorer环境，不安装torch_npu。
+
+#### 已准备资源与校准子集（2026-11-10，示例55）
+
+用户指定的资源根目录：`/export/home/models/xllm_test_060/joyai_video_benchmark/`。
+它与旧VBench数据/缓存分开，且是当前镜像的独立Python3.11 venv，不继承
+system site packages、不安装torch_npu。现有绝对model目录挂载已覆盖该路径，
+不改全局dependence root，不把本目录软链替换原`vbench_data`。
+
+```text
+joyai_video_benchmark/
+  grounding-dino-tiny/ / clap-htsat-unfused/
+  semantic_env/ / wheelhouse/ / requirements.lock.txt
+  calibration/coco/            # 58图、128对象查询，CC-BY/CC-BY-SA素材
+  calibration/audio/           # 48 ESC-10 + 3 LibriSpeech + 3音乐，共54条
+  calibration/results/         # 校准/独立验证、逐查询证据和阈值网格
+  manifests/ / logs/           # 来源、revision、许可证、SHA256和准备日志
+```
+
+GroundingDINO revision：`a2bb814dd30d776dcf7e30523b00659f4f141c71`；
+CLAP revision：`8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a`。资源准备使用显式
+HF镜像与依赖wheelhouse，模型大文件对照上游LFS SHA256、小文件对照Git blob，
+ESC-10素材对照固定Git revision；测试阶段仍强制offline。
+
+校准集与验证集按图片ID/录音来源划分，不按不同查询或音频窗口伪造独立样本。
+`tools/calibrate_video_semantic_scorers.py`仅用校准集选择阈值，保留验证集每类
+TP/TN/FP/FN。每类暂定要求至少4个正例/负例、recall>=0.7、specificity>=0.9。
+这些是小集工程可用性检查，不是官方阈值或正式JoyAI验收。
+
+第一版只使用已满足检查的画面标签`bicycle/car/cat/dog`和音频标签
+`chainsaw/crackling_fire/dog/rain/sea_waves`。其他标签样本不足或误检偏高，
+尤其音乐/讲话不能由整体平均指标掩盖单类问题；原49宽标签示例不等于已校准。
+第一版画面阈值`box=0.4/text=0.2`，音频`similarity_min=0.3/margin=0.0`。
+`margin=0`仍需目标描述分数不低于所有竞争描述，不是直接把相似度当概率。
+
+补充复核：第一版54音频片段有44个源录音（同一split内有同源片段，跨split未泄漏）。
+后续`calibration/audio/samples_v2.json`已改为54个不同源录音，独立重新校准选择
+`similarity_min=0.25/margin=0.05`，支持的5个事件标签不变。第一轮55的输入/阈值
+保持冻结，不事后替换结果；v2参数在`manifests/calibrated_scorer_spec_v2.json`。
+相同真实音视频的v2离线音频复核仍为inconclusive，不作为新生成性能结果。
+准备/校准工具今后默认读unique-source v2清单，拒绝同源计数膨胀。
+
+`55_single_joyai_video_negative_calibrated.yaml`使用固定
+`data/joyai_video_negative_calibrated_v1.jsonl`，6画面+6音频条件，共24条真实
+50步T2AV配对请求；主机`.75`、16卡、HOST通信为JoyAI用例级覆盖。
+这是**语义专项**：关闭VBench六维，避免把内容遵循、基础画质与性能混成一个分数。
+51仍负责独立六维质量，52仍负责独立性能。55的worker deadline显式配置1800秒，
+不改公共默认或旧Wan；负向规则不足/失败仍如实判inconclusive/fail。
+
+```bash
+XTASK_BENCH_REPORT=0 python main.py --case_group 55_single_joyai_video_negative_calibrated
+```
+
+2026-11-10真实55：24/24请求及媒体检查成功、12/12配对评分完成，报表已生成，
+但语义验收为`inconclusive`（controller仍fail）：画面有4个有效参考对照，
+禁止内容抑制改善率0；音频只有1个有效参考对照，低于暂定3个要求。
+这证明生成/评分/结果归档链路跑通，不证明JoyAI负向效果已达标。不得把该
+小集自动检测结果直接当作模型普遍不支持负向的结论；仍需误检/边界例人工审查。
+
+该清单是xTask自定义回归集，不是官方全量数据。负向参考臂没有禁止内容时，
+不能证明抑制有效；不得事后修改seed、prompt、阈值或排除结果来使本轮通过。
+校准素材和生成测试清单相互独立；不要求外部embedding，也不把公开录音/图片
+上传给JoyAI作为条件。运行完成后另行核查人工可理解的边界例和基线。
+
+示例49包含12条条件（6画面/6音频）对应24个视频，不是官方标准评测数据；
+若要正式覆盖率/统计置信度，需扩充独立prompt/seed并验证人工标注一致性。
+基础视频质量仍由启用的六个 VBench 维度单独记录；要约束视觉质量，配置
+`video_quality.<dimension>` 门禁或参考稳定模型基线，不从无依据阈值伪造达标。
+
+公开方法来源（正式版本的代码/论文用于溯源，不作为本暂定阈值背书）：
+- VBench 官方 `object_class`：逐视频采样帧统计对象出现率。
+- T2V-CompBench：细分条件/对象组合遵循，不只看整体视觉分。
+- GroundingDINO 官方 Transformers 4.57.1：text-grounded object detection。
+- CLAP 官方模型：音频文本对比表征；竞争描述 margin/检出阈值为本项目规则。
+- VABench：多模态分项评价原则；本profile没有冒充完整VABench。
+
+已有外部检测器/judge 命令方式仍兼容，供后续替换：
+
+```yaml
+checks:
+  negative_control:
+    backend: command
+    command: [python3, /path/to/agreed_negative_scorer.py]
+    timeout: 600
+```
+
+xTask 在 argv 后追加 `--pairs <pairs.json> --output <result.json>`，不经 shell。
+命令输出需有 `complete: true`、有限数值 `metrics`、`pairs` 逐 sample ID/repeat
+完整无重复结果。可据此配置 `negative_control.<metric>` 门禁。评分器退出失败、
+结果缺失/覆盖不全都会失败。`mode: generate` 无检查器则 `not_scored`；
+`generate_and_evaluate/evaluate` 的配对场景未配置对应检查器会拒绝运行。
+
+#### 临时请求/媒体诊断（不代表语义验收通过）
+
+如需在负向语义效果调查期间，先验证 xTask 与模型服务的请求链路，可运行独立
+`tests/e2e/xllm/diagnostics/joyai_video/joyai_video_cfg_pair_request_only_temporary.yaml`：
+
+```bash
+XTASK_BENCH_REPORT=0 python main.py --case_group joyai_video_cfg_pair_request_only_temporary
+```
+
+这是55的独立诊断副本，不改55或现有模型门禁。保留12条件/24配对请求、50步、
+同seed/正向词/不同负向词以及原服务参数，仅使用现有配置：
+
+```yaml
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    task: t2av
+    scenario: cfg_pair
+    mode: generate
+    evaluation:
+      enabled: false
+    checks: {}
+    gates: []
+```
+
+此诊断的pass只表示请求及媒体完整性通过。JSON/Excel中的
+`checks_status.negative_control`会是`not_scored`，不生成语义`negative_control.json`，
+不会把原judge的fail/inconclusive写成pass；语义暂不验收的原因/恢复用例通过
+`vbench.provenance`记录。HTTP失败、超时、缺帧/音轨、哈希/归档/报表错误仍失败。
+这不是正式accuracy/perf基线；不要加入需要语义验收的发布门禁。
+恢复完整评测只需重新运行原`55_single_joyai_video_negative_calibrated`。
+两例使用同一部署设备/端口，必须串行，不能并行启动。临时用例只做了配置和
+模拟客户端单元核验，尚未以该YAML另跑一轮NPU，不能宣称真机临时用例已pass。
+
+#### 日期归档与报表
+
+```text
+outputs/<group>/<case>/YYYYMMDD_HHMMSS/
+  config.json / runner_config.json / source_task.yaml / task_config.json
+  request_plan.json / requests_http.jsonl / requests.jsonl / requests.json
+  manifest.json / embeddings/ / videos/
+  text_video_result.json / execution_result.json / runs.csv
+  video_quality.json / <dimension>_details.json
+  pairs.json / embedding_parity.json / negative_control.json（启用时）
+  run_vbench_test.sh / commands.json / benchmark_stdout.log / benchmark_stderr.log
+  service_startup/<instance>/start_xllm_serv*.sh（自部署时，实际启动参数快照）
+```
+
+每次执行独立日期目录；中途/失败保留已落盘证据，不把 partial 当成功。
+`requests_http.jsonl` 是原始 HTTP 观测；最终 `requests.jsonl/json` 包含完整解码检查。
+HTTP 错误保留状态码及最多 8 KiB 的响应诊断（JSON 认证字段脱敏），不自动重试。
+JSON 路径相对当前日期目录，offline 引用源视频时记录原源归档；大 embedding
+不塞入 Excel/请求日志。认证 key 在归档配置打码；执行输入配置权限 600。
+视频/业务 prompt 使用调用者可写的归档，不以全员可写解决权限。
+
+Excel 为 `video.performance.*`、`video.video_quality.*`、`video.checks_status.*`、
+`video.embedding_parity.*` 等原生字段；accuracy 为 NA，不编造 token/s/TPOT。
+请求、门禁、评分、归档和报表失败均明确记录，结果链接使用归档主机。
+
+示例 43—48 分别覆盖视频质量、音视频基础质量、CFG 请求配对、外部 embedding、
+embedding 数值对照与独立性能。它们不加入原模型 case group；真机验证前应准备
+JoyAI-Video 模型服务/配置、对应评分器资源和议定基线；只有46/47需要真实
+外部 embedding 材料，普通文本50/51/52不需要。
 
 ## 9. 外部已有服务（不启动 xLLM）
 

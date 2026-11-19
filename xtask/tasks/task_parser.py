@@ -567,6 +567,10 @@ def gen_group_paraset_task(
             logging.error(f"基础配置文件为空: {basecase_file}")
             return False
 
+        from xtask.utils.resource_sync import expand_dependence_placeholders
+
+        base_config = expand_dependence_placeholders(base_config)
+
         from xtask.core.service_group import validate_pd_deployment_authoring
 
         validate_pd_deployment_authoring(base_config)
@@ -749,6 +753,10 @@ def gen_group_autoassess_task(
         if not base_config:
             logging.error(f"基础配置文件为空或解析失败: {basecase_file}")
             return False
+
+        from xtask.utils.resource_sync import expand_dependence_placeholders
+
+        base_config = expand_dependence_placeholders(base_config)
 
         # Normalize even the first/default round, which does not call the
         # parameter updater. Do not mutate the retained source configuration.

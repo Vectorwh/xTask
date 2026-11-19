@@ -38,13 +38,13 @@ benchmark:
     # numbers belong to a different configuration and are not copied here.
     gates: []
 deployment:
-  master_host: 11.87.191.101
+  master_host: 11.87.191.75
   benchmark:
     runner_instance: master-0
     health_path: /health
   instances:
     - name: master-0
-      host: 11.87.191.101
+      host: 11.87.191.75
       role: master
       rank_start: 0
       device_ids: [0, 1]

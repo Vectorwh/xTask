@@ -2,7 +2,7 @@
     "XLLM_CONFIG": {
         "xllm_version": "main",
         "image_home": "quay.io/jd_xllm/xllm-ai",
-        "default_image_name": "xllm-dev-a3-arm-cann9-20260911",
+        "default_image_name": "xllm-dev-cann9.1.0-a3-openeuler24.03-py3.12",
         "enable_proxy": true,
         "https_proxy_url": "http://bamboo-proxy.jd.com:80",
         "http_proxy_url": "http://bamboo-proxy.jd.com:80",

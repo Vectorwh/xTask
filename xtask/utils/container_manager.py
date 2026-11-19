@@ -1081,7 +1081,12 @@ def create_inference_container(model_config: Dict[str, Any],
 
 def path_mapping_in_container(path: str):
     volumes = get_xtask_config_data().get("DOCKER_CONFIG").get("volumes")
-    for outside_path, inside_path in volumes.items():
+    # Longest host prefix wins: a generic mount such as /export/home/models/
+    # must not shadow a more specific one like the DEPENDENCE_PACKAGE_PATH
+    # subtree, which maps to the fixed /xllm_test_060 container root.
+    for outside_path, inside_path in sorted(
+        volumes.items(), key=lambda item: len(item[0]), reverse=True
+    ):
         if outside_path in path:
             return path.replace(outside_path, inside_path + "/").replace("//", "/")
     return path

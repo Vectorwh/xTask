@@ -1,0 +1,96 @@
+# Real deployment probe: 2 denoise steps, 1 sample. NOT a quality/performance baseline.
+case_name: joyai_video_t2av_smoke
+engine_type: xllm
+model_path: /export/home/models/joyo_v2_diffusers_stage3p5_it526400
+served_model_name: JoyAI-Video
+metrics: acc
+dataset_name: joyai_video_smoke
+communication_backend: hccl
+userid: 1003
+serving_wait_time: 10
+benchmark_timeout: 3600
+hccl_if_port: 45500
+progress_conn_port: 18963
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    task: t2av
+    scenario: text
+    mode: generate
+    manifest: ${DEPENDENCE_PACKAGE_PATH}/datasets/joyai_video/joyai_video_prompts.jsonl
+    generation:
+      size: 512*288
+      num_frames: 81
+      fps: 16
+      num_inference_steps: 2
+      guidance_scale: 4
+      flow_shift: 8
+      seed: 42
+      sampling_rate: 44100
+      concurrency: 1
+      repeats: 1
+      warmups: 0
+      limit: 1
+      request_timeout: 1800
+    media:
+      audio: required
+      channels: 2
+      duration_tolerance_s: 0.25
+    evaluation:
+      enabled: false
+    gates: []
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    local_port: 18024
+    serving_ready_timeout: 1800
+    # Probe HOST collectives only in this case; shared AIV templates stay unchanged.
+    startup_environment:
+    - export HCCL_OP_EXPANSION_MODE=HOST
+    serving_extensiable_param:
+      backend: dit
+      model_id: JoyAI-Video
+      npu_kernel_backend: TORCH
+      tp_size: 16
+      sp_size: 1
+      cfg_size: 1
+      dp_size: 1
+      vae_size: 1
+      text_encoder_tp_size: 8
+      dit_enable_text_encoder: true
+      max_requests_per_batch: 1
+      max_tokens_per_batch: 4096
+      max_memory_utilization: 0.95
+      enable_prefix_cache: false
+      enable_chunked_prefill: false
+      enable_schedule_overlap: false
+      enable_graph: false
+      enable_rolling_load: false
+      dit_cache_policy: None
+      use_contiguous_input_buffer: false
+      enable_shm: true
+      output_shm_size: 1024

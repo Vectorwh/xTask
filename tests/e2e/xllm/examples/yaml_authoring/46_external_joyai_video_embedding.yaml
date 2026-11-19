@@ -1,0 +1,52 @@
+# Stage-one JoyAI-Video example. Replace endpoint/model and verify deployment components.
+# Not validated against a real JoyAI model; gates are intentionally unset.
+# Prepare offline VBench scoring models; sampling_rate MUST match audio_vae config.
+# Requires real matching Qwen3-VL FP32 Tensor JSON with SHA256/provenance; no fabricated features.
+case_name: 46_external_joyai_video_embedding
+engine_type: xllm
+served_model_name: JoyAI-Video
+metrics: acc
+dataset_name: joyai_video_smoke
+external_service:
+  enabled: true
+  endpoint: http://127.0.0.1:8018
+  health_path: /health
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    task: t2av
+    scenario: embedding
+    mode: generate_and_evaluate
+    manifest: /path/to/joyai_video_embedding_manifest.jsonl
+    generation:
+      size: 512*288
+      num_frames: 81
+      fps: 16
+      num_inference_steps: 50
+      guidance_scale: 4.0
+      flow_shift: 8.0
+      seed: 42
+      sampling_rate: 44100
+      concurrency: 1
+      repeats: 1
+      warmups: 0
+      request_timeout: 1800
+      limit: 0
+    media:
+      audio: required
+      duration_tolerance_s: 0.25
+      channels: 2
+    evaluation:
+      enabled: true
+      dimensions:
+      - subject_consistency
+      - background_consistency
+      - motion_smoothness
+      - dynamic_degree
+      - aesthetic_quality
+      - imaging_quality
+      device: cpu
+      local: true
+      code_root: ${DEPENDENCE_PACKAGE_PATH}/benchmark/vbench2
+    gates: []
+    embedding_dim: 5120

@@ -53,9 +53,13 @@ def report_benchmark_if_available(result):
 
         # TODO: get device_type and engine_version from environment
         task_config.setdefault("device_type", "A3")
-        task_config.setdefault("engine_version", "main")
-
-        report_xtask_result(result, task_config)
+        from xtask.benchmarks.asr.config import is_asr_task
+        if is_asr_task(task_config):
+            from xtask.benchmarks.asr.reporting import report_to_dashboard
+            report_to_dashboard(result, task_config)
+        else:
+            task_config.setdefault("engine_version", "main")
+            report_xtask_result(result, task_config)
     except Exception as exc:
         logging.warning("Optional bench-reporter integration failed: %s", exc)
 

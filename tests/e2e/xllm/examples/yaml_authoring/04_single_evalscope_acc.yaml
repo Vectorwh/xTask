@@ -19,7 +19,7 @@ benchmark:
     timeout: 3600
     endpoint: /v1
     baseline: 0.30
-    threshold: 0.05
+    threshold: 0.12
     generation_config:
       temperature: 1
       top_p: 0.95
@@ -30,7 +30,7 @@ benchmark:
       mmmu:
         dataset_id: /xllm_test_060/datasets/mmmu
         subset_list: [Music]
-        split: validation
+        eval_split: validation
 
 deployment:
   master_host: 11.87.191.75

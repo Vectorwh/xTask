@@ -34,6 +34,36 @@ def get_dependence_package_path() -> str:
     return text or DEFAULT_RESOURCE_ROOT
 
 
+DEPENDENCE_PLACEHOLDER = "${DEPENDENCE_PACKAGE_PATH}"
+
+
+def expand_dependence_placeholder(value: Any) -> Any:
+    """Expand ``${DEPENDENCE_PACKAGE_PATH}`` in a YAML path field.
+
+    Host-side paths become ``DEPENDENCE_PACKAGE_PATH/...``; container-side
+    paths (those already under the fixed ``/xllm_test_060`` mount) become
+    ``/xllm_test_060/...``.  Callers pass the resolved string to
+    ``path_mapping_in_container`` when the field is read inside a container.
+
+    Non-string values and strings without the placeholder pass through
+    unchanged, so this is safe to apply to every task-config string.
+    """
+    if not isinstance(value, str) or DEPENDENCE_PLACEHOLDER not in value:
+        return value
+    return value.replace(DEPENDENCE_PLACEHOLDER, get_dependence_package_path())
+
+
+def expand_dependence_placeholders(node: Any) -> Any:
+    """Recursively expand the placeholder through a task-config mapping."""
+    if isinstance(node, str):
+        return expand_dependence_placeholder(node)
+    if isinstance(node, dict):
+        return {key: expand_dependence_placeholders(item) for key, item in node.items()}
+    if isinstance(node, list):
+        return [expand_dependence_placeholders(item) for item in node]
+    return node
+
+
 def _nonempty_path(value: Any) -> Optional[str]:
     if value is None:
         return None

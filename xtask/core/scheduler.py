@@ -1,6 +1,7 @@
 import inspect
 import logging
 import os
+import socket
 import json
 import time
 import types
@@ -143,6 +144,10 @@ class TaskConfig:
             if not isinstance(config, dict):
                 logging.error("Task config must be a YAML mapping: %s", task_yaml_path)
                 return {}
+
+            from xtask.utils.resource_sync import expand_dependence_placeholders
+
+            config = expand_dependence_placeholders(config)
 
             # PD YAML authoring is hierarchical only.  After validation, the
             # topology is normalized to the scheduler's canonical flat runtime
@@ -1575,6 +1580,12 @@ def _load_task_and_engine(context):
         validate_external_service_config,
     )
 
+    if (_is_text_video_task(task_config)
+            and (task_config.get("benchmark", {}).get("vbench", {}).get("mode") == "evaluate")):
+        # New archived-only scoring must never prepare model dependencies or
+        # invoke NPU cleanup. This exception is gated off for every old task.
+        task_config = copy.deepcopy(task_config)
+        task_config["external_service"] = {"enabled": True, "health_path": ""}
     external_service = is_external_service_enabled(task_config)
     if external_service:
         try:
@@ -1594,12 +1605,15 @@ def _load_task_and_engine(context):
     source_task_config = copy.deepcopy(task_config)
     context.result["task_config"] = task_config
     context.result["output_file_path"] = context.output_file_path
-    if _is_asr_task(task_config):
+    if _is_asr_task(task_config) or _is_text_video_task(task_config):
         # Input staging/config errors can occur before ordinary state setup.
         # Cleanup still needs enough identity to create a failed date archive.
         os.makedirs(context.output_file_path, exist_ok=True)
         context.state.update(task_config=task_config, external_service=external_service,
                              init_entries=os.listdir(context.output_file_path))
+    if _is_text_video_task(task_config) and getattr(context.args, "assess_test_type", None) in {"auto_assess", "para_set"}:
+        _fail_stage(context, "Text-video auto_assess/para_set is not wired yet; use explicit concurrency/repeats cases, not LLM TTFT/TPOT search")
+        return
     engine = TaskConfig.extract_framework(task_config)
     logging.info(f"Detected engine type: {engine}")
 
@@ -1704,6 +1718,33 @@ def _is_asr_task(task_config):
     return is_asr_task(task_config)
 
 
+def _is_text_video_task(task_config):
+    from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+    return is_text_video_task(task_config or {})
+
+
+def _try_archive_text_video_execution(context):
+    # cleanup 阶段的简化 context（单测/异常路径）可能没有 result 属性；
+    # 判定只用 task_config，归档失败仅当 result 真实存在时才回写。
+    result = getattr(context, "result", None)
+    task_config = (result or {}).get("task_config") or context.state.get("task_config")
+    if not _is_text_video_task(task_config):
+        return
+    try:
+        from xtask.benchmarks.vbench.text_video.reporting import archive_execution
+
+        archive_execution(context)
+    except Exception as exc:
+        if result is None:
+            logging.error("Text-video execution archive failed: %s", exc, exc_info=True)
+            return
+        result["archive_error"] = f"Text-video execution archive failed: {exc}"
+        result["success"] = False
+        result["message"] = result["archive_error"]
+        logging.error(result["archive_error"], exc_info=True)
+
+
 def _is_vbench_task(task_config):
     return str((task_config.get("benchmark") or {}).get("benchmark_type", "")).lower() == "vbench"
 
@@ -1764,7 +1805,10 @@ def _vbench_container_config(context, service_manager, service_config):
     # bind.  Do not create missing dataset paths here; the generated script
     # performs the user-facing existence checks.
     config = vbench if isinstance(vbench, dict) else {}
-    for key in ("full_info", "dataset_path", "image_root", "cache_dir", "evaluation_script", "evaluate_script"):
+    input_keys = ("full_info", "dataset_path", "image_root", "cache_dir", "evaluation_script", "evaluate_script")
+    if _is_text_video_task(task_config):
+        input_keys += ("source_run",)
+    for key in input_keys:
         value = config.get(key)
         if not value:
             continue
@@ -2359,6 +2403,70 @@ def _download_xllm_command(install_service, task_config=None):
     return " ".join(environment) + " bash /workspace/tools/download_xllm.sh;"
 
 
+def _runtime_transformers_config(context):
+    """Resolve dependency metadata without changing legacy model layouts."""
+    task_config = context.state["task_config"]
+    model_config_path = os.path.join(task_config.get("model_path"), "config.json")
+    if os.path.exists(model_config_path):
+        with open(model_config_path, "r") as config_file:
+            return model_config_path, json.load(config_file).get("transformers_version")
+
+    if _is_text_video_task(task_config):
+        # JoyOV2 exports a Diffusers component tree, not a root LLM config.
+        # The index describes the pipeline; it must not implicitly upgrade the
+        # image's transformers dependency or modify the shared model directory.
+        index_path = os.path.join(task_config["model_path"], "model_index.json")
+        try:
+            with open(index_path, "r") as index_file:
+                index = json.load(index_file)
+            if (not isinstance(index, dict)
+                    or not isinstance(index.get("_class_name"), str)
+                    or not index["_class_name"].strip()):
+                raise ValueError("model_index.json requires a nonempty _class_name")
+        except (OSError, ValueError) as exc:
+            _fail_stage(context, f"Invalid text-video model index {index_path}: {exc}")
+            return None
+        logging.info("Component model layout: %s; keep image transformers version", index_path)
+        return index_path, None
+
+    # Preserve the config.json requirement for existing LLM and Wan tasks.
+    logging.error(f"model config file: {model_config_path} is not exist")
+    context.complete = True
+    return None
+
+
+def _runtime_transformers_config(context):
+    """Resolve dependency metadata without changing legacy model layouts."""
+    task_config = context.state["task_config"]
+    model_config_path = os.path.join(task_config.get("model_path"), "config.json")
+    if os.path.exists(model_config_path):
+        with open(model_config_path, "r") as config_file:
+            return model_config_path, json.load(config_file).get("transformers_version")
+
+    if _is_text_video_task(task_config):
+        # JoyOV2 exports a Diffusers component tree, not a root LLM config.
+        # The index describes the pipeline; it must not implicitly upgrade the
+        # image's transformers dependency or modify the shared model directory.
+        index_path = os.path.join(task_config["model_path"], "model_index.json")
+        try:
+            with open(index_path, "r") as index_file:
+                index = json.load(index_file)
+            if (not isinstance(index, dict)
+                    or not isinstance(index.get("_class_name"), str)
+                    or not index["_class_name"].strip()):
+                raise ValueError("model_index.json requires a nonempty _class_name")
+        except (OSError, ValueError) as exc:
+            _fail_stage(context, f"Invalid text-video model index {index_path}: {exc}")
+            return None
+        logging.info("Component model layout: %s; keep image transformers version", index_path)
+        return index_path, None
+
+    # Preserve the config.json requirement for existing LLM and Wan tasks.
+    logging.error(f"model config file: {model_config_path} is not exist")
+    context.complete = True
+    return None
+
+
 def _prepare_runtime_dependencies(context):
     state = context.state
     if state.get("external_service"):
@@ -2413,14 +2521,10 @@ def _prepare_runtime_dependencies(context):
             _fail_stage(context, f"benchmark dependency preparation failed: {detail}")
             return
 
-    model_config_path = os.path.join(task_config.get("model_path"), "config.json")
-    if not os.path.exists(model_config_path):
-        logging.error(f"model config file: {model_config_path} is not exist")
-        context.complete = True
+    dependency_config = _runtime_transformers_config(context)
+    if dependency_config is None:
         return
-
-    with open(model_config_path, "r") as config_file:
-        transformers_version = json.load(config_file).get("transformers_version")
+    model_config_path, transformers_version = dependency_config
     # Transformers is a text-LLM dependency; DiT-style multimodal models
     # (Wan2.2 etc.) do not use it and pin no version in config.json.
     # Skip the install instead of forcing an upgrade of the container env.
@@ -2507,14 +2611,10 @@ def _prepare_runtime_dependencies_multi_host(context):
         _fail_stage(context, f"Multi-host ranktable preparation failed: {exc}")
         return
 
-    model_config_path = os.path.join(task_config.get("model_path"), "config.json")
-    if not os.path.exists(model_config_path):
-        logging.error(f"model config file: {model_config_path} is not exist")
-        context.complete = True
+    dependency_config = _runtime_transformers_config(context)
+    if dependency_config is None:
         return
-
-    with open(model_config_path, "r") as config_file:
-        transformers_version = json.load(config_file).get("transformers_version")
+    model_config_path, transformers_version = dependency_config
 
     benchmark_type = task_config.get("benchmark").get("benchmark_type")
     if benchmark_type == "aisbench" and not _is_aisbench_swebench_task(task_config):
@@ -4171,7 +4271,8 @@ def _run_benchmark_and_process(context):
             benchmark_result = benchmark_container_manager.exec_in_container(
                 benchmark_container_config.container_name,
                 benchmark_cmd,
-                timeout=engine_config.get("benchmark_timeout", 3600),
+                timeout=(task_config.get("benchmark_timeout") or engine_config.get("benchmark_timeout", 3600))
+                if _is_text_video_task(task_config) else engine_config.get("benchmark_timeout", 3600),
             )
         else:
             benchmark_result = _execute_benchmark_with_npu_guard(
@@ -4223,16 +4324,36 @@ def _run_benchmark_and_process(context):
             # readable before host-side post-processing as well as download.
             benchmark_container_manager.exec_in_container(
                 benchmark_container_config.container_name,
-                f"chmod -R a+rwX {shlex.quote(path_mapping_in_container(context.output_file_path))} 2>/dev/null || true",
+                (f"chown -R {os.getuid()}:{os.getgid()} {shlex.quote(path_mapping_in_container(context.output_file_path))}"
+                 if _is_text_video_task(task_config) else
+                 f"chmod -R a+rwX {shlex.quote(path_mapping_in_container(context.output_file_path))} 2>/dev/null || true"),
                 timeout=60,
             )
             if (
                 vbench_runner is not None
                 and not vbench_runner.plan.is_local
             ):
-                # The VBench container is separate from service_runtimes, so
-                # remote generated videos/results need an explicit download.
-                if not benchmark_container_manager.executor.download(
+                # The VBench container is separate from service_runtimes.
+                if _is_text_video_task(task_config):
+                    # Transfer only this invocation's date archives; never replace
+                    # controller-side logs or historical runs with a runner tree.
+                    executor = benchmark_container_manager.executor
+                    listing = executor.run(
+                        f"find {shlex.quote(context.output_file_path)} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n'",
+                        timeout=30,
+                    )
+                    if not listing.success:
+                        raise RuntimeError("Failed to list remote text-video archives")
+                    dates = [name for name in listing.stdout.splitlines()
+                             if re.fullmatch(r"\d{8}_\d{6}", name) and name not in set(init_entries)]
+                    for name in dates:
+                        remote = os.path.join(context.output_file_path, name)
+                        if not executor.download(remote, remote):
+                            raise RuntimeError(f"Failed to download text-video archive {name}")
+                    if not dates:
+                        raise RuntimeError("Remote text-video runner produced no new date archive")
+                    context.result["artifact_host"] = socket.gethostbyname(socket.gethostname())
+                elif not benchmark_container_manager.executor.download(
                     context.output_file_path, context.output_file_path
                 ):
                     raise RuntimeError(
@@ -4255,10 +4376,28 @@ def _run_benchmark_and_process(context):
                 context.result["message"] = f"ASR result processing failed: {exc}"
                 logging.error(context.result["message"], exc_info=True)
 
+        if _is_text_video_task(task_config):
+            # Parse even a failed command: preserve native baseline/processing
+            # evidence rather than report every intentional gate failure as a
+            # missing benchmark result.
+            try:
+                from xtask.benchmarks.vbench.text_video.reporting import post_process
+
+                context.result["benchmark_vbench_result"], output_dir = post_process(
+                    task_config, context.output_file_path, init_entries
+                )
+                context.result["benchmark_output_path"] = output_dir
+                _record_service_group_archive_path(state, output_dir)
+            except Exception as exc:
+                context.result["benchmark_vbench_result"] = None
+                context.result["message"] = f"Text-video result processing failed: {exc}"
+                logging.error(context.result["message"], exc_info=True)
         if benchmark_result.success:
             logging.info("perf benchmark completed successfully.")
             if _is_asr_task(task_config):
                 pass  # ASR quality and performance were processed together above.
+            elif _is_text_video_task(task_config):
+                pass  # Joint native result was parsed above, including failures.
             elif _is_vbench_task(task_config):
                 from xtask.benchmarks.vbench.vbench_postprocess import (
                     vbench_result_post_process,
@@ -4332,7 +4471,8 @@ def _run_benchmark_and_process(context):
                     task_config.get("metrics"),
                 )
 
-            if "perf" in task_config.get("metrics") and not _is_asr_task(task_config):
+            if ("perf" in task_config.get("metrics") and not _is_asr_task(task_config)
+                    and not _is_text_video_task(task_config)):
                 from xtask.benchmarks.base_benchmark import result_postprocess
 
                 context.result["benchmark_perf_result"], output_dir = (
@@ -4391,6 +4531,7 @@ def _run_benchmark_and_process(context):
 
 
 def _finalize_result(context):
+    _try_archive_text_video_execution(context)
     task_config = context.result.get("task_config") or context.state.get(
         "task_config"
     )
@@ -4408,11 +4549,19 @@ def _finalize_result(context):
             args=context.args,
         )
     except Exception as exc:
-        if not _is_asr_task(task_config or {}):
+        if not (_is_asr_task(task_config or {}) or _is_text_video_task(task_config)):
             raise
         written = False
-        context.result["archive_error"] = f"ASR workbook generation failed: {exc}"
+        label = "Text-video" if _is_text_video_task(task_config) else "ASR"
+        context.result["archive_error"] = f"{label} workbook generation failed: {exc}"
         logging.error(context.result["archive_error"], exc_info=True)
+    if _is_text_video_task(task_config):
+        context.result["report_generated"] = written is True
+        if written is not True:
+            context.result["archive_error"] = context.result.get("archive_error") or "Text-video workbook generation failed"
+            context.result["success"] = False
+            context.result["message"] = context.result["archive_error"]
+        _try_archive_text_video_execution(context)
     if _is_asr_task(task_config or {}):
         context.result["report_generated"] = written is True
         if written is not True:
@@ -5026,6 +5175,7 @@ def _cleanup_scheduler(context):
     from xtask.core.service_group import cleanup_service_group
 
     state = context.state
+    _try_archive_text_video_execution(context)
     if state.get("external_service"):
         _cleanup_external_client(context)
         return

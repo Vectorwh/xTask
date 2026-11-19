@@ -108,6 +108,12 @@ def vbench_result_post_process(
 ) -> Tuple[Dict[str, Any], str]:
     """Return VBench quality scores and the newly created case date directory."""
 
+    from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+    if is_text_video_task(task_config):
+        from xtask.benchmarks.vbench.text_video.reporting import post_process
+
+        return post_process(task_config, output_path, init_entries)
     root = Path(output_path)
     date_dir = _new_date_dir(root, init_entries)
     if date_dir is None:

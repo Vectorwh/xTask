@@ -1,0 +1,67 @@
+# Local regression copy of 25; benchmark and model parameters are unchanged.
+# Devices 2/3 avoid the unrelated CI on device0; no shared startup overrides.
+case_name: 53_single_wan_i2v_regression
+engine_type: xllm
+model_path: /export/home/models/wan2_2
+served_model_name: wan2_2
+metrics: acc
+dataset_name: vbench_i2v
+dataset_format: json
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 30
+benchmark:
+  benchmark_type: vbench
+  vbench:
+    mode: generate_and_evaluate
+    resolution: 16-9
+    name: wan2_2_xllm
+    check: true
+    generation:
+      size: 832*480
+      num_inference_steps: 40
+      guidance_scale: 1.5
+      num_frames: 81
+      fps: 16
+      seed: 42
+      request_timeout: 1800
+      limit: 5
+    evaluation:
+      baseline: null
+      threshold: 0.1
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids:
+    - 2
+    - 3
+    world_size: 2
+    local_nnodes: 2
+    global_nnodes: 2
+    local_port: 18044
+    serving_extensiable_param:
+      backend: dit
+      tp_size: 1
+      cfg_size: 2
+      sp_size: 1
+      vae_size: 1
+      max_memory_utilization: 0.98
+      output_shm_size: 1024
+      enable_prefix_cache: false
+      enable_chunked_prefill: false
+      enable_schedule_overlap: false
+      use_contiguous_input_buffer: false
+      enable_rolling_load: true
+      rolling_load_num_rolling_slots: 2
+      dit_laser_attention_enabled: true
+      dit_sparse_attention_enabled: false
+      enable_shm: true
+hccl_if_port: 45600
+progress_conn_port: 18973

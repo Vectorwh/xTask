@@ -432,6 +432,12 @@ def verify_result(result, task_config):
             logging.error("ASR verification failed: %s", "; ".join(issue["reason"] for issue in issues))
         return not issues
 
+    from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+    if is_text_video_task(task_config):
+        from xtask.benchmarks.vbench.text_video.reporting import verify
+
+        return verify(result, task_config)
     if result.get("benchmark_success") is False:
         logging.error("✗ Test failed: benchmark command did not complete successfully")
         return False
@@ -713,6 +719,10 @@ def _configured_baseline(task_config):
     # otherwise hit the acc branch with an empty benchmark.acc block and lose
     # its baseline.
     if _is_vbench_case(task_config):
+        from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+        if is_text_video_task(task_config):
+            return None  # Opt-in native dimension/performance gates, never legacy I2V total.
         pair = _vbench_baseline_pair(benchmark)
         if pair is not None:
             return ("vbench",) + pair
@@ -799,6 +809,13 @@ def _baseline_failure_reason(result, task_config):
 
 
 def _baseline_difference(result, task_config):
+    from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+    if is_text_video_task(task_config):
+        from xtask.benchmarks.vbench.text_video.config import result_issues as video_issues
+        from xtask.benchmarks.vbench.text_video.reporting import task_config as video_config
+
+        return "; ".join(issue["reason"] for issue in video_issues(result.get("benchmark_vbench_result"), video_config(task_config)) if issue["category"] == "baseline")
     from xtask.benchmarks.asr.config import is_asr_task, result_issues
 
     if is_asr_task(task_config):
@@ -912,6 +929,12 @@ def _classify_failure(result, task_config):
             else message
         )
         return FAILURE_XLLM, reason or "xLLM process or service health check failed"
+    from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+    if is_text_video_task(task_config):
+        from xtask.benchmarks.vbench.text_video.reporting import failure
+
+        return failure(result, task_config)
     from xtask.benchmarks.asr.config import is_asr_task, result_issues
 
     if is_asr_task(task_config):
@@ -1038,6 +1061,12 @@ def _result_payload(result, task_config=None):
             }
         return fields
     if benchmark_type == "vbench" and isinstance(vbench_result, Mapping):
+        from xtask.benchmarks.vbench.text_video.config import is_text_video_task
+
+        if is_text_video_task(task_config):
+            from xtask.benchmarks.vbench.text_video.reporting import workbook_payload
+
+            return workbook_payload(result)
         # Keep the workbook bounded.  VBench's per-video evaluation payload
         # and latency list belong in the archived JSON files, not in one Excel
         # cell (Excel rejects values over 32K and the row becomes unreadable).

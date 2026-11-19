@@ -209,6 +209,10 @@ def load_search_case(case_name: str) -> SearchCase:
     if not isinstance(base_config, dict):
         raise ValueError(f"case YAML is empty: {basecase_file}")
 
+    from xtask.utils.resource_sync import expand_dependence_placeholders
+
+    base_config = expand_dependence_placeholders(base_config)
+
     from xtask.core.service_group import validate_pd_deployment_authoring
 
     validate_pd_deployment_authoring(base_config)

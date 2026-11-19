@@ -1,0 +1,71 @@
+# Copy of 42; only name/devices/isolated ports changed. Keep original MTP, AISBench and baseline.
+additional_config: ''
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    acc_dataset_len: 0
+    api_type: vllm_api_general_stream
+    baseline: 169.7516
+    batch_size: 1
+    case_type: performance
+    dataset_conf: gsm8k_gen_0_shot_cot_str_perf
+    dataset_path: null
+    dump_eval_details: false
+    dump_extract_rate: false
+    enable_debug: false
+    enable_thinking: false
+    input_len: 2048
+    max_num_worker: 1
+    max_out_len: 2048
+    merge_ds: false
+    num_prompts: 6
+    output_len: 2048
+    pressure: false
+    request_rate: 1
+    threshold: 0.1
+    num_warmups: 20
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: true
+block_size: 128
+case_name: 54_single_qwen36_perf_regression
+communication_backend: hccl
+dataset_format: json
+dataset_name: gsm8k
+dataset_path: ''
+engine_type: xllm
+metrics: perf
+model_path: /export/home/models/Qwen3.6-35B-A3B
+served_model_name: Qwen3.6-35B-A3B
+userid: 1048
+serving_wait_time: 10
+deployment:
+  master_host: 11.87.191.75
+  benchmark:
+    runner_instance: master-0
+    health_path: /health
+  instances:
+  - name: master-0
+    host: 11.87.191.75
+    role: master
+    rank_start: 0
+    device_ids:
+    - 2
+    - 3
+    local_port: 18054
+    serving_extensiable_param:
+      max_memory_utilization: 0.7
+      max_tokens_per_batch: 32768
+      max_seqs_per_batch: 10
+      enable_chunked_prefill: true
+      enable_schedule_overlap: true
+      enable_prefix_cache: false
+      enable_shm: true
+      block_size: 128
+      draft_model: /export/home/models/Qwen3.6-35B-A3B-MTP
+      num_speculative_tokens: 3
+      enable_graph: true
+      enable_graph_mode_decode_no_padding: true
+      max_concurrent_requests: 8
+hccl_if_port: 45700
+progress_conn_port: 18983
