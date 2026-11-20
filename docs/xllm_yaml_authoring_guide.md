@@ -1173,11 +1173,30 @@ deployment:
       max_request_deadline_ms: 3600000
 ```
 
+**按成员差异化**：显式 `coordinators[]` / `routers[]` 列表的每个成员还可以写自己的
+`extra_service_args`，只对该成员生效，同名键**覆盖**顶层共用值（成员优先级高）。
+适合某 flag 只该给 Router 或只该给 Coordinator 开的场景：
+
+```yaml
+deployment:
+  xllm_service:
+    extra_service_args:
+      default_request_deadline_ms: 3600000   # 共用
+    routers:
+      - name: router-0
+        host: 10.0.0.1
+        http_server_port: 38888
+        rpc_server_port: 38889
+        extra_service_args:
+          target_tpot: 100                    # 仅 router-0, 覆盖共用
+```
+
 校验规则：
 
 - flag 名必须匹配 `[A-Za-z][A-Za-z0-9_]*`（字母开头，后接字母/数字/下划线）。
 - 值必须是标量（int、float 或 str）；布尔、null、列表、字典都会被拒绝。
-- 参数对 Coordinator 和 Router 两种角色统一生效；xTask 只做转发，不解释其含义。
+- 顶层 `extra_service_args` 对 Coordinator 和 Router 两种角色统一生效；列表成员内的
+  `extra_service_args` 只对该成员生效并覆盖同名的共用值。xTask 只做转发，不解释其含义。
 - `etcd`、`coordinators`、`routers`、`transfer_port_base`、`service_binary_profile`
   等结构化键由 xTask 自身消费，永远不会被当作命令行参数透传。
 
@@ -1204,7 +1223,10 @@ deployment:
 
 - 变量名必须匹配 `[A-Za-z_][A-Za-z0-9_]*`（下划线或字母开头，后接字母/数字/下划线）。
 - 值必须是标量（int、float 或 str）；布尔、null、列表、字典都会被拒绝。
-- 注入值对 Coordinator 和 Router 统一生效；同名时覆盖 xTask 自动生成的保留键
+- 顶层 `extra_environment` 对 Coordinator 和 Router 统一生效；显式 `coordinators[]` /
+  `routers[]` 列表成员可写自己的 `extra_environment`，只对该成员生效，同名键
+  **覆盖**顶层共用值（成员优先级高，与 `extra_service_args` 同一语义）。
+- 同名时覆盖 xTask 自动生成的保留键
   （`no_proxy`/`NO_PROXY`/`ENABLE_DECODE_RESPONSE_TO_SERVICE`）。
 - 值在拼接 shell 时会被安全引号包裹，含空格或特殊字符不会破坏启动命令。
 

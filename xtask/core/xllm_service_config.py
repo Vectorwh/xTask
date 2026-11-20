@@ -83,6 +83,9 @@ class XllmServiceInstance:
     http_server_port: int
     rpc_server_port: int
     container_instance: Optional[str] = None
+    # Per-instance overrides; same-named keys beat the shared xllm_service block.
+    extra_service_args: Optional[Dict[str, Any]] = None
+    extra_environment: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,28 @@ def _service_host(host, field):
     return host
 
 
+def _instance_overrides(item, prefix):
+    """Validate one member's per-instance extra_service_args/extra_environment.
+
+    Both are optional mappings of scalar values; when present they override the
+    same-named keys inherited from the shared deployment.xllm_service block.
+    """
+    overrides = {}
+    for field in ("extra_service_args", "extra_environment"):
+        raw = item.get(field)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError(f"{prefix}.{field} must be a non-empty mapping")
+        for name, value in raw.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
+                raise ValueError(f"{prefix}.{field}.{name} is not a valid flag/variable name")
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise TypeError(f"{prefix}.{field}.{name} must be a scalar")
+            overrides.setdefault(field, {})[name] = value
+    return overrides
+
+
 def _instance_list(control, key, role, default_host):
     raw = control.get(key)
     if not isinstance(raw, list) or not raw:
@@ -150,6 +175,8 @@ def _instance_list(control, key, role, default_host):
             "http_server_port",
             "rpc_server_port",
             "container_instance",
+            "extra_service_args",
+            "extra_environment",
         }
         if unknown:
             raise ValueError(f"Unsupported {prefix} fields: {sorted(unknown)}")
@@ -160,6 +187,7 @@ def _instance_list(control, key, role, default_host):
         container = item.get("container_instance")
         if container is not None and (not isinstance(container, str) or not container):
             raise ValueError(f"{prefix}.container_instance must be a node instance name")
+        overrides = _instance_overrides(item, prefix)
         result.append(
             XllmServiceInstance(
                 name,
@@ -168,6 +196,8 @@ def _instance_list(control, key, role, default_host):
                 _service_port(item.get("http_server_port"), prefix + ".http_server_port"),
                 _service_port(item.get("rpc_server_port"), prefix + ".rpc_server_port"),
                 container,
+                extra_service_args=overrides.get("extra_service_args"),
+                extra_environment=overrides.get("extra_environment"),
             )
         )
     return result

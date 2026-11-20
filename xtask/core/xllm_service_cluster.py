@@ -150,7 +150,7 @@ class XllmServiceCluster:
         self.last_error = ""
         self._deadline = None
 
-    def _environment(self):
+    def _environment(self, item=None):
         hosts = list(
             dict.fromkeys(
                 ["localhost", "127.0.0.1", self.topology.etcd_host]
@@ -163,8 +163,13 @@ class XllmServiceCluster:
             env["ENABLE_DECODE_RESPONSE_TO_SERVICE"] = "true"
         # extra_environment are scoped to this YAML; they apply to every
         # Coordinator/Router process and take precedence over the reserved
-        # keys above. Values are shell-quoted by start().
-        for name, value in (self.control.get("extra_environment") or {}).items():
+        # keys above. A member list entry's extra_environment overrides the
+        # same-named shared keys for that member only. Values are
+        # shell-quoted by start().
+        merged = dict(self.control.get("extra_environment") or {})
+        if item is not None and item.extra_environment:
+            merged.update(item.extra_environment)
+        for name, value in merged.items():
             if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                 raise ValueError(f"xllm_service.extra_environment.{name} is not a valid environment variable name")
             if isinstance(value, bool) or not isinstance(value, (int, float, str)):
@@ -186,8 +191,13 @@ class XllmServiceCluster:
             "--control_plane_shard_id=default",
             f"--tokenizer_path={self.task_config.get('model_path', '')}",
         ]
-        # extra_service_args are scoped to this YAML; omitted flags keep binary defaults.
-        for name, value in (self.control.get("extra_service_args") or {}).items():
+        # extra_service_args are scoped to this YAML; omitted flags keep binary
+        # defaults. A member list entry's extra_service_args overrides the
+        # same-named shared flags for that member only.
+        merged_args = dict(self.control.get("extra_service_args") or {})
+        if item.extra_service_args:
+            merged_args.update(item.extra_service_args)
+        for name, value in merged_args.items():
             if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
                 raise ValueError(f"xllm_service.extra_service_args.{name} is not a valid flag name")
             if isinstance(value, bool) or not isinstance(value, (int, float, str)):
@@ -228,7 +238,7 @@ class XllmServiceCluster:
         for attempt in range(self.config.startup_attempts):
             process.stop()
             try:
-                process.start(self._service_argv(item), self._environment())
+                process.start(self._service_argv(item), self._environment(item))
             except RuntimeError:
                 logging.warning("Service %s launch failed, attempt=%s", item.name, attempt + 1)
                 continue
