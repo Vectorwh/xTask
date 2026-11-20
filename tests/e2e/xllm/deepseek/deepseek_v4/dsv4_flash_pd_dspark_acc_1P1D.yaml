@@ -12,7 +12,7 @@ userid: 1048
 serving_wait_time: 10
 hccl_if_port: 43432
 progress_conn_port: 8773
-benchmark_timeout: 10800
+benchmark_timeout: 14400
 
 benchmark:
   benchmark_type: aisbench
@@ -37,6 +37,12 @@ benchmark:
     baseline: 88.89
     threshold: 0.05
     generation_kwargs: {temperature: 0, ignore_eos: false}
+    # xllm-service router 链路下客户端默认 ~80s 超时会掐断 decode 长排队的
+    # 请求（2026-11-20 实测排队最长 29 分钟，198 题只完成 16 题）。参照
+    # v41 用例设 3600s 单请求超时 + 2 次重试，恢复旧 pd_control 架构
+    # "排队即等待"的语义；198 题全量实测约 108 分钟，benchmark_timeout=14400。
+    request_timeout: 3600
+    request_retries: 2
 
 deployment:
   mode: pd_disaggregated
