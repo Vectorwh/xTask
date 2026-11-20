@@ -39,6 +39,14 @@ userid: 1048
 serving_wait_time: 30
 
 deployment:
+  xllm_service:
+    service_binary_profile: auto
+    host: 11.87.191.75
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
   dit:
     device_ids: [0, 1, 2, 3, 4, 5]
     # 每卡一个 xLLM 进程；端口按 rank 从 19000 连续自增（19000-19005），

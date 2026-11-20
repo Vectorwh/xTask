@@ -7,7 +7,7 @@ benchmark:
     batch_size: 6
     case_type: accuracy
     dataset_conf: textvqa_gen_base64
-    dataset_path: null
+    dataset_path:
     dump_eval_details: true
     dump_extract_rate: false
     enable_debug: false
@@ -41,17 +41,24 @@ served_model_name: Qwen2.5-VL-7B-Instruct
 userid: 1048
 serving_wait_time: 10
 deployment:
+  mode: service_routed
   master_host: 11.87.191.75
-  benchmark:
-    runner_instance: master-0
-    health_path: /health
-  instances:
-  - name: master-0
+  xllm_service:
+    service_binary_profile: auto
     host: 11.87.191.75
-    role: master
-    rank_start: 0
-    device_ids: [0, 1]
-    local_port: 8800
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
+  benchmark:
+    runner_instance: default-0-node-0
+    router_instance: router-0
+    health_path: /health
+  service_instances:
+  - name: default-0
+    group_master_host: 11.87.191.75
+    progress_conn_port: 9590
     serving_extensiable_param:
       max_memory_utilization: 0.85
       enable_chunked_prefill: true
@@ -64,3 +71,8 @@ deployment:
       enable_interlayer_addnorm: false
       enable_split_rmsnorm_rope: false
       limit_image_per_prompt: 8
+    nodes:
+    - name: default-0-node-0
+      host: 11.87.191.75
+      device_ids: [0, 1]
+      local_port: 8800

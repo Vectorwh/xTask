@@ -38,31 +38,43 @@ benchmark:
     # numbers belong to a different configuration and are not copied here.
     gates: []
 deployment:
+  mode: service_routed
   master_host: 11.87.191.75
+  xllm_service:
+    service_binary_profile: auto
+    host: 11.87.191.75
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
   benchmark:
-    runner_instance: master-0
+    runner_instance: default-0-node-0
+    router_instance: router-0
     health_path: /health
-  instances:
-    - name: master-0
+  service_instances:
+  - name: default-0
+    group_master_host: 11.87.191.75
+    progress_conn_port: 9590
+    serving_extensiable_param:
+      backend: vlm
+      task: generate
+      model_impl: python
+      tp_size: 2
+      dp_size: 1
+      use_ctc: true
+      enable_graph: true
+      enable_prefill_piecewise_graph: true
+      enable_graph_mode_decode_no_padding: true
+      enable_prefix_cache: false
+      enable_chunked_prefill: true
+      enable_schedule_overlap: false
+      max_seqs_per_batch: 16
+      speculative_algorithm: Suffix
+      num_speculative_tokens: 6
+      speculative_suffix_max_cached_requests: 0
+    nodes:
+    - name: default-0-node-0
       host: 11.87.191.75
-      role: master
-      rank_start: 0
       device_ids: [0, 1]
       local_port: 8018
-      serving_extensiable_param:
-        backend: vlm
-        task: generate
-        model_impl: python
-        tp_size: 2
-        dp_size: 1
-        use_ctc: true
-        enable_graph: true
-        enable_prefill_piecewise_graph: true
-        enable_graph_mode_decode_no_padding: true
-        enable_prefix_cache: false
-        enable_chunked_prefill: true
-        enable_schedule_overlap: false
-        max_seqs_per_batch: 16
-        speculative_algorithm: Suffix
-        num_speculative_tokens: 6
-        speculative_suffix_max_cached_requests: 0

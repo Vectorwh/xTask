@@ -17,7 +17,8 @@ benchmark:
     task: t2av
     scenario: text
     mode: generate
-    manifest: ${DEPENDENCE_PACKAGE_PATH}/datasets/joyai_video/joyai_video_prompts.jsonl
+    manifest: 
+      ${DEPENDENCE_PACKAGE_PATH}/datasets/joyai_video/joyai_video_prompts.jsonl
     generation:
       size: 512*288
       num_frames: 81
@@ -40,37 +41,24 @@ benchmark:
       enabled: false
     gates: []
 deployment:
+  mode: service_routed
   master_host: 11.87.191.75
-  benchmark:
-    runner_instance: master-0
-    health_path: /health
-  instances:
-  - name: master-0
+  xllm_service:
+    service_binary_profile: auto
     host: 11.87.191.75
-    role: master
-    rank_start: 0
-    device_ids:
-    - 0
-    - 1
-    - 2
-    - 3
-    - 4
-    - 5
-    - 6
-    - 7
-    - 8
-    - 9
-    - 10
-    - 11
-    - 12
-    - 13
-    - 14
-    - 15
-    local_port: 18024
-    serving_ready_timeout: 1800
-    # Probe HOST collectives only in this case; shared AIV templates stay unchanged.
-    startup_environment:
-    - export HCCL_OP_EXPANSION_MODE=HOST
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
+  benchmark:
+    runner_instance: default-0-node-0
+    router_instance: router-0
+    health_path: /health
+  service_instances:
+  - name: default-0
+    group_master_host: 11.87.191.75
+    progress_conn_port: 9590
     serving_extensiable_param:
       backend: dit
       model_id: JoyAI-Video
@@ -94,3 +82,24 @@ deployment:
       use_contiguous_input_buffer: false
       enable_shm: true
       output_shm_size: 1024
+    nodes:
+    - name: default-0-node-0
+      host: 11.87.191.75
+      device_ids:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+      - 8
+      - 9
+      - 10
+      - 11
+      - 12
+      - 13
+      - 14
+      - 15
+      local_port: 18024

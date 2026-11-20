@@ -12,34 +12,24 @@ benchmark_timeout: 14400
 hccl_if_port: 46100
 progress_conn_port: 19363
 deployment:
+  mode: service_routed
   master_host: 11.87.191.75
-  benchmark:
-    runner_instance: master-0
-    health_path: /health
-  instances:
-  - name: master-0
+  xllm_service:
+    service_binary_profile: auto
     host: 11.87.191.75
-    role: master
-    rank_start: 0
-    device_ids:
-    - 0
-    - 1
-    - 2
-    - 3
-    - 4
-    - 5
-    - 6
-    - 7
-    - 8
-    - 9
-    - 10
-    - 11
-    - 12
-    - 13
-    - 14
-    - 15
-    local_port: 18224
-    serving_ready_timeout: 1800
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
+  benchmark:
+    runner_instance: default-0-node-0
+    router_instance: router-0
+    health_path: /health
+  service_instances:
+  - name: default-0
+    group_master_host: 11.87.191.75
+    progress_conn_port: 9590
     serving_extensiable_param:
       backend: dit
       model_id: JoyAI-Video
@@ -64,8 +54,27 @@ deployment:
       enable_shm: true
       output_shm_size: 1024
       forward_execution_timeout_ms: 1800000
-    startup_environment:
-    - export HCCL_OP_EXPANSION_MODE=HOST
+    nodes:
+    - name: default-0-node-0
+      host: 11.87.191.75
+      device_ids:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+      - 8
+      - 9
+      - 10
+      - 11
+      - 12
+      - 13
+      - 14
+      - 15
+      local_port: 18224
 case_name: joyai_video_negative_calibrated
 metrics: acc
 benchmark:
@@ -74,7 +83,8 @@ benchmark:
     task: t2av
     scenario: cfg_pair
     mode: generate_and_evaluate
-    manifest: ${DEPENDENCE_PACKAGE_PATH}/datasets/joyai_video/joyai_video_negative_calibrated_v1.jsonl
+    manifest: 
+      ${DEPENDENCE_PACKAGE_PATH}/datasets/joyai_video/joyai_video_negative_calibrated_v1.jsonl
     generation:
       size: 512*288
       num_frames: 81
@@ -101,15 +111,18 @@ benchmark:
         backend: benchmark_semantics
         profile: xtask_negative_v1
         device: cpu
-        python_exec: ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/semantic_env/bin/python
+        python_exec: 
+          ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/semantic_env/bin/python
         vision:
-          model_path: ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/grounding-dino-tiny
+          model_path: 
+            ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/grounding-dino-tiny
           frames: 16
           max_side: 768
           box_threshold: 0.4
           text_threshold: 0.2
         audio:
-          model_path: ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/clap-htsat-unfused
+          model_path: 
+            ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/clap-htsat-unfused
           window_seconds: 5.0
           stride_seconds: 2.5
           similarity_min: 0.3
