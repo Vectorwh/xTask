@@ -161,6 +161,15 @@ class XllmServiceCluster:
         env = {"no_proxy": ",".join(hosts), "NO_PROXY": ",".join(hosts)}
         if self.config.output_subdir == "pd_control":
             env["ENABLE_DECODE_RESPONSE_TO_SERVICE"] = "true"
+        # extra_environment are scoped to this YAML; they apply to every
+        # Coordinator/Router process and take precedence over the reserved
+        # keys above. Values are shell-quoted by start().
+        for name, value in (self.control.get("extra_environment") or {}).items():
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"xllm_service.extra_environment.{name} is not a valid environment variable name")
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise TypeError(f"xllm_service.extra_environment.{name} must be a scalar")
+            env[name] = str(value)
         return env
 
     def _service_argv(self, item):

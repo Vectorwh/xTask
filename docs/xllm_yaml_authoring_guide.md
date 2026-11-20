@@ -1185,6 +1185,29 @@ deployment:
 新增参数首次在真机运行时建议先确认服务正常拉起。长输出用例配合客户端超时
 （`benchmark.acc.request_timeout`，见 AISBench 精度一节）可避免请求挂死。
 
+### Service 进程环境变量注入 `extra_environment`
+
+Coordinator/Router 进程的环境变量可通过 `deployment.xllm_service.extra_environment`
+按用例注入。每个键值对会 `export` 到本用例所有 Coordinator 和 Router 进程的运行环境中；
+适合开启 Service 的诊断开关（如 `MC_TE_METRIC=1`）等场景。注意引擎进程（PD 实例）的
+环境变量走 `serving_extensiable_param`/`startup_environment` 路径，与本节无关。
+
+```yaml
+deployment:
+  xllm_service:
+    extra_environment:
+      MC_TE_METRIC: 1
+      XLLM_TRACE_TAG: case-42
+```
+
+校验规则：
+
+- 变量名必须匹配 `[A-Za-z_][A-Za-z0-9_]*`（下划线或字母开头，后接字母/数字/下划线）。
+- 值必须是标量（int、float 或 str）；布尔、null、列表、字典都会被拒绝。
+- 注入值对 Coordinator 和 Router 统一生效；同名时覆盖 xTask 自动生成的保留键
+  （`no_proxy`/`NO_PROXY`/`ENABLE_DECODE_RESPONSE_TO_SERVICE`）。
+- 值在拼接 shell 时会被安全引号包裹，含空格或特殊字符不会破坏启动命令。
+
 ### 多个普通实例统一路由
 
 当目标是启动多个彼此独立的普通 xLLM 实例，并由一组 `xllm-service + etcd` 统一分发请求时，使用 `mode: service_routed`。不要使用普通 `instances`：普通 `instances` 的多个元素始终属于同一个分布式 xLLM 实例。
