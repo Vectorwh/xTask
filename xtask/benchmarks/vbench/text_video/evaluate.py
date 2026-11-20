@@ -42,6 +42,19 @@ def evaluate(directory: Path, records, settings):
     # dependencies and weights must be prepared explicitly, never mutate them
     # or access networks during performance/regression workflows.
     if settings["local"]:
+        # Rebuild the flat cache view on demand: the canonical asset tree
+        # keeps the weights under pretrained_models/ + clip/, so a fresh
+        # cache dir (or one on a new host) is materialized here instead of
+        # being hand-maintained. Idempotent; existing entries untouched.
+        try:
+            from xtask.benchmarks.vbench.defaults import (
+                ensure_cache_layout,
+                get_vbench_data_home,
+            )
+
+            ensure_cache_layout(CACHE_DIR, get_vbench_data_home())
+        except Exception as exc:  # pragma: no cover - provenance path only
+            print(f"[warn] VBench cache layout rebuild skipped: {exc}")
         cache = Path(CACHE_DIR)
         required = {
             "subject_consistency": ["dino_model/facebookresearch_dino_main", "dino_model/dino_vitbase16_pretrain.pth"],

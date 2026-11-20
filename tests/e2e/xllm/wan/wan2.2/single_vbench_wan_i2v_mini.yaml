@@ -19,7 +19,7 @@ benchmark:
   benchmark_type: vbench
   vbench:
     mode: generate_and_evaluate
-    full_info: ${DEPENDENCE_PACKAGE_PATH}/vbench_data/vbench2_i2v_mini_full_info.json
+    full_info: ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/Video/vbench2_beta_i2v/vbench2_i2v_mini_full_info.json
     resolution: 16-9
     name: wan2_2_xllm_mini
     check: true

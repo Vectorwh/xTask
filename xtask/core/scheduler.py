@@ -2200,6 +2200,30 @@ def _prepare_gedit_service_containers(context):
             state["gedit_service_runtimes"] = service_runtimes
             return
 
+        # Install the xllm wheel into the gedit service container, same as the
+        # standard runtime-deps step for normal cases.  The gedit startup
+        # script resolves the binary from the installed wheel first, so every
+        # container sees the same freshly built artifact from pkg/xllm.
+        timeout = int(state.get("serving_ready_timeout") or 1800)
+        download_cmd = _download_xllm_command(
+            install_service=False, task_config=task_config
+        )
+        logging.info(
+            "gedit service %s: preparing runtime deps (download_xllm)",
+            spec.name,
+        )
+        result = manager.exec_in_container(
+            container_config.container_name, download_cmd, timeout=timeout
+        )
+        if not result.success:
+            _fail_stage(
+                context,
+                f"gedit service {spec.name!r}: download_xllm failed: "
+                f"{result.stderr or result.stdout}",
+            )
+            state["gedit_service_runtimes"] = service_runtimes
+            return
+
         service_runtimes.append(
             {
                 "spec": spec,

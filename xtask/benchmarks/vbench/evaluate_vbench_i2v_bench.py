@@ -56,9 +56,21 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # 支持环境变量覆盖，便于在另一台机器复用（迁移说明见 MIGRATION.md）：
 #   VBENCH2_DATASETS -> 官方数据集根目录（其下含 vbench2_beta_i2v 子目录）
 #   AIS_THIRD_PARTY  -> ais_bench 适配版 vbench 代码所在 third_party 目录
+# VBENCH2_ROOT 直接解析到共享区实体层（Video/vbench2_beta_i2v，见
+# xtask/benchmarks/vbench/defaults.py）；官方 utils 的相对路径
+# （vbench2_beta_i2v/data/crop/...）要求 cwd 是该树的父目录，运行时
+# 会 chdir 过去。VBENCH2_DATASETS 保留 code_root 语义（sys.path 用）。
 VBENCH2_DATASETS = os.environ.get('VBENCH2_DATASETS',
                                   '/export/home/weinan5/wsd/VBench_stand/datasets')
-VBENCH2_ROOT = os.path.join(VBENCH2_DATASETS, 'vbench2_beta_i2v')
+VBENCH2_ROOT = os.environ.get('VBENCH2_ROOT', '')
+if not VBENCH2_ROOT or not os.path.isdir(VBENCH2_ROOT):
+    try:
+        from xtask.benchmarks.vbench.defaults import get_vbench_data_home
+
+        VBENCH2_ROOT = get_vbench_data_home()
+    except Exception:
+        VBENCH2_ROOT = os.path.join(VBENCH2_DATASETS, 'vbench2_beta_i2v')
+VBENCH2_ROOT_PARENT = os.path.dirname(VBENCH2_ROOT.rstrip('/'))
 AIS_THIRD_PARTY = os.environ.get('AIS_THIRD_PARTY',
                                  '/export/home/weinan5/wsd/VBench_stand/benchmark/ais_bench/third_party')
 # 评测依赖（dreamsim 及其闭包 open_clip/peft 等）已固化进 runner 镜像
@@ -89,7 +101,7 @@ def _resolve_data_home():
 
     ``VBENCH_DATA_HOME`` may be injected by the scheduler as the vbench2
     datasets root (``benchmark/vbench2``, for import paths) rather than the
-    vbench_data symlink — the two share the variable name but not the layout.
+    i2v asset subtree — the two share the variable name but not the layout.
     Probe candidates in order and return the first that holds the weights,
     or None when no shared data is available.
     """
@@ -102,7 +114,7 @@ def _resolve_data_home():
     if env_datasets:
         candidates.append(os.path.join(env_datasets, 'vbench2_beta_i2v'))
         candidates.append(env_datasets)
-    candidates.append('/xllm_test_060/vbench_data')
+    candidates.append('/xllm_test_060/mmm_bench/Video/vbench2_beta_i2v')
     candidates.append('/xllm_test_060/benchmark/vbench2/vbench2_beta_i2v')
     for c in candidates:
         if c and os.path.isdir(os.path.join(c, 'pretrained_models')):
@@ -115,62 +127,19 @@ def _ensure_cache_layout():
 
     The evaluation dimensions resolve their scoring models (CLIP/DINO/RAFT/
     AMT/aesthetic/dreamsim) through ``VBENCH_CACHE_DIR``.  The layout is a set
-    of symlinks into the shared ``vbench_data`` tree, so a fresh machine only
-    needs the shared data copied — this rebuilds whatever is missing instead
+    of symlinks into the canonical asset tree, so a fresh machine only needs
+    the canonical tree provisioned — this rebuilds whatever is missing instead
     of requiring a manual cache setup step.  Existing entries are left
     untouched (resume-safe).
     """
-    cache = VBENCH_CACHE_DIR
+    from xtask.benchmarks.vbench.defaults import ensure_cache_layout
+
     src = _resolve_data_home()
     if src is None:
         # 共享数据不在（路径未配置或未拷贝），保持现状并提示
         print('[warn] 未找到含 pretrained_models 的 VBench 共享数据，跳过 cache 布局重建')
         return
-
-    def _link(name, target):
-        dst = os.path.join(cache, name)
-        if os.path.lexists(dst):
-            return
-        if not os.path.exists(target):
-            return
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        os.symlink(target, dst)
-
-    pm = os.path.join(src, 'pretrained_models')
-    # ais_bench vbench 侧的模型目录
-    for model in ('aesthetic_model', 'amt_model', 'pyiqa_model', 'raft_model'):
-        _link(model, os.path.join(pm, model))
-    # CLIP
-    for weight in ('ViT-B-32.pt', 'ViT-L-14.pt'):
-        _link(os.path.join('clip_model', weight),
-              os.path.join(src, 'clip', weight))
-    # DINO（vbench 侧从 dino_model/ 直读）
-    _link(os.path.join('dino_model', 'dino_vitbase16_pretrain.pth'),
-          os.path.join(pm, 'torch', 'hub', 'checkpoints', 'dino_vitbase16_pretrain.pth'))
-    _link(os.path.join('dino_model', 'facebookresearch_dino_main'),
-          os.path.join(pm, 'torch', 'hub', 'facebookresearch_dino_main'))
-    # dreamsim（i2v 维度）
-    for weight in ('clip_vitb16_pretrain.pth.tar', 'dino_vitb16_pretrain.pth',
-                   'open_clip_vitb16_pretrain.pth.tar'):
-        _link(os.path.join('dreamsim_model', weight),
-              os.path.join(pm, 'dreamsim_model', weight))
-    _link(os.path.join('dreamsim_model', 'ensemble_lora'),
-          os.path.join(pm, 'dreamsim_model', 'ensemble_lora'))
-    # torch.hub（camera_motion 的 co-tracker、TORCH_HOME 指向这里）
-    _link(os.path.join('torch', 'hub', 'facebookresearch_co-tracker_main'),
-          os.path.join(pm, 'torch', 'hub', 'facebookresearch_co-tracker_main'))
-    _link(os.path.join('torch', 'hub', 'facebookresearch_dino_main'),
-          os.path.join(pm, 'torch', 'hub', 'facebookresearch_dino_main'))
-    # torch.hub checkpoints：co-tracker 的 hubconf 以 pretrained=True 调
-    # load_state_dict_from_url(_COTRACKER2_URL)，先查 TORCH_HOME/hub/checkpoints/
-    # —— 缓存缺失时会转网络下载，离线环境直接挂死（SSL 握手无超时）。
-    _link(os.path.join('torch', 'hub', 'checkpoints'),
-          os.path.join(pm, 'torch', 'hub', 'checkpoints'))
-    trusted = os.path.join(cache, 'torch', 'hub', 'trusted_list')
-    if not os.path.exists(trusted):
-        os.makedirs(os.path.dirname(trusted), exist_ok=True)
-        with open(trusted, 'w', encoding='utf-8') as f:
-            f.write('facebookresearch_co-tracker\nfacebookresearch_dino\n')
+    ensure_cache_layout(VBENCH_CACHE_DIR, src)
 
 
 def _setup_paths():
@@ -178,7 +147,8 @@ def _setup_paths():
     scripts/constant.py（总分常数）可被 import。"""
     # PYTHONPATH 只在解释器启动时读取，对本进程无效 —— 必须直接改 sys.path。
     paths = list(sys.path)
-    for p in (AIS_THIRD_PARTY, VBENCH2_DATASETS, os.path.join(VBENCH2_ROOT, 'scripts')):
+    for p in (AIS_THIRD_PARTY, VBENCH2_DATASETS,
+              os.path.join(VBENCH2_ROOT, 'scripts'), VBENCH2_ROOT_PARENT):
         if p not in paths:
             paths.insert(0, p)
     sys.path = paths
@@ -514,9 +484,10 @@ def main():
     print(f'eval device: {device_str}')
 
     # i2v 维度的官方 load 函数用相对路径（vbench2_beta_i2v/data/crop/...），
-    # DreamSim 权重也缓存在 datasets/models/ 下 —— 统一 chdir 到 datasets。
-    os.chdir(VBENCH2_DATASETS)
-    print(f'cwd -> {VBENCH2_DATASETS}（官方 load_i2v_dimension_info 相对路径要求）')
+    # DreamSim 权重也缓存在 datasets/models/ 下 —— 统一 chdir 到实体层父目录
+    # （官方相对路径基于 vbench2_beta_i2v 位于 cwd 之下）。
+    os.chdir(VBENCH2_ROOT_PARENT)
+    print(f'cwd -> {VBENCH2_ROOT_PARENT}（官方 load_i2v_dimension_info 相对路径要求）')
 
     # 预检：各维度可评视频数
     full_info = json.load(open(full_info_path, encoding='utf-8'))

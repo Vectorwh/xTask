@@ -50,11 +50,11 @@ class VBenchSchedulerTests(unittest.TestCase):
                 SimpleNamespace(executor=object()),
                 {"runtime": "docker", "network_mode": "host"},
             )
-        # The default cache lives under the real project's outputs/vbench_data,
-        # so assert on the suffix instead of the machine-specific project root.
+        # The default cache is the on-demand symlink view rooted inside the
+        # canonical asset tree; ensure_cache_layout() materializes it.
         self.assertTrue(
             config.environment["VBENCH_CACHE_DIR"].endswith(
-                "/outputs/vbench_data/cache"
+                "/mmm_bench/Video/vbench2_beta_i2v/vbench_cache"
             )
         )
         # torch.hub-backed dimensions (camera_motion, dino) resolve through

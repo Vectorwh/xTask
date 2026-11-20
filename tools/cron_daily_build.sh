@@ -119,6 +119,10 @@ run_test() {
     return 1
   fi
 
+  # 资产体检（只报告不阻断）：检查 ASR/vbench 等共享预置资产是否就位，
+  # 缺失时打印受影响用例，避免跑到一半才挂。详见 tools/preflight_assets.py。
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/preflight_assets.py" || true
+
   # 单组执行辅助函数
   run_one_case() {
     local args="$1"

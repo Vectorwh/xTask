@@ -44,9 +44,29 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 # Default host-side directory of the xllm binary used by gedit services.
-# The YAML may override per-service with ``xllm_binary``.
+# The YAML may override per-service with ``xllm_binary``.  Empty default
+# means "resolve at container runtime from the pip-installed xllm wheel"
+# (site-packages/xllm/xllm), which is the same artifact every normal case
+# installs via tools/download_xllm.sh; the container prep sequence runs
+# that script before the gedit startup scripts.
 def _default_xllm_binary() -> str:
     return os.path.join(os.getcwd(), "tmp", "gedit_svc", "xllm")
+
+# Shell snippet resolving the wheel-installed binary at container runtime.
+# Falls back to the legacy workspace copy when the wheel is not installed
+# (environments that intentionally run gedit without download_xllm.sh).
+_WHEEL_BINARY_RESOLVER = (
+    'XLLM_BIN="$(python3 -c \'import xllm, pathlib; '
+    'print(pathlib.Path(xllm.__file__).parent / "xllm")\' 2>/dev/null || true)"\n'
+    'if [ -z "$XLLM_BIN" ] || [ ! -x "$XLLM_BIN" ]; then\n'
+    '  XLLM_BIN="{legacy}"\n'
+    'fi\n'
+    'if [ -z "$XLLM_BIN" ] || [ ! -x "$XLLM_BIN" ]; then\n'
+    '  echo "gedit {name}: xllm binary not found (wheel not installed and '
+    '{legacy} missing); run tools/download_xllm.sh first" >&2\n'
+    '  exit 1\n'
+    'fi'
+)
 
 # Extra bind mounts the gedit containers need.  Without these the NPU
 # runtime fails aclInit with error 507008 / core dump (see case notes).
@@ -239,13 +259,15 @@ def build_gedit_service_specs(
       * serving_extensiable_param: per-service dict passed as xLLM flags.
       * startup_environment: per-service shell export lines.
       * health_path: default ``/health``.
-      * xllm_binary: default ``tmp/gedit_svc/xllm`` in the workspace.
+      * xllm_binary: unset by default; the startup script resolves the
+        pip-installed wheel binary (site-packages/xllm/xllm) with the
+        legacy ``tmp/gedit_svc/xllm`` workspace copy as fallback.  An
+        explicit value pins a fixed binary path.
     """
     services = _services_block(task_config)
     if not services:
         raise ValueError("deployment.encoder/dit/judge is empty")
 
-    default_binary = _default_xllm_binary()
     task_model_path = str(task_config.get("model_path") or "")
 
     # Validate no unknown service roles sneak in (encoder/dit/judge or custom
@@ -353,7 +375,10 @@ def build_gedit_service_specs(
             env_lines = _as_str_list(env_cfg)
 
         # ---- xllm binary ----
-        xllm_binary = str(raw_cfg.get("xllm_binary") or default_binary)
+        # Unset means "resolve from the pip-installed wheel at container
+        # runtime"; an explicit value pins a fixed binary path (legacy envs
+        # that still rely on tmp/gedit_svc/xllm can set it there).
+        xllm_binary = str(raw_cfg.get("xllm_binary") or "").strip()
 
         # ---- extra volumes ----
         extra_volumes_cfg = raw_cfg.get("volumes")
@@ -440,7 +465,6 @@ def render_gedit_startup_script(
 
     os.makedirs(os.path.join(output_dir, "log"), exist_ok=True)
 
-    binary = path_mapping_in_container(str(spec.xllm_binary))
     model_path = path_mapping_in_container(str(spec.model_path))
     ext_flags = []
     for key, value in spec.serving_extensiable_param.items():
@@ -468,7 +492,25 @@ def render_gedit_startup_script(
     lines.append(f'MODEL_PATH="{model_path}"')
     lines.append(f'NNODES={len(spec.device_ids)}')
     lines.append(f'MASTER_NODE_ADDR="{spec.master_node_addr}"')
-    lines.append(f'XLLM_BIN="{binary}"')
+    if spec.xllm_binary:
+        # Explicit ``xllm_binary`` in the case yaml: fixed path, fail fast
+        # if it is missing.
+        binary = path_mapping_in_container(str(spec.xllm_binary))
+        lines.append(f'XLLM_BIN="{binary}"')
+        lines.append(
+            'if [ ! -x "$XLLM_BIN" ]; then\n'
+            f'  echo "gedit {spec.name}: xllm binary not found: $XLLM_BIN" >&2\n'
+            "  exit 1\n"
+            "fi"
+        )
+    else:
+        # Default: resolve from the pip-installed wheel first (same artifact
+        # every normal case installs via download_xllm.sh), fall back to the
+        # legacy workspace copy.
+        legacy = path_mapping_in_container(_default_xllm_binary())
+        lines.append(
+            _WHEEL_BINARY_RESOLVER.format(legacy=legacy, name=spec.name)
+        )
     lines.append('LOG_DIR="log"')
     lines.append("mkdir -p $LOG_DIR")
 

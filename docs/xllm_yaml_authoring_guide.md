@@ -2429,14 +2429,14 @@ checks:
     backend: benchmark_semantics
     profile: xtask_negative_v1
     device: cpu
-    python_exec: /export/home/models/xllm_test_060/joyai_video_benchmark/semantic_env/bin/python
+    python_exec: /export/home/models/xllm_test_060/mmm_bench/joyai_video_benchmark/semantic_env/bin/python
     vision:
-      model_path: /export/home/models/xllm_test_060/joyai_video_benchmark/grounding-dino-tiny
+      model_path: /export/home/models/xllm_test_060/mmm_bench/joyai_video_benchmark/grounding-dino-tiny
       frames: 16
       box_threshold: 0.4
       text_threshold: 0.3
     audio:
-      model_path: /export/home/models/xllm_test_060/joyai_video_benchmark/clap-htsat-unfused
+      model_path: /export/home/models/xllm_test_060/mmm_bench/joyai_video_benchmark/clap-htsat-unfused
       window_seconds: 5.0
       stride_seconds: 2.5
       similarity_min: 0.15
@@ -2486,7 +2486,7 @@ Excel 展示 `video.negative_control.*` 与 assessment，基线/不充分证据�
 
 #### 已准备资源与校准子集（2026-11-10，示例55）
 
-用户指定的资源根目录：`/export/home/models/xllm_test_060/joyai_video_benchmark/`。
+用户指定的资源根目录：`/export/home/models/xllm_test_060/mmm_bench/joyai_video_benchmark/`。
 它与旧VBench数据/缓存分开，且是当前镜像的独立Python3.11 venv，不继承
 system site packages、不安装torch_npu。现有绝对model目录挂载已覆盖该路径，
 不改全局dependence root，不把本目录软链替换原`vbench_data`。

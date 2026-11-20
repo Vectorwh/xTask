@@ -25,13 +25,32 @@ def generate_asr_script(
     inputs.mkdir(parents=True, exist_ok=True)
     # Keep the dataset and client runner-local.  Existing case-output sync
     # transports these archives without shipping them to every service worker.
-    for name, default, target in (
-        ("infer_archive", project / "asr_doc/infer.zip", "infer.zip"),
-        ("dataset_archive", project / "asr_doc/data.zip", "data.zip"),
+    # The archives live on the shared models mount (xllm_test_060), which is
+    # bind-mounted into every container, split by role:
+    #   datasets/joyai_asr/data.zip  (audio dataset)
+    #   mmm_bench/joyai_asr/infer.zip (WER scoring tools)
+    # the workspace asr_doc/ copy is a legacy fallback kept for environments
+    # not yet provisioned with the shared paths.
+    shared_root = Path("/export/home/models/xllm_test_060")
+    for name, shared_dir, target in (
+        ("infer_archive", shared_root / "mmm_bench" / "joyai_asr", "infer.zip"),
+        ("dataset_archive", shared_root / "datasets" / "joyai_asr", "data.zip"),
     ):
-        source = Path(config.get(name) or default).expanduser().resolve()
-        if not source.is_file():
-            raise FileNotFoundError(f"ASR {name} not found: {source}")
+        configured = config.get(name)
+        candidates = (
+            [Path(str(configured)).expanduser()] if configured
+            else [shared_dir / target, project / "asr_doc" / target]
+        )
+        source = None
+        for candidate in candidates:
+            if candidate.is_file():
+                source = candidate.resolve()
+                break
+        if source is None:
+            raise FileNotFoundError(
+                f"ASR {name} not found in {[str(c) for c in candidates]}; "
+                f"provision the shared dir {shared_dir} or set '{name}' in the case yaml"
+            )
         destination = inputs / target
         if source != destination:
             shutil.copy2(source, destination)

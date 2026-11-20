@@ -3,14 +3,18 @@
 Case YAMLs may omit the ``benchmark.vbench`` path fields; the defaults below
 define one stable layout:
 
-- Shared dataset inputs, prepared once and read-only for all cases.  The
+- One canonical asset tree, provisioned once per host and read-only for all
+  cases (both WAN I2V and JoyAI text-video consume it).  The
   ``/export/home/models/`` mount exists in every runner container, so host
   and container address these paths identically:
-  ``<DEPENDENCE_PACKAGE_PATH>/vbench_data/full_info.json``
-  ``<DEPENDENCE_PACKAGE_PATH>/vbench_data/data/``
-- Project-local cache, inside the xTask project so the workspace mount
-  exposes it as ``/workspace/outputs/vbench_data/cache`` in the runner:
-  ``<project>/outputs/vbench_data/cache``
+  ``<DEPENDENCE_PACKAGE_PATH>/mmm_bench/Video/vbench2_beta_i2v``
+  └─ full_info.json + data/          (I2V prompts & reference images)
+  └─ clip/ + pretrained_models/     (offline scoring-model weights)
+  The directory names are stable interfaces — never rename them (a rename
+  broke every vbench case once when a snapshot directory was moved).
+- The per-run scoring-model cache (``VBENCH_CACHE_DIR``) is a symlink view
+  over the canonical tree; ``ensure_cache_layout()`` rebuilds it on demand
+  so no host needs a hand-maintained link farm.
 - The evaluation script is framework source code, versioned alongside the
   generation driver.  It lives next to ``run_i2v.py`` and reaches the
   runner through the same workspace mount:
@@ -38,12 +42,19 @@ def _dependence_package_path() -> str:
 
 
 def get_vbench_data_home() -> str:
-    """Read-only dataset home shared by every VBench case on this host."""
-    return _dependence_package_path() + "/vbench_data"
+    """Canonical asset tree shared by every VBench case on this host.
+
+    ``Video/vbench2_beta_i2v`` is the single real copy of the I2V dataset
+    (full_info + reference images) and the scoring-model weights (clip/ +
+    pretrained_models/).  Both WAN I2V and JoyAI video cases consume this
+    one tree; no per-case or per-workspace copies are maintained.  The
+    directory name is a stable interface — do not rename.
+    """
+    return _dependence_package_path() + "/mmm_bench/Video/vbench2_beta_i2v"
 
 
 def get_default_full_info() -> str:
-    """Full-info manifest inside the shared dataset home."""
+    """Full-info manifest inside the shared asset tree."""
     return get_vbench_data_home() + "/full_info.json"
 
 
@@ -62,13 +73,91 @@ def _project_root() -> Path:
 
 
 def default_cache_dir() -> str:
-    """Shared VBench cache directory inside the xTask project."""
-    return str(_project_root() / "outputs" / "vbench_data" / "cache")
+    """Scoring-model cache root, resolved without hand-maintained symlinks.
+
+    The canonical asset tree (``Video/vbench2_beta_i2v``) carries the
+    weights under ``pretrained_models/`` plus ``clip/``.  Rather than
+    pointing at any hand-built link view, this returns a view directory
+    rooted inside the canonical tree; the evaluation drivers call
+    ``ensure_cache_layout()`` to materialize it as a symlink view on first
+    use (idempotent), so the only thing that must exist on the host is the
+    canonical tree itself.
+    """
+    return _dependence_package_path() + "/mmm_bench/Video/vbench2_beta_i2v/vbench_cache"
 
 
 def default_evaluation_script() -> str:
     """Framework-owned evaluation script, versioned with the source tree."""
     return str(_module_dir() / "evaluate_vbench_i2v_bench.py")
+
+
+def ensure_cache_layout(cache_dir: str, data_home: str) -> None:
+    """Idempotently materialize the VBench scoring-model cache layout.
+
+    Both the WAN I2V evaluation driver and the JoyAI text-video evaluation
+    (via the shared ``vbench`` package) resolve their scoring models through
+    ``VBENCH_CACHE_DIR`` with a flat layout (``clip_model/``, ``dino_model/``,
+    ...).  The canonical asset tree stores them under ``pretrained_models/``
+    and ``clip/`` instead, so the cache is a symlink view built on demand.
+    Only missing entries are created (resume-safe); existing entries —
+    including any a case yaml deliberately pinned — are left untouched.
+    """
+    if not data_home or not os.path.isdir(os.path.join(data_home, "pretrained_models")):
+        return
+
+    cache = cache_dir
+
+    def _link(name, target):
+        dst = os.path.join(cache, name)
+        if os.path.lexists(dst):
+            return
+        if not os.path.exists(target):
+            return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.symlink(target, dst)
+
+    pm = os.path.join(data_home, "pretrained_models")
+    # ais_bench vbench-side model directories
+    for model in ("aesthetic_model", "amt_model", "pyiqa_model", "raft_model"):
+        _link(model, os.path.join(pm, model))
+    # CLIP
+    for weight in ("ViT-B-32.pt", "ViT-L-14.pt"):
+        _link(os.path.join("clip_model", weight), os.path.join(data_home, "clip", weight))
+    # DINO (vbench side reads from dino_model/ directly)
+    _link(
+        os.path.join("dino_model", "dino_vitbase16_pretrain.pth"),
+        os.path.join(pm, "torch", "hub", "checkpoints", "dino_vitbase16_pretrain.pth"),
+    )
+    _link(
+        os.path.join("dino_model", "facebookresearch_dino_main"),
+        os.path.join(pm, "torch", "hub", "facebookresearch_dino_main"),
+    )
+    # dreamsim (i2v dimensions)
+    for weight in (
+        "clip_vitb16_pretrain.pth.tar",
+        "dino_vitb16_pretrain.pth",
+        "open_clip_vitb16_pretrain.pth.tar",
+    ):
+        _link(os.path.join("dreamsim_model", weight), os.path.join(pm, "dreamsim_model", weight))
+    _link(os.path.join("dreamsim_model", "ensemble_lora"), os.path.join(pm, "dreamsim_model", "ensemble_lora"))
+    # torch.hub (camera_motion's co-tracker; TORCH_HOME points here)
+    _link(
+        os.path.join("torch", "hub", "facebookresearch_co-tracker_main"),
+        os.path.join(pm, "torch", "hub", "facebookresearch_co-tracker_main"),
+    )
+    _link(
+        os.path.join("torch", "hub", "facebookresearch_dino_main"),
+        os.path.join(pm, "torch", "hub", "facebookresearch_dino_main"),
+    )
+    # torch.hub checkpoints: the co-tracker hubconf calls
+    # load_state_dict_from_url(pretrained=True); without a cached copy it
+    # would try a network download and hang offline environments.
+    _link(os.path.join("torch", "hub", "checkpoints"), os.path.join(pm, "torch", "hub", "checkpoints"))
+    trusted = os.path.join(cache, "torch", "hub", "trusted_list")
+    if not os.path.exists(trusted):
+        os.makedirs(os.path.dirname(trusted), exist_ok=True)
+        with open(trusted, "w", encoding="utf-8") as handle:
+            handle.write("facebookresearch_co-tracker\nfacebookresearch_dino\n")
 
 
 # ---------------------------------------------------------------------------

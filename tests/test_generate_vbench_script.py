@@ -84,6 +84,12 @@ class VBenchScriptTests(unittest.TestCase):
 
         expected_full_info = get_default_full_info()
         expected_image_root = get_default_image_root()
+        # The default cache is the on-demand symlink view rooted inside the
+        # canonical asset tree; the evaluation driver materializes it.
+        from xtask.benchmarks.vbench.defaults import default_cache_dir
+
+        expected_cache_dir = default_cache_dir()
+        self.assertTrue(expected_cache_dir.endswith("/vbench_cache"))
         with tempfile.TemporaryDirectory() as tmp, mock.patch(
             "xtask.benchmarks.vbench.generate_vbench_script.path_mapping_in_container",
             side_effect=lambda value: value,
@@ -94,7 +100,7 @@ class VBenchScriptTests(unittest.TestCase):
         self.assertIn(f"VBench image_root 不存在: {expected_image_root}", script)
         # path_mapping_in_container is mocked to identity, so the shared
         # project paths appear with their host-side suffixes.
-        self.assertRegex(script, r"VBENCH_CACHE_DIR=\S*/outputs/vbench_data/cache\b")
+        self.assertIn(f"VBENCH_CACHE_DIR={expected_cache_dir}", script)
         self.assertRegex(
             script,
             r"\S*/xtask/benchmarks/vbench/evaluate_vbench_i2v_bench\.py\b",

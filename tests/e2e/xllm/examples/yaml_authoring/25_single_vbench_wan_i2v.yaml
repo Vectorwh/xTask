@@ -9,7 +9,7 @@ communication_backend: hccl
 userid: 1048
 serving_wait_time: 30
 
-# VBench 数据集提前准备到共享路径 /export/home/models/xllm_test_060/vbench_data/
+# VBench 数据集提前准备到共享路径 /export/home/models/xllm_test_060/mmm_bench/Video/vbench2_beta_i2v/
 # （full_info.json + data/ 图片）；评测脚本是框架源码
 # xtask/benchmarks/vbench/evaluate_vbench_i2v_bench.py（随仓库版本化）。
 # 以下路径字段全部可省略，框架会自动使用这些默认共享路径。

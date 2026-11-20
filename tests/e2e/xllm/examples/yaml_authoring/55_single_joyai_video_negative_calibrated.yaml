@@ -101,15 +101,15 @@ benchmark:
         backend: benchmark_semantics
         profile: xtask_negative_v1
         device: cpu
-        python_exec: ${DEPENDENCE_PACKAGE_PATH}/joyai_video_benchmark/semantic_env/bin/python
+        python_exec: ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/semantic_env/bin/python
         vision:
-          model_path: ${DEPENDENCE_PACKAGE_PATH}/joyai_video_benchmark/grounding-dino-tiny
+          model_path: ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/grounding-dino-tiny
           frames: 16
           max_side: 768
           box_threshold: 0.4
           text_threshold: 0.2
         audio:
-          model_path: ${DEPENDENCE_PACKAGE_PATH}/joyai_video_benchmark/clap-htsat-unfused
+          model_path: ${DEPENDENCE_PACKAGE_PATH}/mmm_bench/joyai_video_benchmark/clap-htsat-unfused
           window_seconds: 5.0
           stride_seconds: 2.5
           similarity_min: 0.3
