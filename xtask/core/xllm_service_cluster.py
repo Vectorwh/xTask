@@ -97,6 +97,15 @@ class ManagedServiceProcess:
         self.started = False
 
 
+def _host_uid() -> int:
+    """Return the invoking host identity used to restore mounted artifacts."""
+    return os.getuid()
+
+
+def _host_gid() -> int:
+    return os.getgid()
+
+
 class XllmServiceCluster:
     """Select legacy single-process or split-role flow once per case run."""
 
@@ -474,12 +483,47 @@ class XllmServiceCluster:
         if errors:
             raise RuntimeError("; ".join(errors))
 
+    def _restore_owned_artifact_ownership(self, process):
+        """Restore the mounted owned tree to the host identity after shutdown.
+
+        etcd writes its ``data`` directory as the container's root user. The
+        directory is intentionally kept for post-mortem inspection, so return
+        it (and the small ownership record tree) to the invoking host user.
+        Scope this strictly to one run's root: never chown another case.
+        """
+        uid, gid = _host_uid(), _host_gid()
+        if uid == 0 and gid == 0:
+            return
+        script = (
+            "import pathlib,shutil;"
+            f"root=pathlib.Path({self.root!r});"
+            "shutil.chown(root,"
+            f"{uid!r},{gid!r});"
+            "[(shutil.chown(path,"
+            f"{uid!r},{gid!r}),"
+            "path.chmod(path.stat().st_mode | 0o400))"
+            " for path in root.rglob('*')]"
+        )
+        result = process.execute(
+            "python3 -c " + shlex.quote(script),
+            timeout=30,
+        )
+        if not result.success:
+            logging.warning(
+                "Could not restore xLLM Service artifact ownership on %s: %s",
+                process.runtime.plan.instance_name,
+                result.stderr or result.stdout,
+            )
+
     def stop_etcd(self):
         """Only this cluster's fenced etcd child is owned by xTask."""
         if self.legacy:
             self.legacy.stop()
-        else:
+            return
+        try:
             self.etcd.stop(grace=self.shutdown_grace)
+        finally:
+            self._restore_owned_artifact_ownership(self.etcd)
 
     def stop(self):
         errors = []

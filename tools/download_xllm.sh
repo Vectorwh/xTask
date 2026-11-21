@@ -255,8 +255,17 @@ if { [ "$XLLM_PACK_LAYOUT" = release-v1 ] || ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/
 
     # xLLM 二进制、算子库等从pack目录中获取
     # cp /workspace/pkg/xllm/xllm /usr/local/bin/
-    rm -rf /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/*
-    yes | cp -rf "$XLLM_VENDORS_DIR"/* /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/
+    # 只清理 vendors 下非挂载点的条目：gedit 自服务容器会把宿主 vendors 的
+    # 子目录（custom_xllm_math）直接 bind mount 到该路径，rm 通配符命中挂载
+    # 点时 Device busy 使 set -e 提前退出（2026-11-21 gedit 首次走 wheel 安装
+    # 链路时踩中）。逐条目判断：挂载点跳过（cp 随后用同一份文件覆盖，结果
+    # 等价），其余照删。
+    VENDORS_TARGET="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors"
+    for entry in "$VENDORS_TARGET"/*; do
+        [ -e "$entry" ] || continue
+        mountpoint -q "$entry" || rm -rf "$entry"
+    done
+    yes | cp -rf "$XLLM_VENDORS_DIR"/* "$VENDORS_TARGET"/
 
     # 使用同一个 Python 完成安装和路径查询，避免 pip/python3 指向不同环境。
     if ! XLLM_PYTHON=$(command -v python3); then

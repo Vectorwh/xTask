@@ -422,6 +422,42 @@ class ClusterTests(unittest.TestCase):
             cluster.stop()
         self.assertEqual(cluster.etcd.stop.call_count, 2)
 
+    def test_stop_etcd_restores_owned_root_for_host_user(self):
+        cluster = self.make_cluster()
+        cluster.etcd.stop = mock.Mock()
+        commands = []
+
+        def execute(command, timeout=30):
+            commands.append(command)
+            return success()
+
+        with mock.patch.object(cluster.etcd, "execute", side_effect=execute):
+            cluster.stop_etcd()
+        self.assertEqual(len(commands), 1)
+        self.assertIn(repr(cluster.root), commands[0])
+        self.assertIn(f"{os.getuid()!r},{os.getgid()!r}", commands[0])
+
+    def test_stop_etcd_still_restores_ownership_after_stop_failure(self):
+        cluster = self.make_cluster()
+        cluster.etcd.stop = mock.Mock(side_effect=RuntimeError("etcd-stop"))
+        execute = mock.Mock(return_value=success())
+        with mock.patch.object(cluster.etcd, "execute", autospec=True, side_effect=execute):
+            with self.assertRaisesRegex(RuntimeError, "etcd-stop"):
+                cluster.stop_etcd()
+        self.assertEqual(execute.call_count, 1)
+
+    def test_stop_etcd_ownership_failure_is_warning_not_cleanup_failure(self):
+        cluster = self.make_cluster()
+        cluster.etcd.stop = mock.Mock()
+        execute = mock.Mock(
+            return_value=SimpleNamespace(success=False, stdout="", stderr="permission denied")
+        )
+        with mock.patch.object(cluster.etcd, "execute", side_effect=execute), self.assertLogs(
+            level="WARNING"
+        ) as logs:
+            cluster.stop_etcd()
+        self.assertIn("Could not restore xLLM Service artifact ownership", "\n".join(logs.output))
+
     def test_logs_are_per_trial_and_do_not_overwrite_previous_results(self):
         with tempfile.TemporaryDirectory() as root:
             cluster = self.make_cluster()
