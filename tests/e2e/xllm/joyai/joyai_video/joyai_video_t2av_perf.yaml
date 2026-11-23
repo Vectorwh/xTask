@@ -21,6 +21,11 @@ deployment:
     http_server_port: 38888
     rpc_server_port: 28889
     coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
+    extra_service_args:
+      # The diffusers model keeps the Qwen2 fast tokenizer under tokenizer/,
+      # while xllm-service looks for tokenizer.json at --tokenizer_path root.
+      # Explicitly point the Coordinator/Router to that directory.
+      tokenizer_path: /export/home/models/joyo_v2_diffusers_stage3p5_it526400/tokenizer
   benchmark:
     runner_instance: default-0-node-0
     router_instance: router-0

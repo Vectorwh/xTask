@@ -13,7 +13,8 @@ def cluster(control):
 
 
 ITEM = SimpleNamespace(host="127.0.0.1", http_server_port=38888,
-                       rpc_server_port=38889, role="ROUTER")
+                       rpc_server_port=38889, role="ROUTER",
+                       extra_service_args=None)
 
 
 def test_unconfigured_cases_keep_existing_arguments():
@@ -37,6 +38,16 @@ def test_new_flag_passes_without_code_change():
     argv = cluster({"extra_service_args": {"some_new_flag": 123, "str_flag": "abc"}})._service_argv(ITEM)
     assert "--some_new_flag=123" in argv
     assert "--str_flag=abc" in argv
+
+
+def test_tokenizer_path_override_is_appended_after_default():
+    override = "/export/home/models/joyo_v2_diffusers_stage3p5_it526400/tokenizer"
+    argv = cluster({"extra_service_args": {"tokenizer_path": override}})._service_argv(ITEM)
+    # gflags accepts a repeated flag and keeps the last value.
+    assert argv.count(f"--tokenizer_path={override}") == 1
+    assert argv.index(f"--tokenizer_path={override}") > argv.index(
+        "--tokenizer_path=/models/test"
+    )
 
 
 @pytest.mark.parametrize("name", ["with-dash", "with space", "9leading", "", "--inject=1"])
