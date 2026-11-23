@@ -9,6 +9,7 @@ dataset_path: ''
 communication_backend: hccl
 userid: 1048
 serving_wait_time: 10
+serving_ready_timeout: 600
 
 # Converted from start_best_python_tp2ep2_h_all.sh (Qwen3.5-35B-A3B BF16,
 # Python model_impl TP2EP2, h_matmul_all variant, 2026-11-13 EvalScope
@@ -44,17 +45,24 @@ benchmark:
       ignore_eos: true
 
 deployment:
+  mode: service_routed
   master_host: 127.0.0.1
-  benchmark:
-    runner_instance: master-0
-    health_path: /health
-  instances:
-  - name: master-0
+  xllm_service:
+    service_binary_profile: auto
     host: 127.0.0.1
-    role: master
-    rank_start: 0
-    device_ids: [0, 1]
-    local_port: 8800
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # aligned with PD cases: etcd 22389/22380, coordinator 28888/28889, router 38888/38889
+  benchmark:
+    runner_instance: default-0-node-0
+    router_instance: router-0
+    health_path: /health
+  service_instances:
+  - name: default-0
+    group_master_host: 127.0.0.1
+    progress_conn_port: 9590
     serving_extensiable_param:
       backend: llm
       model_id: master-agent-v1
@@ -90,3 +98,9 @@ deployment:
       model_impl: python
       python_model_path: /export/home/ext.wanghao231/xllm-012/build/lib.linux-aarch64-cpython-312
       enable_online_profile: true
+
+    nodes:
+    - name: default-0-node-0
+      host: 127.0.0.1
+      device_ids: [8, 9]
+      local_port: 8800
