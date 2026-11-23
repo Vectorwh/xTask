@@ -141,6 +141,22 @@ class DownloadXllmScriptTests(unittest.TestCase):
         self.assertIn('跳过额外 xLLM 运行时库安装', self.script)
         self.assertIn('return 0', self.script)
 
+    def test_runtime_lib_install_rebuilds_soname_symlinks_before_ldconfig(self):
+        # ldconfig requires /usr/lib64 SONAME paths to be symlinks; archived
+        # libs are dereferenced regular files, so the installer must restore
+        # the SONAME symlink structure or fail (affects image-edit cases).
+        self.assertIn('libxxhash.so.0 libasio.so liburing.so.2', self.script)
+        for token in (
+            '/usr/lib64/${lib_name}.xllm',
+            'ln -sfn "${lib_name}.xllm" "/usr/lib64/$lib_name"',
+            'if [ "$lib_name" = "libasio.so" ]; then',
+        ):
+            self.assertIn(token, self.script)
+        # SONAME rebuild must happen before ldconfig in the installer.
+        soname_pos = self.script.index('/usr/lib64/${lib_name}.xllm')
+        ldconfig_pos = self.script.index('\n    ldconfig', soname_pos)
+        self.assertLess(soname_pos, ldconfig_pos)
+
     def test_xllm_pack_download_uses_one_fixed_archive(self):
         self.assertIn('ensure_xllm_pack() {', self.script)
         self.assertIn(

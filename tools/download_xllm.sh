@@ -207,7 +207,21 @@ install_xllm_runtime_libraries() {
             echo "Error: Required xLLM runtime library not found: $source_path" >&2
             exit 1
         fi
-        install -m 0755 "$source_path" "/usr/lib64/$lib_name"
+        # 归档端把 SONAME 库解引用成普通文件；而 ldconfig 要求 /usr/lib64
+        # 下的 SONAME 路径必须是符号链接，否则报 "is not a symbolic link"。
+        # 先落真实文件（版本化后缀），再建 SONAME 软链接指向它。
+        if [ "$lib_name" = "libasio.so" ]; then
+            install -m 0755 "$source_path" "/usr/lib64/$lib_name"
+            continue
+        fi
+        local real_version
+        real_version="$(readlink -f "$source_path" 2>/dev/null || true)"
+        if [ -n "$real_version" ] && [ "$real_version" != "$source_path" ]; then
+            install -m 0755 "$real_version" "/usr/lib64/$lib_name"
+        else
+            install -m 0755 "$source_path" "/usr/lib64/${lib_name}.xllm"
+            ln -sfn "${lib_name}.xllm" "/usr/lib64/$lib_name"
+        fi
     done
 
     ldconfig
