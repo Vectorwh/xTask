@@ -580,6 +580,13 @@ def apply_gedit_services_to_task_config(
       * benchmark.perf.encoder_url (case 36) -> encoder origin;
       * benchmark.acc.judge_endpoint (case 37) -> judge endpoint;
       * benchmark.acc generation_kwargs.encoder_url -> encoder origin.
+
+    ``deployment.xllm_service.route_gedit_traffic: true`` reroutes the gedit
+    benchmark endpoint (and the stage-1 encoder URL) to the xLLM-Service
+    router instead of the engine origins, so service-side gaps (missing
+    engine registration, unsupported /v1/image/generation route) fail the
+    case loudly. The switch is YAML-only: absent or false keeps the direct
+    engine path, so xTask behavior never depends on code changes.
     """
     runner = gedit_runner_origin(specs)
     host_port = runner.split("://", 1)[-1]
@@ -587,11 +594,25 @@ def apply_gedit_services_to_task_config(
     task_config["host_addr"] = host
     task_config["port"] = int(port_str)
 
+    deployment = task_config.get("deployment") or {}
+    control = deployment.get("xllm_service") or {}
+    if control.get("route_gedit_traffic") is True:
+        router_host = control.get("host") or deployment.get("master_host") or host
+        router_port = int(control.get("http_server_port", 38888) or 38888)
+        runner = f"http://{router_host}:{router_port}"
+        task_config["host_addr"] = router_host
+        task_config["port"] = router_port
+
     benchmark = task_config.get("benchmark") or {}
     if not isinstance(benchmark, dict):
         return
 
     encoder_url = gedit_encoder_url(specs)
+    if control.get("route_gedit_traffic") is True and encoder_url:
+        # Stage-1 embeddings go through the router too: /v1/embeddings is a
+        # service-native route, so this isolates the missing engine
+        # registration instead of only failing on the generation route.
+        encoder_url = runner
     if encoder_url:
         perf_cfg = benchmark.get("perf")
         if isinstance(perf_cfg, dict) and not perf_cfg.get("encoder_url"):

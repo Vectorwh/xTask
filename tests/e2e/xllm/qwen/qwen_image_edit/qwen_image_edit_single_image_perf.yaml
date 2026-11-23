@@ -41,6 +41,10 @@ userid: 1048
 serving_wait_time: 30
 
 deployment:
+  # service_routed: 同时部署 xllm-service 控制面（coordinator/router/etcd），
+  # 挂靠 gedit 已有服务容器（不新增引擎容器）。gedit 两段式请求仍直连
+  # encoder/dit 端点——router 不转发 gedit 私有协议，控制面仅为统一部署。
+  mode: service_routed
   xllm_service:
     service_binary_profile: auto
     host: 11.87.191.75
@@ -49,6 +53,16 @@ deployment:
     http_server_port: 38888
     rpc_server_port: 28889
     coordinator_http_server_port: 28888  # 端口与 PD 分离用例对齐: etcd 22389/22380, coordinator 28888/28889, router 38888/38889 (串行执行共用)
+    # gedit 两段式流量（阶段1 /v1/embeddings、阶段2 /v1/image/generation）
+    # 全部切到 xllm-service router：引擎注册缺失、路由不支持等服务侧问题
+    # 会直接在用例上 fail 暴露（当前预期 fail：DiT 引擎未实现 etcd 注册、
+    # router 无 image/generation 路由）。删掉或置 false 即恢复直连。
+    route_gedit_traffic: true
+    extra_service_args:
+      # diffusers 结构模型 tokenizer.json 在子目录，coordinator/Router 默认
+      # 在 --tokenizer_path 根（=model_path）找，找不到会回退 SentencePiece
+      # 并 FATAL。显式覆盖为子目录（与 joyai_video 用例同法）。
+      tokenizer_path: /export/home/models/Qwen-Image-Edit-2509/tokenizer
   encoder:
     device_ids: [7]
     port: 18007

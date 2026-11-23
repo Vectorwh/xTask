@@ -47,6 +47,15 @@ def validate_pd_deployment_authoring(task_config: Dict[str, Any]) -> None:
                 "deployment.service_instances requires "
                 "deployment.mode: service_routed"
             )
+        # gedit self-service cases (deployment.encoder/dit/judge) bring their
+        # own engine containers; a service_routed gedit case deploys only the
+        # xLLM-Service control plane on those containers, so the standard
+        # service_instances authoring list does not apply to them.
+        if service_instances is None and any(
+            isinstance(deployment.get(key), dict)
+            for key in ("encoder", "dit", "judge")
+        ):
+            return
         existing_instances = deployment.get("instances") or []
         if service_instances is None and existing_instances and all(
             isinstance(item, dict) and item.get("service_group")

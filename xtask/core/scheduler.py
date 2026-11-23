@@ -2204,9 +2204,12 @@ def _prepare_gedit_service_containers(context):
         # standard runtime-deps step for normal cases.  The gedit startup
         # script resolves the binary from the installed wheel first, so every
         # container sees the same freshly built artifact from pkg/xllm.
+        # service_routed gedit cases host the xLLM-Service control plane in
+        # these containers, so they also need the service binary installed.
         timeout = int(state.get("serving_ready_timeout") or 1800)
         download_cmd = _download_xllm_command(
-            install_service=False, task_config=task_config
+            install_service=bool(state.get("service_routed")),
+            task_config=task_config,
         )
         logging.info(
             "gedit service %s: preparing runtime deps (download_xllm)",
@@ -2244,6 +2247,50 @@ def _prepare_gedit_service_containers(context):
         )
 
     state["gedit_service_runtimes"] = service_runtimes
+
+    # service_routed gedit cases also deploy the xLLM-Service control plane
+    # (coordinator/router/etcd). The control-plane child processes need a
+    # host Engine container to live in; the gedit service containers already
+    # exist, so expose them through the same runtime shape XllmServiceCluster
+    # consumes (select_service_container reads plan.host/instance_name and
+    # the cluster executes via container_manager). Benchmark traffic still
+    # goes directly to encoder/dit endpoints — the gedit two-stage protocol
+    # is not routed through the router.
+    if state.get("service_routed"):
+        from types import SimpleNamespace
+
+        # The control plane resolves its own host from deployment.xllm_service
+        # (falling back to master_host); gedit's apply step already rewrote
+        # host_addr to the runner origin (127.0.0.1), so derive the adapter
+        # host from the same source the cluster topology uses.
+        control_cfg = (task_config.get("deployment") or {}).get("xllm_service") or {}
+        master_host = (
+            control_cfg.get("host")
+            or (task_config.get("deployment") or {}).get("master_host")
+            or task_config.get("host_addr")
+        )
+        adapted = []
+        for entry in service_runtimes:
+            spec = entry["spec"]
+            adapted.append(
+                SimpleNamespace(
+                    plan=SimpleNamespace(
+                        host=master_host,
+                        instance_name=entry["container_name"],
+                        is_benchmark_runner=bool(spec.benchmark_runner),
+                        is_local=True,
+                        output_dir=entry["output_dir"],
+                    ),
+                    container_config=entry["config"],
+                    container_manager=entry["manager"],
+                    container_id=entry["container_id"],
+                )
+            )
+        state["service_runtimes"] = adapted
+        logging.info(
+            "gedit + service_routed: %d gedit container(s) exposed as service runtimes",
+            len(adapted),
+        )
 
 
 def _prepare_container_multi_host(context):
@@ -3032,6 +3079,13 @@ def _start_and_wait_service(context):
         _start_and_wait_service_multi_host(context)
         return
     if state.get("gedit_specs"):
+        # service_routed gedit cases deploy the xLLM-Service control plane
+        # (coordinator/router/etcd) on top of the gedit containers before the
+        # gedit engines start; the cluster start logic below reuses the same
+        # XllmServiceCluster path as standard deployments. Benchmark traffic
+        # still goes directly to encoder/dit endpoints.
+        if state.get("service_routed"):
+            _start_gedit_control_plane(context)
         _start_and_wait_gedit_services(context)
         return
 
@@ -3084,6 +3138,38 @@ def _start_and_wait_service(context):
             f"Service health check failed: {health_result.stderr}"
         )
         logging.error(context.result["message"])
+
+
+def _start_gedit_control_plane(context):
+    """Start the xLLM-Service control plane for a service_routed gedit case.
+
+    Reuses the standard XllmServiceCluster path: coordinator/router/etcd child
+    processes are hosted by the gedit service containers exposed through
+    state["service_runtimes"] (see _prepare_gedit_service_containers). The
+    control plane is deployed for parity with other service_routed cases;
+    gedit benchmark traffic still goes directly to encoder/dit endpoints.
+    """
+    state = context.state
+    task_config = state["task_config"]
+    from xtask.core.xllm_service_cluster import XllmServiceCluster
+    from xtask.core.pd_control_service import build_xllm_service_config, begin_service_run
+
+    begin_service_run(task_config)
+    control_config = build_xllm_service_config(task_config)
+    if control_config.service_binary_profile == "legacy":
+        logging.warning(
+            "gedit control plane requires the split service binary; "
+            "skipping control-plane deployment"
+        )
+        return
+    try:
+        control_service = XllmServiceCluster(
+            task_config, state["service_runtimes"], context.output_file_path
+        )
+        state["xllm_control_service"] = control_service
+        control_service.start_with_retry()
+    except Exception as exc:
+        _fail_stage(context, f"gedit xLLM control service startup failed: {exc}")
 
 
 def _start_and_wait_gedit_services(context):
