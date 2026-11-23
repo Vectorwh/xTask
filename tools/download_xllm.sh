@@ -255,17 +255,32 @@ if { [ "$XLLM_PACK_LAYOUT" = release-v1 ] || ls "$XLLM_PKG_DIR"/xllm_npu*.whl >/
 
     # xLLM 二进制、算子库等从pack目录中获取
     # cp /workspace/pkg/xllm/xllm /usr/local/bin/
-    # 只清理 vendors 下非挂载点的条目：gedit 自服务容器会把宿主 vendors 的
-    # 子目录（custom_xllm_math）直接 bind mount 到该路径，rm 通配符命中挂载
-    # 点时 Device busy 使 set -e 提前退出（2026-11-21 gedit 首次走 wheel 安装
-    # 链路时踩中）。逐条目判断：挂载点跳过（cp 随后用同一份文件覆盖，结果
-    # 等价），其余照删。
+    # vendors 的清理与拷贝必须对 bind mount 安全：gedit 自服务容器会把宿主
+    # vendors 的子目录（custom_xllm_math）直接 bind mount 到安装目标下，此时
+    # 目标内该子目录与 cp 源 $XLLM_VENDORS_DIR 下同名目录是同一份文件（同一
+    # inode），逐条目处理：
+    #   1) 清理时跳过挂载点（rm 会命中挂载点报 Device busy 并在 set -e 下
+    #      退出，且穿透删除宿主源内容 —— 2026-11-21 踩中）；
+    #   2) 拷贝时跳过与源同 inode 的子目录（GNU cp 对 self->self 报
+    #      "are the same file" 并以非零退出 —— 2026-11-22 踩中）。
     VENDORS_TARGET="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors"
     for entry in "$VENDORS_TARGET"/*; do
         [ -e "$entry" ] || continue
-        mountpoint -q "$entry" || rm -rf "$entry"
+        if mountpoint -q "$entry"; then
+            continue
+        fi
+        rm -rf "$entry"
     done
-    yes | cp -rf "$XLLM_VENDORS_DIR"/* "$VENDORS_TARGET"/
+    for entry in "$XLLM_VENDORS_DIR"/*; do
+        [ -e "$entry" ] || continue
+        name="$(basename "$entry")"
+        target="$VENDORS_TARGET/$name"
+        if [ -e "$target" ] && mountpoint -q "$target"; then
+            # bind-mounted target overlays the same host content: skip copy
+            continue
+        fi
+        yes | cp -rf "$entry" "$target"
+    done
 
     # 使用同一个 Python 完成安装和路径查询，避免 pip/python3 指向不同环境。
     if ! XLLM_PYTHON=$(command -v python3); then
