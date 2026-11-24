@@ -612,8 +612,7 @@ def _execute_benchmark_with_npu_guard(container_manager, container_config,
                                       task_config, engine_config, benchmark_cmd,
                                       npu_card_ids=None, service_runtimes=None,
                                       guard_container_manager=None,
-                                      guard_container_config=None,
-                                      run_on_host=False):
+                                      guard_container_config=None):
     """执行 benchmark，并在执行期间守护 NPU 进程状态。
 
     单机时守护当前容器；多机时若传入 service_runtimes，则为每个实例容器
@@ -682,14 +681,8 @@ def _execute_benchmark_with_npu_guard(container_manager, container_config,
         timeout = (task_config or {}).get("benchmark_timeout")
         if timeout in (None, ""):
             timeout = engine_config.get("benchmark_timeout", 3600)
-        executor = (
-            container_manager.executor.run
-            if run_on_host
-            else lambda command, **kwargs: container_manager.exec_in_container(
-                container_config.container_name, command, **kwargs
-            )
-        )
-        benchmark_result = executor(
+        benchmark_result = container_manager.exec_in_container(
+            container_config.container_name,
             benchmark_cmd,
             timeout=int(timeout),
             abort_event=abort_event,
@@ -4426,11 +4419,6 @@ def _run_benchmark_and_process(context):
         init_entries = os.listdir(context.output_file_path)
         state["init_entries"] = init_entries
         service_runtimes = state.get("service_runtimes") if state.get("multi_host") else None
-        run_on_host = bool(
-            (task_config.get("deployment") or {})
-            .get("benchmark", {})
-            .get("run_on_host", False)
-        )
         if state.get("external_service"):
             benchmark_result = benchmark_container_manager.exec_in_container(
                 benchmark_container_config.container_name,
@@ -4446,7 +4434,6 @@ def _run_benchmark_and_process(context):
                 engine_config,
                 benchmark_cmd,
                 service_runtimes=service_runtimes,
-                run_on_host=run_on_host,
                 guard_container_manager=container_manager if _is_vbench_task(task_config) else None,
                 guard_container_config=container_config if _is_vbench_task(task_config) else None,
             )

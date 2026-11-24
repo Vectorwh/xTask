@@ -72,23 +72,25 @@ class ExistingContainerBenchmarkTests(unittest.TestCase):
         commands = [call.args[1] for call in manager.exec_in_container.call_args_list]
         self.assertEqual(commands, ["test -x '/build/xllm' && test -d '/build/triton'"])
 
-    def test_host_execution_preserves_case_timeout_and_separate_guard(self):
+    def test_container_execution_preserves_case_timeout_and_separate_guard(self):
         manager, guard_manager = mock.Mock(), mock.Mock()
         expected = SimpleNamespace(success=True, stderr="", exit_code=0)
-        manager.executor.run.return_value = expected
+        manager.exec_in_container.return_value = expected
         guard = mock.Mock(aborted_reason=None, abort_event=threading.Event())
         with mock.patch("xtask.utils.watchdog.NpuProcessGuard", return_value=guard) as factory:
             result = scheduler._execute_benchmark_with_npu_guard(
                 manager, SimpleNamespace(container_name="client"),
-                {"benchmark_timeout": 123}, {"benchmark_timeout": 60}, "run-perf",
+                {"benchmark_timeout": 123}, {"benchmark_timeout": 60},
+                "bash /workspace/outputs/case/run_evalscope_test.sh",
                 guard_container_manager=guard_manager,
                 guard_container_config=SimpleNamespace(container_name="service"),
-                run_on_host=True,
             )
             factory.call_args.kwargs["command_executor"]("npu-check")
         self.assertIs(result, expected)
-        manager.exec_in_container.assert_not_called()
-        self.assertEqual(manager.executor.run.call_args.kwargs["timeout"], 123)
+        manager.executor.run.assert_not_called()
+        self.assertEqual(manager.exec_in_container.call_args.args,
+                         ("client", "bash /workspace/outputs/case/run_evalscope_test.sh"))
+        self.assertEqual(manager.exec_in_container.call_args.kwargs["timeout"], 123)
         guard_manager.exec_in_container.assert_called_once_with(
             "service", "npu-check", timeout=30, capture_output=True,
         )

@@ -2243,9 +2243,25 @@ class GenerateXllmMultiHostTests(unittest.TestCase):
         for script in (absent, single_absent):
             self.assertNotIn("{STARTUP_ENVIRONMENT}", script)
             self.assertEqual(script.count("export HCCL_CONNECT_TIMEOUT=7200"), 1)
+            for variable in ("INF_NAN_MODE_ENABLE", "INF_NAN_MODE_FORCE_DISABLE", "PROFILING_MODE"):
+                self.assertNotIn(f"export {variable}=", script)
         self.assertIn("fi\n\n# 启动服务节点", absent)
         self.assertIn('chown "$USERID" "$LOG_DIR"\nIFS=', absent)
         self.assertIn('LOG_DIR="log"\nLOG_FILE="$LOG_DIR/node_0.log"', single_absent)
+
+    def test_qwen_environment_is_case_scoped(self):
+        config = {
+            "host_addr": "127.0.0.1", "device_ids": [0, 1], "world_size": 2,
+            "model_path": "/models/Qwen3.5-27B",
+        }
+        lines = ["export INF_NAN_MODE_ENABLE=0", "export INF_NAN_MODE_FORCE_DISABLE=1",
+                 'export PROFILING_MODE="dynamic"']
+        explicit = self._generate_script({**config, "startup_environment": lines})
+        unrelated = self._generate_script({**config, "model_path": "/models/OtherModel"})
+        for line in lines:
+            self.assertEqual(explicit.count(line), 1)
+            self.assertLess(explicit.index(line), explicit.index("IFS=',' read -r -a DEVICE_IDS"))
+            self.assertNotIn(line, unrelated)
 
     def test_startup_environment_is_inserted_after_template_defaults(self):
         config = {

@@ -1341,6 +1341,24 @@ deployment:
 
 YAML 布尔值建议写小写 `true/false`，列表按 YAML 列表写。不要把复杂 Python 表达式当作值传入。
 
+### xLLM 用例级启动环境 `startup_environment`
+
+模型专用环境变量应由用例显式配置，不写入公共启动模板。例如，经验证需要以下设置的 Qwen 用例，可在对应的 `deployment.instances[]` 中增加：
+
+```yaml
+deployment:
+  instances:
+  - name: master-0
+    startup_environment:
+    - export INF_NAN_MODE_ENABLE=0
+    - export INF_NAN_MODE_FORCE_DISABLE=1
+    - export PROFILING_MODE="dynamic"
+```
+
+以上为现有实例的配置片段，其他模型不继承这些设置。PD/统一路由用例可以在逻辑实例层配置，由其 nodes 继承；node 显式配置列表时整段替换。完整位置示例见 `28_startup_environment.yaml`。
+
+普通 LLM benchmark 在所选 runner 容器内执行，测试脚本、数据和 tokenizer 使用容器内的挂载路径；不要求宿主机存在 `/workspace/...`。
+
 ### PD 分离
 
 PD 可以简单理解为：Prefill 负责“读输入”，Decode 负责“生成输出”，两者组成一个服务。一个逻辑 P/D 实例下面可以再放多个服务器节点：
