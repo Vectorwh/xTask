@@ -1,0 +1,104 @@
+case_name: v012-qwen3.5_35b_a3b_xllm_perf_i32768_o200_sharegpt_pc95_bs14
+engine_type: xllm
+model_path: /export/home/models/Qwen3.5-35B-A3B
+served_model_name: master-agent-v1
+metrics: perf
+dataset_name: sharegpt
+dataset_format: json
+dataset_path: ''
+communication_backend: hccl
+userid: 1048
+serving_wait_time: 10
+serving_ready_timeout: 600
+
+# Converted from start_best_python_tp2ep2_h_all.sh (Qwen3.5-35B-A3B BF16,
+# Python model_impl TP2EP2, h_matmul_all variant, 2026-11-13 EvalScope
+# 32k/200 reference run). 32k input / 200 output / 95% packed shared prefix.
+# Baseline = output_tps_avg (per-request Output Token Throughput, measured 2026-11-23).
+benchmark:
+  benchmark_type: aisbench
+  perf:
+    case_type: performance
+    api_type: vllm_api_stream_chat_multiturn
+    dataset_conf: sharegpt_gen
+    infer_mode: last
+    input_len: 32768
+    output_len: 200
+    max_out_len: 200
+    batch_size: 14
+    num_prompts: 42
+    request_rate: 0
+    num_warmups: 3
+    prefix_cache:
+      enabled: true
+      prefix_source: dataset
+      prefix_assembly: packed
+      prefix_len: 31129
+      prefix_groups: 1
+      prefix_min_units: 40
+      seed_requests: true
+      order: grouped
+    baseline: 41.80
+    threshold: 0.10
+    generation_kwargs:
+      temperature: 0
+      ignore_eos: true
+
+deployment:
+  mode: service_routed
+  master_host: 127.0.0.1
+  xllm_service:
+    service_binary_profile: auto
+    host: 127.0.0.1
+    etcd_client_port: 22389
+    etcd_peer_port: 22380
+    http_server_port: 38888
+    rpc_server_port: 28889
+    coordinator_http_server_port: 28888  # aligned with PD cases: etcd 22389/22380, coordinator 28888/28889, router 38888/38889
+  benchmark:
+    runner_instance: default-0-node-0
+    router_instance: router-0
+    health_path: /health
+  service_instances:
+  - name: default-0
+    group_master_host: 127.0.0.1
+    progress_conn_port: 9590
+    serving_extensiable_param:
+      backend: llm
+      model_id: master-agent-v1
+      dp_size: 1
+      ep_size: 2
+      expert_parallel_degree: 0
+      max_memory_utilization: 0.85
+      max_cache_size: 8589934592
+      max_tokens_per_batch: 32768
+      max_tokens_per_chunk_for_prefill: 2048
+      max_seqs_per_batch: 32
+      max_concurrent_requests: 1024
+      block_size: 128
+      enable_prefix_cache: true
+      enable_chunked_prefill: true
+      enable_fia_decode: true
+      enable_schedule_overlap: true
+      enable_graph: true
+      enable_graph_double_buffer: false
+      acl_graph_decode_batch_size_limit: 32
+      enable_shm: true
+      input_shm_size: 512
+      output_shm_size: 128
+      task: generate
+      num_speculative_tokens: 0
+      random_seed: 20260903
+      npu_kernel_backend: TORCH
+      enable_flashcomm1: false
+      enable_mmrs_fusion: false
+      enable_mega_moe: false
+      enable_static_kernel: true
+      model_impl: python
+      enable_online_profile: true
+
+    nodes:
+    - name: default-0-node-0
+      host: 127.0.0.1
+      device_ids: [8, 9]
+      local_port: 8800
