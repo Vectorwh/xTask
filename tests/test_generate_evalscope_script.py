@@ -1,4 +1,6 @@
 import os
+import json
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +11,21 @@ from xtask.benchmarks.evalscope import generate_evalscope_script as generator
 
 
 class EvalscopeScriptGenerationTests(unittest.TestCase):
+    def test_accuracy_timeout_is_in_generation_config_and_explicit_value_wins(self):
+        for explicit in (None, 17):
+            with self.subTest(explicit_timeout=explicit), tempfile.TemporaryDirectory() as root:
+                task = self._task_config(metrics="acc")
+                if explicit is not None:
+                    task["benchmark"]["acc"]["generation_config"]["timeout"] = explicit
+                with mock.patch.object(generator, "path_mapping_in_container", side_effect=lambda path: path):
+                    generator.generate_evalscope_script(task, root)
+                script = (Path(root) / "run_evalscope_test.sh").read_text()
+                command = next(line for line in script.splitlines() if line.startswith("if ! evalscope eval "))
+                args = shlex.split(command.removeprefix("if ! ").removesuffix("; then"))
+                generation = json.loads(args[args.index("--generation-config") + 1])
+                self.assertEqual(generation["timeout"], 60 if explicit is None else explicit)
+                self.assertNotIn("--timeout", args)
+
     def _task_config(self, metrics="perf"):
         return {
             "benchmark": {

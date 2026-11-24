@@ -555,6 +555,18 @@ def merge_instance_task_config(
     if "startup_environment" in instance:
         cfg["startup_environment"] = copy.deepcopy(instance["startup_environment"])
 
+    # Existing-container deployments need these values preserved in the
+    # instance-merged config used by both the scheduler and script generator.
+    for field_name in (
+        "container_name",
+        "reuse_existing_container",
+        "xllm_binary",
+        "triton_binary_path",
+        "serving_ready_timeout",
+    ):
+        if instance.get(field_name) is not None:
+            cfg[field_name] = copy.deepcopy(instance[field_name])
+
     # Instance-level serving_extensiable_param is the primary source; top-level
     # remains a shared default for backward-compatible multihost YAMLs.
     base_ext = copy.deepcopy(cfg.get("serving_extensiable_param") or {})
@@ -1090,7 +1102,8 @@ def create_runtime_for_plan(
     container_config_builder,
 ) -> ServiceRuntime:
     executor = create_host_executor(plan.host)
-    # Unique container name per instance
+    # Reuse an explicitly named container when requested; otherwise retain the
+    # historical unique-name behavior for xTask-created containers.
     case_name = plan.instance_config.get("case_name", "xllm")
     import time
 
@@ -1122,9 +1135,13 @@ def create_runtime_for_plan(
                 "another runtime and uses enable_shm=true; "
                 "ipc_mode=private would isolate xLLM shared memory"
             )
-    container_config.container_name = (
-        f"{case_name}-{plan.instance_name}-{int(time.time())}"
-    )
+    requested_name = plan.instance_config.get("container_name")
+    if requested_name:
+        container_config.container_name = str(requested_name)
+    else:
+        container_config.container_name = (
+            f"{case_name}-{plan.instance_name}-{int(time.time())}"
+        )
     manager = ContainerManager(container_config, logging.getLogger(), executor=executor)
     return ServiceRuntime(
         plan=plan,

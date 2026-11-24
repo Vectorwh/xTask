@@ -612,7 +612,8 @@ def _execute_benchmark_with_npu_guard(container_manager, container_config,
                                       task_config, engine_config, benchmark_cmd,
                                       npu_card_ids=None, service_runtimes=None,
                                       guard_container_manager=None,
-                                      guard_container_config=None):
+                                      guard_container_config=None,
+                                      run_on_host=False):
     """执行 benchmark，并在执行期间守护 NPU 进程状态。
 
     单机时守护当前容器；多机时若传入 service_runtimes，则为每个实例容器
@@ -681,8 +682,14 @@ def _execute_benchmark_with_npu_guard(container_manager, container_config,
         timeout = (task_config or {}).get("benchmark_timeout")
         if timeout in (None, ""):
             timeout = engine_config.get("benchmark_timeout", 3600)
-        benchmark_result = container_manager.exec_in_container(
-            container_config.container_name,
+        executor = (
+            container_manager.executor.run
+            if run_on_host
+            else lambda command, **kwargs: container_manager.exec_in_container(
+                container_config.container_name, command, **kwargs
+            )
+        )
+        benchmark_result = executor(
             benchmark_cmd,
             timeout=int(timeout),
             abort_event=abort_event,
@@ -2357,6 +2364,10 @@ def _prepare_container_multi_host(context):
             ContainerConfigBuilder,
         )
         manager = runtime.container_manager
+        reuse_existing = bool(
+            plan.instance_config.get("reuse_existing_container")
+            or plan.instance_config.get("container_name")
+        )
         if not manager.check_runtime_available():
             _fail_stage(
                 context,
@@ -2365,33 +2376,49 @@ def _prepare_container_multi_host(context):
             state["service_runtimes"] = runtimes
             return
 
-        image_url = (
-            f"{runtime.container_config.image_home}:"
-            f"{runtime.container_config.image_name}"
-        )
-        if not manager.image_exists(image_url):
-            logging.info("Image %s not found on %s, pulling...", image_url, plan.host)
-            if not manager.pull_image(image_url):
-                _fail_stage(context, f"Failed to pull image {image_url} on {plan.host}")
+        if reuse_existing:
+            name = runtime.container_config.container_name
+            if not manager.container_exists(name):
+                _fail_stage(context, f"Existing container {name} not found on {plan.host}")
+                state["service_runtimes"] = runtimes
+                return
+            if not manager.container_is_running(name) and not manager.start_container(name):
+                _fail_stage(context, f"Failed to start existing container {name}")
+                state["service_runtimes"] = runtimes
+                return
+            inspect_result = manager.run_command(
+                f"{runtime.container_config.runtime} inspect -f '{{{{.Id}}}}' {name}",
+                timeout=30,
+            )
+            container_id = inspect_result.stdout.strip() or name
+            logging.info("Reusing existing container %s on %s", name, plan.host)
+        else:
+            image_url = (
+                f"{runtime.container_config.image_home}:"
+                f"{runtime.container_config.image_name}"
+            )
+            if not manager.image_exists(image_url):
+                logging.info("Image %s not found on %s, pulling...", image_url, plan.host)
+                if not manager.pull_image(image_url):
+                    _fail_stage(context, f"Failed to pull image {image_url} on {plan.host}")
+                    state["service_runtimes"] = runtimes
+                    return
+            try:
+                from xtask.utils.hccn_config import prepare_runtime_hccn
+                prepare_runtime_hccn(plan, runtime.container_config, manager.executor)
+            except (ValueError, OSError) as exc:
+                _fail_stage(context, str(exc))
                 state["service_runtimes"] = runtimes
                 return
 
-        try:
-            from xtask.utils.hccn_config import prepare_runtime_hccn
-            prepare_runtime_hccn(plan, runtime.container_config, manager.executor)
-        except (ValueError, OSError) as exc:
-            _fail_stage(context, str(exc))
-            state["service_runtimes"] = runtimes
-            return
-
-        success, container_id = manager.create_container()
-        if not success:
-            _fail_stage(
-                context,
-                f"Failed to create container for {plan.instance_name}: {container_id}",
-            )
-            state["service_runtimes"] = runtimes
-            return
+            success, container_id = manager.create_container()
+            if not success:
+                _fail_stage(
+                    context,
+                    f"Failed to create container for {plan.instance_name}: {container_id}",
+                )
+                state["service_runtimes"] = runtimes
+                return
         runtime.container_id = container_id
         if not manager.wait_for_container(
             runtime.container_config.container_name, timeout=60
@@ -2426,6 +2453,7 @@ def _prepare_container_multi_host(context):
             "container_name": runtime.container_config.container_name,
             "rank_start": plan.rank_start,
             "device_ids": plan.device_ids,
+            "reused_existing": reuse_existing,
         }
 
     # Compatibility: keep top-level container_* pointing at benchmark runner.
@@ -2706,6 +2734,27 @@ def _prepare_runtime_dependencies_multi_host(context):
             runtime.plan.instance_name,
             runtime.plan.host,
         )
+        runtime_cfg = getattr(runtime.plan, "instance_config", {}) or {}
+        reuse_existing = bool(
+            runtime_cfg.get("reuse_existing_container")
+            or runtime_cfg.get("container_name")
+        )
+        if reuse_existing:
+            binary = runtime_cfg.get("xllm_binary", "xllm")
+            triton_path = runtime_cfg.get("triton_binary_path")
+            checks = [f"test -x '{binary}'"]
+            if triton_path:
+                checks.append(f"test -d '{triton_path}'")
+            result = manager.exec_in_container(
+                name, " && ".join(checks), timeout=30
+            )
+            if not result.success:
+                raise RuntimeError(
+                    f"existing xLLM artifacts are invalid in {name}: "
+                    f"{result.stderr or result.stdout}"
+                )
+            logging.info("Validated existing xLLM artifacts in %s", name)
+            return True
         download_cmd = _download_xllm_command(any(runtime is item for item in control_runtimes), task_config)
         result = manager.exec_in_container(
             name, download_cmd, timeout=timeout
@@ -4377,6 +4426,11 @@ def _run_benchmark_and_process(context):
         init_entries = os.listdir(context.output_file_path)
         state["init_entries"] = init_entries
         service_runtimes = state.get("service_runtimes") if state.get("multi_host") else None
+        run_on_host = bool(
+            (task_config.get("deployment") or {})
+            .get("benchmark", {})
+            .get("run_on_host", False)
+        )
         if state.get("external_service"):
             benchmark_result = benchmark_container_manager.exec_in_container(
                 benchmark_container_config.container_name,
@@ -4392,6 +4446,7 @@ def _run_benchmark_and_process(context):
                 engine_config,
                 benchmark_cmd,
                 service_runtimes=service_runtimes,
+                run_on_host=run_on_host,
                 guard_container_manager=container_manager if _is_vbench_task(task_config) else None,
                 guard_container_config=container_config if _is_vbench_task(task_config) else None,
             )
@@ -5313,6 +5368,15 @@ def _cleanup_scheduler(context):
     )
     if context.state.get("multi_host"):
         runtimes = context.state.get("service_runtimes") or []
+        reused_runtimes = [
+            runtime for runtime in runtimes
+            if (
+                getattr(runtime.plan, "instance_config", {}) or {}
+            ).get("reuse_existing_container")
+            or (
+                getattr(runtime.plan, "instance_config", {}) or {}
+            ).get("container_name")
+        ]
         # Snapshot/separate shutdown logs only when the runtime will actually
         # be stopped.  In keep-alive mode, separating logs would remove the
         # live log directory from underneath still-running xLLM processes.
@@ -5337,6 +5401,12 @@ def _cleanup_scheduler(context):
         except (TypeError, ValueError):
             pd_stop_timeout = 15
         try:
+            # A reused container must survive cleanup, but its xLLM workers must
+            # stop so the next para_set trial can bind the same ports/devices.
+            if reused_runtimes:
+                _wait_xllm_processes_exit(
+                    reused_runtimes, grace_s=shutdown_grace_s
+                )
             if should_clean and control_service is not None:
                 # Keep etcd until the routed data-plane processes have exited.
                 # CLEAN_RESULTS=false deliberately leaves the complete runtime
