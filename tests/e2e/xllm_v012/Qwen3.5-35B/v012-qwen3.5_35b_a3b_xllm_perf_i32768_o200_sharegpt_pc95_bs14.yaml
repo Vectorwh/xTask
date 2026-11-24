@@ -1,4 +1,4 @@
-case_name: qwen3.5_35b_a3b_xllm_perf_i32768_o200_sharegpt_pc95_bs8
+case_name: v012-qwen3.5_35b_a3b_xllm_perf_i32768_o200_sharegpt_pc95_bs14
 engine_type: xllm
 model_path: /export/home/models/Qwen3.5-35B-A3B
 served_model_name: master-agent-v1
@@ -25,8 +25,8 @@ benchmark:
     input_len: 32768
     output_len: 200
     max_out_len: 200
-    batch_size: 8
-    num_prompts: 24
+    batch_size: 14
+    num_prompts: 42
     request_rate: 0
     num_warmups: 3
     prefix_cache:
@@ -38,7 +38,7 @@ benchmark:
       prefix_min_units: 40
       seed_requests: true
       order: grouped
-    baseline: 56.68
+    baseline: 41.80
     threshold: 0.10
     generation_kwargs:
       temperature: 0
@@ -94,9 +94,7 @@ deployment:
       enable_mmrs_fusion: false
       enable_mega_moe: false
       enable_static_kernel: true
-      static_kernel_cache_dir: /export/home/ext.wanghao231/xllm-012/static_cache
       model_impl: python
-      python_model_path: /export/home/ext.wanghao231/xllm-012/build/lib.linux-aarch64-cpython-312
       enable_online_profile: true
 
     nodes:

@@ -1,4 +1,4 @@
-case_name: qwen3.5_35b_a3b_xllm_perf_i32768_o200_sharegpt_pc95_bs4
+case_name: v012-qwen3.5_35b_a3b_xllm_perf_i32768_o200_sharegpt_pc95_bs4
 engine_type: xllm
 model_path: /export/home/models/Qwen3.5-35B-A3B
 served_model_name: master-agent-v1
@@ -94,9 +94,7 @@ deployment:
       enable_mmrs_fusion: false
       enable_mega_moe: false
       enable_static_kernel: true
-      static_kernel_cache_dir: /export/home/ext.wanghao231/xllm-012/static_cache
       model_impl: python
-      python_model_path: /export/home/ext.wanghao231/xllm-012/build/lib.linux-aarch64-cpython-312
       enable_online_profile: true
 
     nodes:
